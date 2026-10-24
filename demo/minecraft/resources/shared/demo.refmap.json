@@ -1,0 +1,18 @@
+{
+  "mappings": {
+    "demo.mc.mixin.TargetMixin": {
+      "compute": "Ldemo/mc/game/Target;compute(I)I",
+      "secretValue": "Ldemo/mc/game/Target;secretValue:I"
+    },
+    "demo.mc.mixin.StringTargetMixin": {
+      "mixinOrigin": "Ldemo/mc/game/Target;mixinOrigin()Ljava/lang/String;"
+    }
+  },
+  "data": {
+    "named": {
+      "demo.mc.mixin.TargetMixin": {
+        "compute": "Ldemo/mc/game/Target;compute(I)I"
+      }
+    }
+  }
+}

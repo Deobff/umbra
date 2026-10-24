@@ -1,0 +1,28 @@
+modLoader = "javafml"
+loaderVersion = "[47,)"
+license = "MIT"
+issueTrackerURL = "https://example.invalid/qa"
+
+[[mods]]
+modId = "qaforge"
+version = "1.0.0"
+displayName = "QA Forge Mod"
+description = "Umbra QA synthetic Forge modern mod fixture"
+authors = "umbra-qa"
+
+[[mixins]]
+config = "demo.mc.mixins.json"
+
+[[dependencies.qaforge]]
+modId = "forge"
+mandatory = true
+versionRange = "[47,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.qaforge]]
+modId = "minecraft"
+mandatory = true
+versionRange = "[1.20,1.21)"
+ordering = "NONE"
+side = "BOTH"

@@ -1,0 +1,28 @@
+modLoader = "javafml"
+loaderVersion = "[1,)"
+license = "MIT"
+issueTrackerURL = "https://example.invalid/qa"
+
+[[mods]]
+modId = "qaneo"
+version = "1.0.0"
+displayName = "QA NeoForge Mod"
+description = "Umbra QA synthetic NeoForge mod fixture"
+authors = "umbra-qa"
+
+[[mixins]]
+config = "demo.mc.mixins.json"
+
+[[dependencies.qaneo]]
+modId = "neoforge"
+type = "required"
+versionRange = "[1,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.qaneo]]
+modId = "minecraft"
+type = "required"
+versionRange = "[1.21,1.22)"
+ordering = "NONE"
+side = "BOTH"

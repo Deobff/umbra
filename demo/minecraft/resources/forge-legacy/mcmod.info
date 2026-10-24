@@ -1,0 +1,14 @@
+[
+  {
+    "modid": "qalegacy",
+    "name": "QA Legacy Mod",
+    "description": "Umbra QA synthetic Forge 1.12.2 mod fixture",
+    "version": "1.0",
+    "mcversion": "1.12.2",
+    "authorList": ["umbra-qa"],
+    "credits": "qa",
+    "logoFile": "",
+    "updateJSON": "",
+    "dependencies": []
+  }
+]

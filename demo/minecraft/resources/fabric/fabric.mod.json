@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "qa-fabric-mod",
+  "version": "1.0.0",
+  "name": "QA Fabric Mod",
+  "description": "Umbra QA synthetic Fabric mod fixture",
+  "authors": ["umbra-qa"],
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "demo.mc.fabric.FabricEntry::onInitialize"
+    ]
+  },
+  "mixins": [
+    {
+      "config": "demo.mc.mixins.json",
+      "environment": "*"
+    }
+  ],
+  "accessWidener": "demo.accesswidener",
+  "depends": {
+    "fabricloader": ">=0.15.0",
+    "minecraft": "~1.21.4",
+    "java": ">=21"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "demo.mc.mixin",
+  "compatibilityLevel": "JAVA_8",
+  "refmap": "demo.refmap.json",
+  "mixins": [
+    "TargetMixin",
+    "StringTargetMixin"
+  ],
+  "client": [],
+  "server": [],
+  "injectors": {
+    "defaultRequire": 1
+  },
+  "plugin": "demo.mc.mixin.DemoMixinPlugin"
+}
