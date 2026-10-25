@@ -292,8 +292,8 @@ public final class ModeOptionsPanel extends JPanel {
         try {
             if (control instanceof BooleanControl) {
                 ((BooleanControl) control).setValue("true".equals(value));
-            } else if (control instanceof NumberStepper) {
-                ((NumberStepper) control).setValueString(value);
+            } else if (control instanceof SliderControl) {
+                ((SliderControl) control).setValueExternal(value);
             } else if (control instanceof ChipChoice) {
                 ((ChipChoice) control).setValue(value);
             } else if (control instanceof GlassTextField) {
@@ -305,17 +305,35 @@ public final class ModeOptionsPanel extends JPanel {
         control.repaint();
     }
 
-    private JComponent controlFor(GuiModeOptions.Spec spec) {
+    private JComponent controlFor(final GuiModeOptions.Spec spec) {
         switch (spec.kind) {
             case BOOL:
                 return new BooleanControl(spec);
             case INT:
-                return new NumberStepper(spec);
+                final SliderControl slider = new SliderControl(spec,
+                        parseInt(values.get(spec.id),
+                                parseInt(spec.defaultValue, spec.min)));
+                slider.setListener(new SliderControl.Listener() {
+                    @Override
+                    public void valueChanged(int value) {
+                        onSliderChanged(spec.id, value);
+                    }
+                });
+                return slider;
             case ENUM:
                 return new ChipChoice(spec);
             default:
                 return new OptionTextField(spec);
         }
+    }
+
+    /** Slider user edit: store the value, mark Custom, no callback loops. */
+    private void onSliderChanged(String id, int value) {
+        values.put(id, String.valueOf(value));
+        if (!"Custom".equals(selectedMode())) {
+            updateMode("Custom");
+        }
+        repaint();
     }
 
     public JComponent control(String id) {
@@ -609,72 +627,34 @@ public final class ModeOptionsPanel extends JPanel {
         }
     }
 
-    /** Integer stepper with minus/plus zones. */
-    public final class NumberStepper extends JPanel {
-        private final GuiModeOptions.Spec spec;
-        private int number;
-
-        NumberStepper(GuiModeOptions.Spec spec) {
-            this.spec = spec;
-            setOpaque(false);
-            number = parseInt(values.get(spec.id), parseInt(spec.defaultValue, spec.min));
-            setPreferredSize(new Dimension(132, 26));
-            setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-            addMouseListener(new MouseAdapter() {
-                @Override
-                public void mouseClicked(MouseEvent e) {
-                    int delta = e.getX() < getWidth() / 2 ? -1 : 1;
-                    int next = clamp(number + delta * Math.max(1, NumberStepper.this.spec.step));
-                    ModeOptionsPanel.this.setValue(NumberStepper.this.spec.id,
-                            String.valueOf(next));
-                }
-            });
-            getAccessibleContext().setAccessibleName(spec.label);
-            setToolTipText(spec.label + " (" + spec.min + ".." + spec.max + ")");
-        }
-
-        private int clamp(int value) {
-            return Math.max(spec.min, Math.min(spec.max, value));
-        }
-
-        void setValueString(String value) {
-            number = clamp(parseInt(value, parseInt(spec.defaultValue, spec.min)));
-            repaint();
-        }
-
-        public int number() {
-            return number;
-        }
-
-        @Override
-        protected void paintComponent(Graphics graphics) {
-            Graphics2D g = (Graphics2D) graphics.create();
-            try {
-                Tokens.prepare(g);
-                int w = getWidth();
-                int h = getHeight();
-                RoundRectangle2D.Float shape = new RoundRectangle2D.Float(
-                        0.5f, 0.5f, w - 1f, h - 1f, 20f, 20f);
-                g.setColor(new Color(0, 0, 0, 10));
-                g.fill(shape);
-                g.setColor(Tokens.LINE);
-                g.setStroke(new java.awt.BasicStroke(1f));
-                g.draw(shape);
-                g.setColor(Tokens.FG2);
-                g.setFont(Tokens.serifBold(14f));
-                g.drawString("\u2212", 10f, h / 2f + 5f);
-                g.drawString("+", w - 18f, h / 2f + 5f);
-                String text = String.valueOf(number);
-                Font valueFont = Tokens.mono(12.5f);
-                FontMetrics metrics = g.getFontMetrics(valueFont);
-                Tokens.drawCentered(g, text, valueFont, Tokens.FG, w / 2f,
-                        (h - metrics.getHeight()) / 2f + metrics.getAscent(), 0f);
-            } finally {
-                g.dispose();
-            }
-        }
+    /** Slider accessor by spec id (used by tests). */
+    public SliderControl slider(String id) {
+        JComponent control = controls.get(id);
+        return control instanceof SliderControl ? (SliderControl) control : null;
     }
 
+    public int sliderCount() {
+        int count = 0;
+        for (JComponent control : controls.values()) {
+            if (control instanceof SliderControl) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * Deterministic simulated mid-animation frame for offscreen screenshots:
+     * every slider thumb is placed at the given 0..1 fraction of its track.
+     */
+    public void setSliderProgressForScreenshot(float progress) {
+        for (JComponent control : controls.values()) {
+            if (control instanceof SliderControl) {
+                ((SliderControl) control).setDisplayedProgressForScreenshot(progress);
+            }
+        }
+        repaint();
+    }
     /** Horizontal chip selector for enum values. */
     public final class ChipChoice extends JPanel {
         private final GuiModeOptions.Spec spec;
@@ -832,6 +812,7 @@ public final class ModeOptionsPanel extends JPanel {
         private final List<int[]> bounds = new ArrayList<int[]>();
         private String selected;
         private String hover;
+        private float selectionGlow = 1f;
         private final Listener listener;
 
         ModeChips(String initial, Listener listener) {
@@ -897,6 +878,14 @@ public final class ModeOptionsPanel extends JPanel {
                 return;
             }
             selected = mode;
+            selectionGlow = 0f;
+            Animation.animate(this, 160, new Animation.Frame() {
+                @Override
+                public void frame(float eased) {
+                    selectionGlow = eased;
+                    repaint();
+                }
+            });
             repaint();
             if (listener != null) {
                 listener.selected(mode);
@@ -943,9 +932,11 @@ public final class ModeOptionsPanel extends JPanel {
                     RoundRectangle2D.Float shape = new RoundRectangle2D.Float(
                             b[0], b[1], b[2], b[3], 28f, 28f);
                     if (isSelected) {
-                        g.setColor(Tokens.alpha(Color.WHITE, 0.94f));
+                        float alpha = 0.58f + 0.36f * selectionGlow;
+                        g.setColor(Tokens.alpha(Color.WHITE, alpha));
                         g.fill(shape);
-                        g.setColor(Tokens.LINE_STRONG);
+                        g.setColor(Tokens.alpha(Tokens.LINE_STRONG, 0.7f
+                                + 0.3f * selectionGlow));
                         g.setStroke(new java.awt.BasicStroke(1f));
                         g.draw(shape);
                     } else if (isHover) {

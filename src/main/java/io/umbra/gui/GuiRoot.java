@@ -11,6 +11,7 @@ import io.umbra.core.engine.UmbraVerifier;
 import io.umbra.core.util.Log;
 import io.umbra.gui.theme.Aurora;
 import io.umbra.gui.theme.Tokens;
+import io.umbra.gui.ui.Animation;
 import io.umbra.gui.ui.Buttons;
 import io.umbra.gui.ui.ConsolePanel;
 import io.umbra.gui.ui.GroupSection;
@@ -34,7 +35,6 @@ import javax.swing.JPanel;
 import javax.swing.KeyStroke;
 import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
-import javax.swing.Timer;
 import javax.swing.filechooser.FileNameExtensionFilter;
 import java.awt.AlphaComposite;
 import java.awt.Color;
@@ -101,16 +101,7 @@ public final class GuiRoot extends JPanel implements Aurora.SurfaceProvider {
     private int surfaceWidth;
     private int surfaceHeight;
 
-    private boolean animations;
-    private boolean entranceRunning;
-    private long entranceStarted;
-    private Timer entranceTimer;
-    private final Map<Component, Entrance> entrances = new LinkedHashMap<Component, Entrance>();
-    private final Map<Component, Integer> entranceOffsets = new LinkedHashMap<Component, Integer>();
-
     private boolean drawerOpen;
-    private int statsNudge;
-    private Timer statsNudgeTimer;
 
     private String preset = GuiPresets.DEFAULT;
     /** Per-mode detailed values (mode options dialog); authoritative for the run. */
@@ -138,7 +129,9 @@ public final class GuiRoot extends JPanel implements Aurora.SurfaceProvider {
 
     public GuiRoot(boolean animations) {
         super(null);
-        this.animations = animations;
+        if (!animations) {
+            Animation.setEnabled(false);
+        }
         this.prefs = GuiPrefs.load();
         setOpaque(true);
 
@@ -189,7 +182,6 @@ public final class GuiRoot extends JPanel implements Aurora.SurfaceProvider {
         add(statusBar);
 
         buildSidebar();
-        collectEntrances();
         bindActions();
         installShortcuts();
         installDrawerDismiss();
@@ -200,9 +192,6 @@ public final class GuiRoot extends JPanel implements Aurora.SurfaceProvider {
         resetStats();
         updateStatusIdle();
         updateFacts();
-        if (animations) {
-            startEntrance();
-        }
         getAccessibleContext().setAccessibleName("Umbra");
         getAccessibleContext().setAccessibleDescription(
                 "Umbra " + GuiConfig.VERSION + " Java bytecode protection");
@@ -233,12 +222,6 @@ public final class GuiRoot extends JPanel implements Aurora.SurfaceProvider {
             @Override
             public void run() {
                 onUserToggle();
-            }
-        });
-        sidebar.setGroupToggleListener(new Runnable() {
-            @Override
-            public void run() {
-                triggerStatsNudge();
             }
         });
     }
@@ -780,6 +763,17 @@ public final class GuiRoot extends JPanel implements Aurora.SurfaceProvider {
      * {@code --screenshot --run} QA path. Returns false when validation fails.
      */
     boolean startTrial(Path input, Path output, long seed, String presetName) {
+        return startTrialWithDetails(input, output, seed, presetName, null);
+    }
+
+    /**
+     * Like {@link #startTrial} but applies detail overrides (mode option spec
+     * ids or option keys) before starting, switching the mode to Custom. Used by
+     * the QA path that changes a slider value for a real protection run.
+     */
+    boolean startTrialWithDetails(Path input, Path output, long seed,
+                                  String presetName,
+                                  Map<String, String> detailOverrides) {
         trialMode = true;
         applyingPreset = true;
         try {
@@ -787,6 +781,20 @@ public final class GuiRoot extends JPanel implements Aurora.SurfaceProvider {
             outputRow.setText(output.toAbsolutePath().normalize().toString());
             topBar.seedField().setText(String.valueOf(seed));
             applyPresetStatesOnly(presetName);
+            if (detailOverrides != null && !detailOverrides.isEmpty()) {
+                Map<String, String> values = currentDetailedValues();
+                for (Map.Entry<String, String> entry : detailOverrides.entrySet()) {
+                    GuiModeOptions.Spec spec = GuiModeOptions.spec(entry.getKey());
+                    if (spec == null) {
+                        spec = GuiModeOptions.specForKey(entry.getKey());
+                    }
+                    if (spec != null) {
+                        values.put(spec.id, GuiModeOptions.normalize(spec,
+                                entry.getValue()));
+                    }
+                }
+                applyModeOptions(values, "Custom");
+            }
         } finally {
             applyingPreset = false;
         }
@@ -1397,34 +1405,11 @@ public final class GuiRoot extends JPanel implements Aurora.SurfaceProvider {
     @Override
     protected void paintChildren(Graphics graphics) {
         // Standard Swing child painting: it owns translation and clipping,
-        // which is what keeps on-screen repaints crisp.
+        // which is what keeps on-screen repaints crisp. Component-level
+        // transitions are driven by the shared Animation helper, so the window
+        // itself is never repainted by a background animation timer.
         super.paintChildren(graphics);
-        if (entranceRunning) {
-            paintEntranceVeil(graphics);
-        }
         paintDrawerOverlay(graphics);
-    }
-
-    /** Soft paper-coloured veil that fades the staggered slide-in reveal. */
-    private void paintEntranceVeil(Graphics graphics) {
-        long elapsed = System.currentTimeMillis() - entranceStarted;
-        float raw = Tokens.clamp01((elapsed - 80L) / 900f);
-        float alpha = (1f - Tokens.easeOut(raw)) * 0.92f;
-        if (elapsed > 1500L) {
-            stopEntrance();
-            repaint();
-            return;
-        }
-        if (alpha <= 0.004f) {
-            return;
-        }
-        Graphics2D g = (Graphics2D) graphics.create();
-        try {
-            g.setColor(Tokens.alpha(Tokens.CANVAS, alpha));
-            g.fillRect(0, 0, getWidth(), getHeight());
-        } finally {
-            g.dispose();
-        }
     }
 
     private void paintDrawerOverlay(Graphics graphics) {
@@ -1453,83 +1438,10 @@ public final class GuiRoot extends JPanel implements Aurora.SurfaceProvider {
         }
     }
 
-    private void collectEntrances() {
-        entrances.put(topBar, new Entrance(100, -8));
-        entrances.put(sidebar, new Entrance(250, 12));
-        entrances.put(console, new Entrance(400, 12));
-        entrances.put(rightColumn, new Entrance(500, 12));
-        entrances.put(statusBar, new Entrance(700, -8));
-    }
-
-    private void startEntrance() {
-        entranceStarted = System.currentTimeMillis();
-        entranceRunning = true;
-        entranceTimer = new Timer(16, new ActionListener() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                updateEntranceOffsets();
-                doLayout();
-                repaint();
-            }
-        });
-        entranceTimer.start();
-    }
-
-    /** Recomputes the staggered slide offsets of the five top-level regions. */
-    private void updateEntranceOffsets() {
-        long elapsed = System.currentTimeMillis() - entranceStarted;
-        boolean moving = false;
-        for (Component child : getComponents()) {
-            Entrance entrance = entrances.get(child);
-            if (entrance == null) {
-                continue;
-            }
-            float raw = Tokens.clamp01((elapsed - entrance.delay) / 900f);
-            float progress = Tokens.easeOut(raw);
-            int offset = Math.round(entrance.offsetY * (1f - progress));
-            entranceOffsets.put(child, Integer.valueOf(offset));
-            if (raw < 1f) {
-                moving = true;
-            }
-        }
-        if (!moving) {
-            entranceOffsets.clear();
-            if (entranceTimer != null) {
-                entranceTimer.stop();
-                entranceTimer = null;
-            }
-            entranceRunning = false;
-            doLayout();
-            repaint();
-        }
-    }
-
-    private int entranceOffset(Component child) {
-        Integer offset = entranceOffsets.get(child);
-        return offset == null ? 0 : offset.intValue();
-    }
-
-    private void stopEntrance() {
-        entranceRunning = false;
-        if (entranceTimer != null) {
-            entranceTimer.stop();
-            entranceTimer = null;
-        }
-        entranceOffsets.clear();
-        doLayout();
-        repaint();
-    }
-
     /** Disables all motion and jumps to the final state (screenshots, tests). */
     void setAnimationsEnabled(boolean enabled) {
-        animations = enabled;
+        Animation.setEnabled(enabled);
         if (!enabled) {
-            stopEntrance();
-            if (statsNudgeTimer != null) {
-                statsNudgeTimer.stop();
-                statsNudgeTimer = null;
-            }
-            statsNudge = 0;
             sidebar.setAnimationsEnabled(false);
             sidebar.settle();
             console.setAnimationsEnabled(false);
@@ -1538,13 +1450,12 @@ public final class GuiRoot extends JPanel implements Aurora.SurfaceProvider {
             sidebar.setAnimationsEnabled(true);
             console.setAnimationsEnabled(true);
             rightColumn.setAnimationsEnabled(true);
-            startEntrance();
         }
         repaint();
     }
 
     boolean animationsEnabled() {
-        return animations;
+        return Animation.enabled();
     }
 
     /* ---------------------------------------------------------------- layout */
@@ -1575,61 +1486,24 @@ public final class GuiRoot extends JPanel implements Aurora.SurfaceProvider {
         int consoleHeight = Math.max(120, middleHeight - Tokens.PAD * 2);
         int stripHeight = mode == Mode.WIDE ? 0 : RightColumn.STRIP_HEIGHT + Tokens.GAP;
 
-        topBar.setBounds(0, entranceOffset(topBar), w, Tokens.TOP_BAR);
-        statusBar.setBounds(0, h - Tokens.STATUS_BAR + entranceOffset(statusBar), w,
-                Tokens.STATUS_BAR);
+        topBar.setBounds(0, 0, w, Tokens.TOP_BAR);
+        statusBar.setBounds(0, h - Tokens.STATUS_BAR, w, Tokens.STATUS_BAR);
         if (compact) {
             // The drawer overlays the content instead of pushing it, so the
             // underlying layout stays exactly as in the closed state.
-            sidebar.setBounds(drawerOpen ? 0 : -Tokens.SIDEBAR_WIDTH,
-                    middleY + entranceOffset(sidebar), Tokens.SIDEBAR_WIDTH, middleHeight);
+            sidebar.setBounds(drawerOpen ? 0 : -Tokens.SIDEBAR_WIDTH, middleY,
+                    Tokens.SIDEBAR_WIDTH, middleHeight);
         } else {
-            sidebar.setBounds(0, middleY + entranceOffset(sidebar), Tokens.SIDEBAR_WIDTH,
-                    middleHeight);
+            sidebar.setBounds(0, middleY, Tokens.SIDEBAR_WIDTH, middleHeight);
         }
-        console.setBounds(consoleX, consoleY + entranceOffset(console), consoleWidth,
+        console.setBounds(consoleX, consoleY, consoleWidth,
                 Math.max(120, consoleHeight - stripHeight));
-        int statsY = mode == Mode.WIDE
-                ? middleY + statsNudge
-                : consoleY + consoleHeight - RightColumn.STRIP_HEIGHT + statsNudge;
         rightColumn.setBounds(mode == Mode.WIDE ? w - Tokens.STATS_WIDTH : consoleX,
-                statsY + entranceOffset(rightColumn),
+                mode == Mode.WIDE ? middleY
+                        : consoleY + consoleHeight - RightColumn.STRIP_HEIGHT,
                 mode == Mode.WIDE ? Tokens.STATS_WIDTH : consoleWidth,
                 mode == Mode.WIDE ? middleHeight : RightColumn.STRIP_HEIGHT);
     }
-
-    /**
-     * Micro-interaction from the spec: expanding a group nudges the statistics
-     * column down 4px and back once (the interface "breathes").
-     */
-    private void triggerStatsNudge() {
-        if (!animations) {
-            return;
-        }
-        if (statsNudgeTimer != null) {
-            statsNudgeTimer.stop();
-        }
-        final long started = System.currentTimeMillis();
-        statsNudgeTimer = new Timer(15, new ActionListener() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                float t = Math.min(1f, (System.currentTimeMillis() - started) / 200f);
-                statsNudge = Math.round(4f * (float) Math.sin(Math.PI * t));
-                revalidate();
-                repaint();
-                if (t >= 1f) {
-                    statsNudge = 0;
-                    if (statsNudgeTimer != null) {
-                        statsNudgeTimer.stop();
-                        statsNudgeTimer = null;
-                    }
-                    revalidate();
-                }
-            }
-        });
-        statsNudgeTimer.start();
-    }
-
     @Override
     public Dimension getPreferredSize() {
         return new Dimension(1440, 900);
@@ -1707,17 +1581,6 @@ public final class GuiRoot extends JPanel implements Aurora.SurfaceProvider {
             return error.getClass().getSimpleName();
         }
         return message;
-    }
-
-    /** One component's entrance animation timing. */
-    private static final class Entrance {
-        final int delay;
-        final int offsetY;
-
-        Entrance(int delay, int offsetY) {
-            this.delay = delay;
-            this.offsetY = offsetY;
-        }
     }
 
     /** Result of one protection run. */

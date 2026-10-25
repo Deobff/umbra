@@ -26,7 +26,7 @@ public final class GuiConfigTest {
     public static void main(String[] args) throws Exception {
         Path dir = Files.createTempDirectory("umbra-gui-test-");
         try {
-            check("3.2.0".equals(GuiConfig.VERSION), "GUI version is 3.2.0");
+            check("3.2.1".equals(GuiConfig.VERSION), "GUI version is 3.2.1");
 
             Path input = dir.resolve("app.jar");
             Files.write(input, new byte[0]);
@@ -246,6 +246,48 @@ public final class GuiConfigTest {
                     "YAML round trip keeps the detailed anti-LLM decoy count");
             check("true".equals(detailedReloaded.get("typeConfusion.enabled")),
                     "YAML round trip keeps the type-confusion mode default");
+            // WS24: integer mode options are sliders; ranges and defaults are
+            // consistent for every mode, and the panel exposes them.
+            int integerSpecs = 0;
+            for (io.umbra.gui.GuiModeOptions.Spec spec
+                    : io.umbra.gui.GuiModeOptions.allSpecs()) {
+                if (spec.kind != io.umbra.gui.GuiModeOptions.Kind.INT) {
+                    continue;
+                }
+                integerSpecs++;
+                check(spec.min < spec.max, "slider range is ordered: " + spec.id);
+                check(spec.step > 0, "slider step is positive: " + spec.id);
+                int defaultValue = Integer.parseInt(spec.defaultValue);
+                check(defaultValue >= spec.min && defaultValue <= spec.max,
+                        "slider default inside its range: " + spec.id);
+                check((spec.max - spec.min) % spec.step == 0,
+                        "slider range is a multiple of the step: " + spec.id);
+                for (String mode : new String[]{"Light", "Balanced", "Aggressive",
+                        "Maximum", "Nocturne"}) {
+                    int value = Integer.parseInt(io.umbra.gui.GuiModeOptions
+                            .defaults(mode).get(spec.id));
+                    check(value >= spec.min && value <= spec.max,
+                            "mode " + mode + " slider value in range: " + spec.id);
+                }
+            }
+            check(integerSpecs >= 15, "catalogue has slider-backed integer options");
+            io.umbra.gui.ui.ModeOptionsPanel sliderPanel =
+                    new io.umbra.gui.ui.ModeOptionsPanel(
+                            io.umbra.gui.GuiModeOptions.defaults("Balanced"),
+                            "Balanced", null);
+            sliderPanel.setSize(io.umbra.gui.ui.ModeOptionsPanel.SHEET_WIDTH,
+                    io.umbra.gui.ui.ModeOptionsPanel.SHEET_HEIGHT);
+            io.umbra.gui.GuiScreenshot.layoutTree(sliderPanel);
+            check(sliderPanel.sliderCount() == integerSpecs,
+                    "panel builds one slider per integer spec");
+            check(sliderPanel.slider("string.strength") != null,
+                    "string strength slider exists");
+            check(sliderPanel.slider("decompilerNoise.level") != null,
+                    "decompiler noise slider exists");
+            check(sliderPanel.slider("flowObfuscation.maxInstructions") != null,
+                    "flow instruction slider exists");
+            check("200".equals(String.valueOf(io.umbra.gui.ui.Animation.MAX_DURATION)),
+                    "interactive animation duration is capped at 200ms");
         } finally {
             delete(dir);
         }

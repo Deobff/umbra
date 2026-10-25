@@ -27,6 +27,7 @@ public class PrimaryButton extends JButton {
 
     private static final int RADIUS = Tokens.RADIUS_CONTROL;
     private int progress = -1;
+    private final HoverState hoverState;
 
     public PrimaryButton(String text) {
         super(text);
@@ -40,6 +41,7 @@ public class PrimaryButton extends JButton {
         setHorizontalAlignment(SwingConstants.CENTER);
         setPreferredSize(new Dimension(96, 36));
         setMinimumSize(new Dimension(96, 36));
+        hoverState = new HoverState(this);
         updateAccessible();
     }
 
@@ -79,22 +81,17 @@ public class PrimaryButton extends JButton {
             Tokens.prepare(g);
             int w = getWidth();
             int h = getHeight();
-            boolean pressed = getModel().isPressed();
-            // active: scale(0.98) in the spec; Swing approximates it by drawing
-            // the pressed fill one pixel inside the button bounds.
-            float inset = pressed ? 1f : 0f;
+            // active: scale(0.98) approximated by easing the pressed fill one
+            // pixel inside the bounds; hover darkening is animated as well.
+            float inset = hoverState.press();
             Shape shape = new RoundRectangle2D.Float(inset, inset, w - inset * 2f,
                     h - inset * 2f, RADIUS * 2f, RADIUS * 2f);
             Color fill;
             if (!isEnabled()) {
                 fill = Tokens.alpha(Tokens.ACCENT, 0.40f);
-            } else if (getModel().isPressed()) {
-                fill = Tokens.mix(Tokens.ACCENT, Color.BLACK, 0.10f);
-            } else if (getModel().isRollover()) {
-                // Hover darkens slightly on the light canvas, per the spec.
-                fill = Tokens.mix(Tokens.ACCENT, Color.BLACK, 0.04f);
             } else {
-                fill = Tokens.ACCENT;
+                fill = Tokens.mix(Tokens.ACCENT, Color.BLACK,
+                        0.04f * hoverState.hover() + 0.06f * hoverState.press());
             }
             g.setColor(fill);
             g.fill(shape);
@@ -137,6 +134,8 @@ public class PrimaryButton extends JButton {
 /** A borderless quiet text button used for secondary actions. */
 class QuietButton extends JButton {
 
+    private final HoverState hoverState;
+
     QuietButton(String text) {
         super(text);
         setOpaque(false);
@@ -151,6 +150,7 @@ class QuietButton extends JButton {
         getAccessibleContext().setAccessibleName(text);
         setPreferredSize(new Dimension(
                 Math.round(Tokens.measure(text, Tokens.serif(Tokens.BODY_SIZE), 0f)) + 20, 28));
+        hoverState = new HoverState(this);
     }
 
     @Override
@@ -160,8 +160,9 @@ class QuietButton extends JButton {
             Tokens.prepare(g);
             int w = getWidth();
             int h = getHeight();
-            if (isEnabled() && (getModel().isRollover() || getModel().isPressed())) {
-                g.setColor(new Color(0, 0, 0, getModel().isPressed() ? 14 : 9));
+            if (isEnabled() && hoverState.hover() > 0.01f) {
+                g.setColor(new Color(0, 0, 0,
+                        Math.round((9f + 5f * hoverState.press()) * hoverState.hover())));
                 g.fill(new RoundRectangle2D.Float(0f, 0f, w, h, 16f, 16f));
             }
             String label = getText() == null ? "" : getText();
@@ -169,7 +170,7 @@ class QuietButton extends JButton {
             FontMetrics metrics = g.getFontMetrics(font);
             float baseline = (h - metrics.getHeight()) / 2f + metrics.getAscent();
             Color color = isEnabled()
-                    ? (getModel().isRollover() ? Tokens.FG : Tokens.FG2)
+                    ? Tokens.mix(Tokens.FG2, Tokens.FG, hoverState.hover())
                     : Tokens.alpha(Tokens.FG3, 0.7f);
             Tokens.drawCentered(g, label, font, color, w / 2f, baseline, 0f);
             if (isFocusOwner()) {
@@ -195,6 +196,7 @@ class IconButton extends JButton {
 
     private final int icon;
     private final String accessibleName;
+    private final HoverState hoverState;
 
     IconButton(int icon, String accessibleName, String tooltip) {
         this.icon = icon;
@@ -212,6 +214,7 @@ class IconButton extends JButton {
         setToolTipText(tooltip);
         getAccessibleContext().setAccessibleName(accessibleName);
         getAccessibleContext().setAccessibleDescription(tooltip);
+        hoverState = new HoverState(this);
     }
 
     @Override
@@ -221,12 +224,13 @@ class IconButton extends JButton {
             Tokens.prepare(g);
             int w = getWidth();
             int h = getHeight();
-            if (isEnabled() && (getModel().isRollover() || getModel().isPressed())) {
-                g.setColor(new Color(0, 0, 0, getModel().isPressed() ? 18 : 10));
+            if (isEnabled() && hoverState.hover() > 0.01f) {
+                g.setColor(new Color(0, 0, 0,
+                        Math.round((10f + 8f * hoverState.press()) * hoverState.hover())));
                 g.fill(new RoundRectangle2D.Float(0f, 0f, w, h, 16f, 16f));
             }
             Color color = !isEnabled() ? Tokens.alpha(Tokens.FG3, 0.5f)
-                    : (getModel().isRollover() ? Tokens.FG2 : Tokens.FG3);
+                    : Tokens.mix(Tokens.FG3, Tokens.FG2, hoverState.hover());
             double size = 16d;
             double x = (w - size) / 2d;
             double y = (h - size) / 2d;

@@ -6,7 +6,6 @@ import io.umbra.gui.theme.Tokens;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
-import javax.swing.Timer;
 import java.awt.BasicStroke;
 import java.awt.Color;
 import java.awt.Cursor;
@@ -15,8 +14,6 @@ import java.awt.FontMetrics;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
 import java.awt.Rectangle;
-import java.awt.event.ActionEvent;
-import java.awt.event.ActionListener;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
@@ -49,9 +46,9 @@ public class GroupSection extends JPanel {
     private final List<Row> rows = new ArrayList<Row>();
     private boolean expanded;
     private float reveal;
-    private Timer animation;
+    private Animation.Handle animation;
     private boolean animations = true;
-    private boolean hoverHeader;
+    private float headerHover;
     private boolean showSeparator = true;
     private Runnable onToggle;
 
@@ -107,30 +104,30 @@ public class GroupSection extends JPanel {
 
     private void startAnimation(final float target) {
         stopAnimation();
-        final long started = System.currentTimeMillis();
         final float from = reveal;
-        animation = new Timer(15, new ActionListener() {
+        animation = Animation.animate(this, 200, new Animation.Frame() {
             @Override
-            public void actionPerformed(ActionEvent e) {
-                float t = Math.min(1f, (System.currentTimeMillis() - started) / 400f);
-                reveal = from + (target - from) * Tokens.easeOut(t);
+            public void frame(float eased) {
+                reveal = from + (target - from) * eased;
                 recomputePreferredSize();
                 if (getParent() != null) {
                     getParent().revalidate();
                 }
                 repaint();
-                if (t >= 1f) {
-                    stopAnimation();
-                    reveal = target;
-                    recomputePreferredSize();
-                    if (getParent() != null) {
-                        getParent().revalidate();
-                    }
-                    repaint();
-                }
             }
         });
-        animation.start();
+    }
+
+    /** Animated hover wash for the 44px group header. */
+    private void animateHeaderHover(final float target) {
+        final float from = headerHover;
+        Animation.animate(this, 140, new Animation.Frame() {
+            @Override
+            public void frame(float eased) {
+                headerHover = from + (target - from) * eased;
+                repaint();
+            }
+        });
     }
 
     private void stopAnimation() {
@@ -224,8 +221,8 @@ public class GroupSection extends JPanel {
         try {
             Tokens.prepare(g);
             int w = getWidth();
-            if (hoverHeader && reveal == 0f) {
-                g.setColor(new Color(0, 0, 0, 8));
+            if (headerHover > 0.01f && reveal == 0f) {
+                g.setColor(new Color(0, 0, 0, Math.round(9f * headerHover)));
                 g.fill(new RoundRectangle2D.Float(8f, 6f, w - 16f, HEADER_HEIGHT - 12f,
                         12f, 12f));
             }
@@ -305,14 +302,12 @@ public class GroupSection extends JPanel {
 
                 @Override
                 public void mouseEntered(MouseEvent e) {
-                    hoverHeader = true;
-                    repaint();
+                    animateHeaderHover(1f);
                 }
 
                 @Override
                 public void mouseExited(MouseEvent e) {
-                    hoverHeader = false;
-                    repaint();
+                    animateHeaderHover(0f);
                 }
             });
             addKeyListener(new KeyAdapter() {
@@ -402,8 +397,8 @@ public class GroupSection extends JPanel {
                 Tokens.prepare(g);
                 int w = getWidth();
                 int h = getHeight();
-                if (hoverHeader) {
-                    g.setColor(new Color(0, 0, 0, 6));
+                if (headerHover > 0.01f) {
+                    g.setColor(new Color(0, 0, 0, Math.round(9f * headerHover)));
                     g.fill(new RoundRectangle2D.Float(8f, 6f, w - 16f, h - 12f, 12f, 12f));
                 }
                 java.awt.Font font = Tokens.serifFor(title, Tokens.GROUP_SIZE,

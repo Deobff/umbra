@@ -4,16 +4,24 @@ import io.umbra.core.config.ConfigLoader;
 import io.umbra.core.config.UmbraConfig;
 import io.umbra.gui.theme.Tokens;
 import io.umbra.gui.ui.ConsolePanel;
+import io.umbra.gui.ui.Animation;
 import io.umbra.gui.ui.ModeOptionsPanel;
+import io.umbra.gui.ui.SliderControl;
 import io.umbra.gui.ui.GroupSection;
 import io.umbra.gui.ui.RightColumn;
 import io.umbra.gui.ui.StatCard;
 
 import javax.imageio.ImageIO;
+import javax.swing.JComponent;
+import javax.swing.KeyStroke;
+import javax.swing.SwingUtilities;
 import java.awt.Component;
+import java.awt.event.MouseEvent;
+import java.awt.event.MouseWheelEvent;
 import java.awt.Container;
 import java.awt.Dimension;
 import java.awt.Rectangle;
+
 import java.awt.image.BufferedImage;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -44,6 +52,7 @@ public final class GuiSelfTest {
     public static int run() {
         failures.clear();
         checks = 0;
+        Animation.setEnabled(false);
         Path temp = null;
         try {
             temp = Files.createTempDirectory("umbra-gui-selftest-");
@@ -60,6 +69,7 @@ public final class GuiSelfTest {
                 checkResponsive(root);
                 checkShortcutsAndPrefs(root, temp);
                 checkModeOptions(root, temp);
+                checkSliders(root, temp);
                 checkOptionsAndConfig(temp);
                 checkScreenshot(root, temp);
             } finally {
@@ -548,6 +558,262 @@ public final class GuiSelfTest {
         GuiScreenshot.layoutTree(root);
         check("Balanced".equals(root.presetSelector().selected()),
                 "mode options self-test restores the Balanced preset");
+    }
+    private static void checkSliders(final GuiRoot root, Path temp) throws Exception {
+        // Shared animation helper contract.
+        check(Animation.MAX_DURATION == 200, "interactive animations are capped at 200ms");
+        check(!Animation.enabled(), "animations are disabled for the headless self-test");
+        final boolean[] finished = new boolean[1];
+        Animation.Handle handle = Animation.animate(root.consolePanel(), 160,
+                new Animation.Frame() {
+                    @Override
+                    public void frame(float eased) {
+                        finished[0] = eased >= 1f;
+                    }
+                });
+        check(!handle.isRunning(), "disabled animations finish immediately");
+        check(finished[0], "disabled animation still delivers its final frame");
+        Animation.stopAll();
+
+        // A fresh panel for deterministic slider interaction.
+        final ModeOptionsPanel panel = new ModeOptionsPanel(
+                GuiModeOptions.defaults("Balanced"), "Balanced", null);
+        panel.setSize(ModeOptionsPanel.SHEET_WIDTH, ModeOptionsPanel.SHEET_HEIGHT);
+        GuiScreenshot.layoutTree(panel);
+        int integerSpecs = 0;
+        for (GuiModeOptions.Spec spec : GuiModeOptions.allSpecs()) {
+            if (spec.kind != GuiModeOptions.Kind.INT) {
+                continue;
+            }
+            integerSpecs++;
+            SliderControl slider = panel.slider(spec.id);
+            check(slider != null, "INT option has a slider: " + spec.id);
+            if (slider != null) {
+                check(slider.spec() == spec, "slider spec matches: " + spec.id);
+                check(slider.value() >= spec.min && slider.value() <= spec.max,
+                        "slider value in range: " + spec.id);
+                check(slider.trackBounds().width > 20, "slider has a usable track: "
+                        + spec.id);
+            }
+        }
+        check(integerSpecs > 15, "mode options has " + integerSpecs + " slider options");
+        check(panel.sliderCount() == integerSpecs,
+                "every INT spec is rendered by a slider (" + panel.sliderCount()
+                        + "/" + integerSpecs + ")");
+        final SliderControl strength = panel.slider("string.strength");
+        check(strength != null, "string strength slider exists");
+
+        // Simulated click at the right end jumps to the maximum value and marks
+        // the mode Custom.
+        Rectangle track = strength.trackBounds();
+        final int maxX = track.x + track.width - 1;
+        final int midY = track.y + track.height / 2;
+        dispatchMouse(panel, strength, MouseEvent.MOUSE_PRESSED, maxX, midY, 1, false);
+        dispatchMouse(panel, strength, MouseEvent.MOUSE_RELEASED, maxX, midY, 1, false);
+        check("3".equals(panel.value("string.strength")),
+                "click at the right end sets string.strength=3 (was "
+                        + panel.value("string.strength") + ")");
+        check("Custom".equals(panel.selectedMode()), "slider click marks the mode Custom");
+        check(strength.value() == 3, "slider thumb value is 3");
+
+        // Press + drag from the left end to 2/3 of the track.
+        int pressed = track.x + 1;
+        final int twoThirds = track.x + Math.round(track.width * 0.66f);
+        dispatchMouse(panel, strength, MouseEvent.MOUSE_PRESSED, pressed, midY, 1, false);
+        dispatchMouse(panel, strength, MouseEvent.MOUSE_DRAGGED, twoThirds, midY, 1, true);
+        dispatchMouse(panel, strength, MouseEvent.MOUSE_RELEASED, twoThirds, midY, 1, false);
+        check("2".equals(panel.value("string.strength")),
+                "drag to two thirds lands on strength 2 (was "
+                        + panel.value("string.strength") + ")");
+        check(strength.value() == 2, "slider value follows the drag immediately");
+
+        // Mouse wheel steps by the spec step.
+        final SliderControl flow = panel.slider("flowObfuscation.maxInstructions");
+        check(flow != null, "flow maxInstructions slider exists");
+        int beforeWheel = flow.value();
+        final int wheelX = flow.trackBounds().x + 10;
+        dispatchWheel(flow, wheelX, midY, -1);
+        check(flow.value() == Math.min(flow.spec().max,
+                        beforeWheel + flow.spec().step),
+                "mouse wheel increases the value by the step");
+        check(String.valueOf(flow.value()).equals(panel.value("flowObfuscation.maxInstructions")),
+                "wheel value reaches the panel value map");
+
+        // Keyboard End jumps to max via the WHEN_FOCUSED action map.
+        Object endKey = flow.getInputMap(JComponent.WHEN_FOCUSED)
+                .get(KeyStroke.getKeyStroke("END"));
+        check(endKey != null, "slider binds End");
+        flow.getActionMap().get(endKey).actionPerformed(
+                new java.awt.event.ActionEvent(flow, 0, "END"));
+        check(flow.value() == flow.spec().max, "End key jumps the slider to max");
+        Object homeKey = flow.getInputMap(JComponent.WHEN_FOCUSED)
+                .get(KeyStroke.getKeyStroke("HOME"));
+        flow.getActionMap().get(homeKey).actionPerformed(
+                new java.awt.event.ActionEvent(flow, 0, "HOME"));
+        check(flow.value() == flow.spec().min, "Home key jumps the slider to min");
+        check(flow.getToolTipText() != null
+                        && flow.getToolTipText().indexOf(String.valueOf(flow.spec().min)) >= 0,
+                "slider tooltip shows the range");
+
+        // Reset restores the mode defaults and lands exactly (no lingering).
+        panel.setMode("Maximum");
+        check("3".equals(panel.value("string.strength")),
+                "Maximum mode populates strength 3");
+        check(panel.slider("string.strength").value() == 3,
+                "mode change updates the slider value");
+        panel.setValue("string.strength", "1");
+        check(panel.slider("string.strength").value() == 1,
+                "external setValue updates the slider");
+        check("Custom".equals(panel.selectedMode()), "reset test starts from Custom");
+        panel.resetToModeDefaults();
+        check("Maximum".equals(panel.selectedMode()),
+                "reset returns to the last non-custom mode");
+        check(panel.slider("string.strength").value() == 3,
+                "reset lands on the Maximum default");
+        check("3".equals(panel.value("string.strength")), "reset updates the value map");
+
+        // OK delivers the slider value through the dialog result map.
+        final Map<String, String> captured = new LinkedHashMap<String, String>();
+        final String[] capturedMode = new String[1];
+        ModeOptionsPanel dialogPanel = new ModeOptionsPanel(
+                GuiModeOptions.defaults("Balanced"), "Balanced",
+                new ModeOptionsPanel.Listener() {
+                    @Override
+                    public void ok(ModeOptionsPanel source) {
+                        captured.putAll(source.values());
+                        capturedMode[0] = source.selectedMode();
+                    }
+
+                    @Override
+                    public void cancel(ModeOptionsPanel source) {
+                        // no-op
+                    }
+                });
+        dialogPanel.setSize(ModeOptionsPanel.SHEET_WIDTH, ModeOptionsPanel.SHEET_HEIGHT);
+        GuiScreenshot.layoutTree(dialogPanel);
+        SliderControl dialogSlider = dialogPanel.slider("decompilerNoise.level");
+        Rectangle dialogTrack = dialogSlider.trackBounds();
+        dispatchMouse(dialogPanel, dialogSlider, MouseEvent.MOUSE_PRESSED,
+                dialogTrack.x + dialogTrack.width - 1,
+                dialogTrack.y + dialogTrack.height / 2, 1, false);
+        dispatchMouse(dialogPanel, dialogSlider, MouseEvent.MOUSE_RELEASED,
+                dialogTrack.x + dialogTrack.width - 1,
+                dialogTrack.y + dialogTrack.height / 2, 1, false);
+        check("4".equals(dialogPanel.value("decompilerNoise.level")),
+                "noise slider reaches level 4");
+        ModeOptionsPanel.Listener listener = new ModeOptionsPanel.Listener() {
+            @Override
+            public void ok(ModeOptionsPanel source) {
+                captured.clear();
+                captured.putAll(source.values());
+                capturedMode[0] = source.selectedMode();
+            }
+
+            @Override
+            public void cancel(ModeOptionsPanel source) {
+                // no-op
+            }
+        };
+        dialogPanel.setListener(listener);
+        listener.ok(dialogPanel);
+        check("4".equals(captured.get("decompilerNoise.level")),
+                "OK map carries the slider edit (" + captured.get(
+                        "decompilerNoise.level") + ")");
+        check("Custom".equals(capturedMode[0]), "OK map reports Custom after a slider edit");
+
+        // Rendering a slider-heavy group must still be deterministic and quick.
+        panel.setMode("Maximum");
+        panel.scrollToSection("Flow");
+        Path sliderPng = temp.resolve("sliders.png");
+        long started = System.currentTimeMillis();
+        GuiScreenshot.writePanel(panel, ModeOptionsPanel.SHEET_WIDTH,
+                ModeOptionsPanel.SHEET_HEIGHT, sliderPng);
+        long elapsed = System.currentTimeMillis() - started;
+        check(Files.size(sliderPng) > 15000, "slider sheet renders (" + Files.size(sliderPng)
+                + " bytes)");
+        check(elapsed < 10000, "slider sheet render is quick (" + elapsed + " ms)");
+        Animation.stopAll();
+        check(!Animation.enabled(), "headless self-test keeps animations disabled");
+
+        // Live scheduling check: a real animation completes on the EDT, stops
+        // its timer and clamps an oversized duration to the 200ms cap.
+        Animation.setEnabled(true);
+        final float[] lastFrame = new float[]{0f};
+        long liveStart = System.currentTimeMillis();
+        Animation.Handle live = Animation.animate(panel, 5000, new Animation.Frame() {
+            @Override
+            public void frame(float eased) {
+                lastFrame[0] = eased;
+            }
+        });
+        long deadline = System.currentTimeMillis() + 2000L;
+        while (live.isRunning() && System.currentTimeMillis() < deadline) {
+            try {
+                SwingUtilities.invokeAndWait(new Runnable() {
+                    @Override
+                    public void run() {
+                        // Pump the shared animation timer.
+                    }
+                });
+            } catch (Exception ignored) {
+                // Event queue teardown; loop condition handles it.
+            }
+            try {
+                Thread.sleep(20L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        long liveElapsed = System.currentTimeMillis() - liveStart;
+        check(!live.isRunning(), "live animation stops when settled");
+        check(lastFrame[0] >= 1f, "live animation delivers its final frame");
+        check(liveElapsed < 1000L, "oversized animation is clamped to the 200ms cap ("
+                + liveElapsed + " ms)");
+        Animation.stopAll();
+        Animation.setEnabled(false);
+    }
+
+    private static void dispatchMouse(final ModeOptionsPanel panel,
+                                      final JComponent target, final int id,
+                                      final int x, final int y,
+                                      final int clickCount, final boolean drag) {
+        try {
+            SwingUtilities.invokeAndWait(new Runnable() {
+                @Override
+                public void run() {
+                    java.awt.event.MouseEvent event = new java.awt.event.MouseEvent(
+                            target, id, System.currentTimeMillis(),
+                            drag ? java.awt.event.InputEvent.BUTTON1_DOWN_MASK : 0,
+                            x, y, clickCount, false,
+                            java.awt.event.MouseEvent.BUTTON1);
+                    target.dispatchEvent(event);
+                    panel.doLayout();
+                }
+            });
+        } catch (Exception e) {
+            failures.add("simulated mouse interaction failed: " + e);
+        }
+    }
+
+    private static void dispatchWheel(final JComponent target, final int x, final int y,
+                                      final int rotation) {
+        try {
+            SwingUtilities.invokeAndWait(new Runnable() {
+                @Override
+                public void run() {
+                    java.awt.event.MouseWheelEvent event =
+                            new java.awt.event.MouseWheelEvent(target,
+                                    java.awt.event.MouseEvent.MOUSE_WHEEL,
+                                    System.currentTimeMillis(), 0, x, y, 0, false,
+                                    java.awt.event.MouseWheelEvent.WHEEL_UNIT_SCROLL,
+                                    1, rotation);
+                    target.dispatchEvent(event);
+                }
+            });
+        } catch (Exception e) {
+            failures.add("simulated wheel interaction failed: " + e);
+        }
     }
     private static void check(boolean condition, String message) {
         checks++;

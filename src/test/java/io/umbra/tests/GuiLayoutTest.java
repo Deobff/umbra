@@ -77,6 +77,22 @@ public final class GuiLayoutTest {
                     "mode options screenshot is 900x700");
             check(options.controlCount() >= 100,
                     "mode options panel builds the full control set");
+            int integerSpecs = 0;
+            for (io.umbra.gui.GuiModeOptions.Spec spec
+                    : io.umbra.gui.GuiModeOptions.allSpecs()) {
+                if (spec.kind == io.umbra.gui.GuiModeOptions.Kind.INT) {
+                    integerSpecs++;
+                }
+            }
+            check(options.sliderCount() == integerSpecs,
+                    "every integer option uses a slider (" + options.sliderCount()
+                            + "/" + integerSpecs + ")");
+            options.scrollToSection("Flow");
+            Path sliderPng = temp.resolve("mode-options-sliders.png");
+            GuiScreenshot.writePanel(options, io.umbra.gui.ui.ModeOptionsPanel.SHEET_WIDTH,
+                    io.umbra.gui.ui.ModeOptionsPanel.SHEET_HEIGHT, sliderPng);
+            check(Files.isRegularFile(sliderPng), "slider-heavy sheet renders");
+            check(Files.size(sliderPng) > 15000, "slider-heavy sheet has content");
         } finally {
             System.setProperty("user.home", oldHome == null ? "" : oldHome);
             delete(temp);

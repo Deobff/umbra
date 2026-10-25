@@ -11,6 +11,9 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -48,6 +51,7 @@ public final class GuiMain {
             return;
         }
         if (options.selfTest) {
+            io.umbra.gui.ui.Animation.setEnabled(false);
             int failures = GuiSelfTest.run();
             System.out.println(failures == 0 ? "SELF-TEST OK"
                     : "SELF-TEST FAILED (" + failures + " failure(s))");
@@ -92,6 +96,7 @@ public final class GuiMain {
 
     private static int runScreenshot(Options options) {
         Path png = Paths.get(options.screenshot).toAbsolutePath();
+        io.umbra.gui.ui.Animation.setEnabled(false);
         GuiRoot root = new GuiRoot(false);
         root.setAnimationsEnabled(false);
         root.setSize(options.width, options.height);
@@ -127,8 +132,17 @@ public final class GuiMain {
         Path output = Paths.get(options.output).toAbsolutePath();
         long seed = options.seed == null ? 23303L : options.seed.longValue();
         String preset = options.preset == null ? GuiPresets.DEFAULT : options.preset;
+        Map<String, String> detailOverrides = new LinkedHashMap<String, String>();
+        for (String detail : options.details) {
+            int split = detail.indexOf('=');
+            if (split > 0 && split < detail.length() - 1) {
+                detailOverrides.put(detail.substring(0, split).trim(),
+                        detail.substring(split + 1).trim());
+            }
+        }
         root.setTrialMode(true);
-        boolean started = root.startTrial(input, output, seed, preset);
+        boolean started = root.startTrialWithDetails(input, output, seed, preset,
+                detailOverrides);
         if (!started) {
             GuiScreenshot.layoutTree(root);
             try {
@@ -188,12 +202,16 @@ public final class GuiMain {
     /** Renders the per-mode detailed option sheet offscreen (QA evidence). */
     private static int runModeOptionsScreenshot(Options options) {
         Path png = Paths.get(options.optionsScreenshot).toAbsolutePath();
+        io.umbra.gui.ui.Animation.setEnabled(false);
         String mode = options.preset == null ? GuiPresets.DEFAULT : options.preset;
         Map<String, String> values = GuiModeOptions.defaults(mode);
         io.umbra.gui.ui.ModeOptionsPanel panel =
                 new io.umbra.gui.ui.ModeOptionsPanel(values, mode, null);
         if (options.optionsScroll != null) {
             panel.scrollToSection(options.optionsScroll);
+        }
+        if (options.sliderProgress >= 0f) {
+            panel.setSliderProgressForScreenshot(options.sliderProgress);
         }
         try {
             GuiScreenshot.writePanel(panel, io.umbra.gui.ui.ModeOptionsPanel.SHEET_WIDTH,
@@ -295,6 +313,10 @@ public final class GuiMain {
                 options.optionsScreenshot = value;
             } else if ("--options-scroll".equals(arg)) {
                 options.optionsScroll = value;
+            } else if ("--options-slider-progress".equals(arg)) {
+                options.sliderProgress = parseFloat(value, options);
+            } else if ("--detail".equals(arg)) {
+                options.details.add(value);
             } else if ("--input".equals(arg)) {
                 options.input = value;
             } else if ("--output".equals(arg)) {
@@ -322,7 +344,8 @@ public final class GuiMain {
 
     private static boolean isValueOption(String arg) {
         return "--screenshot".equals(arg) || "--options-screenshot".equals(arg)
-                || "--options-scroll".equals(arg) || "--input".equals(arg)
+                || "--options-scroll".equals(arg) || "--options-slider-progress".equals(arg)
+                || "--detail".equals(arg) || "--input".equals(arg)
                 || "--output".equals(arg)
                 || "--preset".equals(arg) || "--seed".equals(arg) || "--width".equals(arg)
                 || "--height".equals(arg) || "--delay".equals(arg);
@@ -346,6 +369,15 @@ public final class GuiMain {
         }
     }
 
+    private static float parseFloat(String text, Options options) {
+        try {
+            return Float.parseFloat(text.trim());
+        } catch (NumberFormatException e) {
+            options.error = "Invalid number for --options-slider-progress: " + text;
+            return -1f;
+        }
+    }
+
     private static void printUsage() {
         System.out.println("Umbra " + GuiConfig.VERSION + " desktop GUI");
         System.out.println();
@@ -366,6 +398,8 @@ public final class GuiMain {
         System.out.println("  --drawer             open the compact configuration drawer (narrow width)");
         System.out.println("  --options-screenshot <png>  render the per-mode detailed options sheet (900x700)");
         System.out.println("  --options-scroll <group>    scroll the rendered sheet to a group (e.g. Native)");
+        System.out.println("  --options-slider-progress <0..1>  deterministic simulated slider frame");
+        System.out.println("  --detail <id=value>  override a mode option before --run (repeatable)");
         System.out.println("  --self-test          structural/accessibility/YAML self test");
     }
 
@@ -373,6 +407,8 @@ public final class GuiMain {
         String screenshot;
         String optionsScreenshot;
         String optionsScroll;
+        float sliderProgress = -1f;
+        final List<String> details = new ArrayList<String>();
         String input;
         String output;
         String preset;

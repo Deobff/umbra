@@ -1,6 +1,7 @@
 package io.umbra.gui;
 
 import io.umbra.gui.theme.Tokens;
+import io.umbra.gui.ui.Animation;
 
 import javax.imageio.ImageIO;
 import javax.swing.JComponent;
@@ -32,21 +33,34 @@ public final class GuiScreenshot {
         return renderPanel(root, width, height);
     }
 
-    /** Renders any panel tree at the requested size. */
+    /**
+     * Renders any panel tree at the requested size.
+     *
+     * <p>Animations are forced off around the render so screenshots are exactly
+     * deterministic (no pending transition can change a control between the
+     * layout pass and the paint pass); the previous animation switch is
+     * restored afterwards.</p>
+     */
     public static BufferedImage renderPanel(JComponent panel, int width, int height) {
         int w = Math.max(320, width);
         int h = Math.max(240, height);
-        panel.setSize(w, h);
-        layoutTree(panel);
-        BufferedImage image = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
-        Graphics2D g = image.createGraphics();
+        boolean previousAnimations = Animation.enabled();
+        Animation.setEnabled(false);
         try {
-            Tokens.prepare(g);
-            panel.paint(g);
+            panel.setSize(w, h);
+            layoutTree(panel);
+            BufferedImage image = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+            Graphics2D g = image.createGraphics();
+            try {
+                Tokens.prepare(g);
+                panel.paint(g);
+            } finally {
+                g.dispose();
+            }
+            return image;
         } finally {
-            g.dispose();
+            Animation.setEnabled(previousAnimations);
         }
-        return image;
     }
 
     /** Renders the main window panel tree and writes it as a PNG file. */

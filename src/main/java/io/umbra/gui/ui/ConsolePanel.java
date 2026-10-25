@@ -7,7 +7,6 @@ import javax.swing.JScrollPane;
 import javax.swing.JViewport;
 import javax.swing.Scrollable;
 import javax.swing.SwingUtilities;
-import javax.swing.Timer;
 import java.awt.Color;
 import java.awt.Cursor;
 import java.awt.Dimension;
@@ -16,8 +15,6 @@ import java.awt.FontMetrics;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
 import java.awt.Rectangle;
-import java.awt.event.ActionEvent;
-import java.awt.event.ActionListener;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -187,8 +184,8 @@ public class ConsolePanel extends GlassPanel {
         private int wrappedWidth = -1;
         private boolean dirty = true;
         private boolean animations = true;
-        private long lastLineAt;
-        private Timer lineAnimation;
+        private float lineFade = 1f;
+        private Animation.Handle lineAnimation;
         private final Font logFont = Tokens.mono(LOG_SIZE);
         private final Font stampFont = Tokens.mono(LOG_SIZE);
 
@@ -227,30 +224,24 @@ public class ConsolePanel extends GlassPanel {
             LogEntry entry = new LogEntry(LocalTime.now(), level, message);
             entries.add(entry);
             dirty = true;
-            lastLineAt = System.currentTimeMillis();
+            lineFade = 0f;
             revalidate();
             repaint();
             scrollToEnd();
             if (animations) {
-                startLineAnimation();
-            }
-        }
-
-        private void startLineAnimation() {
-            if (lineAnimation != null) {
-                return;
-            }
-            lineAnimation = new Timer(16, new ActionListener() {
-                @Override
-                public void actionPerformed(ActionEvent e) {
-                    if (System.currentTimeMillis() - lastLineAt >= 300L) {
-                        lineAnimation.stop();
-                        lineAnimation = null;
-                    }
-                    repaint();
+                if (lineAnimation != null) {
+                    lineAnimation.stop();
                 }
-            });
-            lineAnimation.start();
+                lineAnimation = Animation.animate(this, 180, new Animation.Frame() {
+                    @Override
+                    public void frame(float eased) {
+                        lineFade = eased;
+                        repaint();
+                    }
+                });
+            } else {
+                lineFade = 1f;
+            }
         }
 
         void settle() {
@@ -258,7 +249,7 @@ public class ConsolePanel extends GlassPanel {
                 lineAnimation.stop();
                 lineAnimation = null;
             }
-            lastLineAt = 0L;
+            lineFade = 1f;
         }
 
         void clear() {
@@ -416,13 +407,9 @@ public class ConsolePanel extends GlassPanel {
                     int baseline = y + (LINE_HEIGHT - stampMetrics.getHeight()) / 2
                             + stampMetrics.getAscent();
                     float alpha = 1f;
-                    if (animations) {
-                        long since = System.currentTimeMillis() - lastLineAt;
-                        if (since >= 0 && since < 300 && i >= visuals.size() - 1) {
-                            float t = since / 300f;
-                            alpha = Math.min(1f, t);
-                            baseline += Math.round(4f * (1f - t));
-                        }
+                    if (i >= visuals.size() - 1 && lineFade < 1f) {
+                        alpha = lineFade;
+                        baseline += Math.round(4f * (1f - lineFade));
                     }
                     if (line.first) {
                         g.setComposite(java.awt.AlphaComposite.getInstance(

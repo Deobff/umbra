@@ -201,7 +201,7 @@ function Build-Dist {
         'Manifest-Version: 1.0',
         'Main-Class: io.umbra.cli.Main',
         'Implementation-Title: Umbra',
-        'Implementation-Version: 3.2.0',
+        'Implementation-Version: 3.2.1',
         'Created-By: Umbra build.ps1'
     )
     [System.IO.File]::WriteAllText($manifest, ($lines -join "`r`n") + "`r`n", (New-Object System.Text.UTF8Encoding($false)))
@@ -217,7 +217,7 @@ function Build-Package {
     $distJar = Join-Path $Dist 'umbra.jar'
     if (-not (Test-Path $distJar)) { Build-Dist }
     Write-Step 'package'
-    $version = '3.2.0'
+    $version = '3.2.1'
     $stage = Join-Path $Build 'package'
     if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $stage | Out-Null

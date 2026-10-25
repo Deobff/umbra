@@ -83,7 +83,9 @@ integration.
   `nocturne`, framework presets), keep rules and incremental builds.
 - Desktop GUI with per-mode detailed option sheets (names, data, flow,
   virtualization, native, archive encryption, anti-debug, type confusion,
-  compatibility, output).
+  compatibility, output) and animated sliders for every numeric option.
+- Smooth 60 fps UI animations (switches, chips, group expand/collapse, buttons,
+  status/console fades) with a deterministic off switch for screenshots.
 - CLI, YAML configuration, mapping diff/trace, HTML/JSON audit reports and JVM
   verification.
 - Gradle plugin (`io.umbra`) and Maven plugin (`umbra:protect`).

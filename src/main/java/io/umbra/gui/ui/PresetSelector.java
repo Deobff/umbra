@@ -40,6 +40,7 @@ public class PresetSelector extends JPanel {
     private final List<Integer> rowTops = new ArrayList<Integer>();
     private String selected = "Balanced";
     private String hover;
+    private float selectionGlow = 1f;
     private Listener listener;
 
     public PresetSelector() {
@@ -95,6 +96,14 @@ public class PresetSelector extends JPanel {
             return;
         }
         selected = name;
+        selectionGlow = 0f;
+        Animation.animate(this, 160, new Animation.Frame() {
+            @Override
+            public void frame(float eased) {
+                selectionGlow = eased;
+                repaint();
+            }
+        });
         repaint();
         if (listener != null) {
             listener.selected(name);
@@ -162,7 +171,8 @@ public class PresetSelector extends JPanel {
                 RoundRectangle2D.Float shape = new RoundRectangle2D.Float(
                         bounds[0], bounds[1], bounds[2], bounds[3], 24f, 24f);
                 if (isSelected) {
-                    g.setColor(Tokens.alpha(java.awt.Color.WHITE, 0.92f));
+                    g.setColor(Tokens.alpha(java.awt.Color.WHITE,
+                            0.54f + 0.38f * selectionGlow));
                     g.fill(shape);
                     g.setColor(Tokens.LINE_STRONG);
                     g.setStroke(new BasicStroke(1f));

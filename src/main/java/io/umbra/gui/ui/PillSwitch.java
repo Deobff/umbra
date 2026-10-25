@@ -4,7 +4,6 @@ import io.umbra.gui.theme.Tokens;
 
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
-import javax.swing.Timer;
 import java.awt.BasicStroke;
 import java.awt.Color;
 import java.awt.Cursor;
@@ -12,8 +11,6 @@ import java.awt.Dimension;
 import java.awt.FontMetrics;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
-import java.awt.event.ActionEvent;
-import java.awt.event.ActionListener;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
@@ -24,8 +21,9 @@ import java.awt.geom.RoundRectangle2D;
 /**
  * The custom 44x24 pill switch.
  *
- * <p>The knob and colour transition over 250ms with the standard decelerating
- * ease; there is no bounce, loop or shadow. It is a passive visual: the owning
+ * <p>The knob and colour transition over 180ms with the standard decelerating
+ * ease (driven by the shared {@link Animation} helper); there is no bounce,
+ * loop or shadow. It is a passive visual: the owning
  * {@link SwitchRow} carries the focus, keyboard handling and accessibility
  * state, exactly like a label-linked switch on the web.</p>
  */
@@ -36,7 +34,7 @@ public class PillSwitch extends JPanel {
 
     private boolean on;
     private float position;
-    private Timer animation;
+    private Animation.Handle animation;
     private boolean animations = true;
 
     public PillSwitch(boolean on) {
@@ -82,23 +80,14 @@ public class PillSwitch extends JPanel {
 
     private void startAnimation(final float target) {
         stopAnimation();
-        final long started = System.currentTimeMillis();
         final float from = position;
-        animation = new Timer(15, new ActionListener() {
+        animation = Animation.animate(this, 180, new Animation.Frame() {
             @Override
-            public void actionPerformed(ActionEvent e) {
-                float t = Math.min(1f, (System.currentTimeMillis() - started) / 250f);
-                position = from + (target - from) * Tokens.easeOut(t);
+            public void frame(float eased) {
+                position = from + (target - from) * eased;
                 repaint();
-                if (t >= 1f) {
-                    stopAnimation();
-                    position = target;
-                    repaint();
-                }
             }
         });
-        animation.setCoalesce(true);
-        animation.start();
     }
 
     private void stopAnimation() {
@@ -148,7 +137,7 @@ class SwitchRow extends JPanel {
     private final String label;
     private final PillSwitch pill;
     private final Runnable onChange;
-    private boolean hover;
+    private float hoverProgress;
     private boolean suppressEvents;
 
     SwitchRow(String id, String label, boolean initial, Runnable onChange) {
@@ -172,14 +161,12 @@ class SwitchRow extends JPanel {
 
             @Override
             public void mouseEntered(MouseEvent e) {
-                hover = true;
-                repaint();
+                animateHover(1f);
             }
 
             @Override
             public void mouseExited(MouseEvent e) {
-                hover = false;
-                repaint();
+                animateHover(0f);
             }
         });
         addKeyListener(new KeyAdapter() {
@@ -223,6 +210,17 @@ class SwitchRow extends JPanel {
 
     void setAnimationsEnabled(boolean enabled) {
         pill.setAnimationsEnabled(enabled);
+    }
+
+    private void animateHover(final float target) {
+        final float from = hoverProgress;
+        Animation.animate(this, 150, new Animation.Frame() {
+            @Override
+            public void frame(float eased) {
+                hoverProgress = from + (target - from) * eased;
+                repaint();
+            }
+        });
     }
 
     void toggle() {
@@ -284,14 +282,15 @@ class SwitchRow extends JPanel {
             Tokens.prepare(g);
             int w = getWidth();
             int h = getHeight();
-            if (hover) {
-                g.setColor(new Color(0, 0, 0, 8));
+            if (hoverProgress > 0.01f) {
+                g.setColor(new Color(0, 0, 0, Math.round(9f * hoverProgress)));
                 g.fill(new RoundRectangle2D.Float(8f, 2f, w - 16f, h - 4f, 12f, 12f));
             }
             java.awt.Font font = Tokens.serifFor(label, Tokens.BODY_SIZE, java.awt.Font.PLAIN);
             FontMetrics metrics = g.getFontMetrics(font);
             float baseline = (h - metrics.getHeight()) / 2f + metrics.getAscent();
-            Tokens.drawText(g, label, font, hover ? Tokens.FG : Tokens.FG2, 32f, baseline, 0f);
+            Tokens.drawText(g, label, font, Tokens.mix(Tokens.FG2, Tokens.FG, hoverProgress),
+                    32f, baseline, 0f);
             if (isFocusOwner()) {
                 g.setColor(Tokens.alpha(Tokens.ACCENT, 0.9f));
                 g.setStroke(new BasicStroke(2f));

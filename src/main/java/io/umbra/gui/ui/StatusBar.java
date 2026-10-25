@@ -31,6 +31,8 @@ public class StatusBar extends GlassPanel {
     private String status = "Waiting to start";
     private Tone tone = Tone.PENDING;
     private List<String> facts = new ArrayList<String>();
+    private float statusFade = 1f;
+    private Animation.Handle statusAnimation;
 
     public StatusBar() {
         super(GlassPanel.Variant.STATUS_BAR, 0);
@@ -41,6 +43,18 @@ public class StatusBar extends GlassPanel {
         this.status = text == null ? "" : text;
         this.tone = tone == null ? Tone.PENDING : tone;
         getAccessibleContext().setAccessibleDescription(this.status);
+        // Short fade-in of the new state text (bounded repaint of this bar).
+        if (statusAnimation != null) {
+            statusAnimation.stop();
+        }
+        statusFade = 0.35f;
+        statusAnimation = Animation.animate(this, 180, new Animation.Frame() {
+            @Override
+            public void frame(float eased) {
+                statusFade = 0.35f + 0.65f * eased;
+                repaint();
+            }
+        });
         repaint();
     }
 
@@ -77,8 +91,8 @@ public class StatusBar extends GlassPanel {
             float baseline = (h - statusMetrics.getHeight()) / 2f + statusMetrics.getAscent();
             Color color = tone == Tone.SUCCESS ? Tokens.SUCCESS
                     : (tone == Tone.ERROR ? Tokens.DANGER : Tokens.FG2);
-            Tokens.drawText(g, status, statusFont, color, 24f, baseline,
-                    tone == Tone.PENDING ? 0.02f : 0f);
+            Tokens.drawText(g, status, statusFont, Tokens.alpha(color, statusFade),
+                    24f, baseline, tone == Tone.PENDING ? 0.02f : 0f);
 
             Font factsFont = Tokens.mono(Tokens.FACTS_SIZE);
             FontMetrics factsMetrics = g.getFontMetrics(factsFont);
