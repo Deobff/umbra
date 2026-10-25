@@ -227,7 +227,7 @@ function Build-Package {
     Copy-Item (Join-Path $Root 'Umbra.cmd') $stage
     Copy-Item (Join-Path $Root 'umbra-cli.cmd') $stage
     Copy-Item (Join-Path $Root 'demo\demo.jar') $stage
-    Copy-Item (Join-Path $Root 'docs') $stage -Recurse
+    if (Test-Path (Join-Path $Root 'docs')) { Copy-Item (Join-Path $Root 'docs') $stage -Recurse }
     $pluginDist = Join-Path $Root 'plugins\dist'
     if (Test-Path $pluginDist) {
         $pluginStage = Join-Path $stage 'plugins'

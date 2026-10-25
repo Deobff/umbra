@@ -1,0 +1,54 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: "8"
+
+      - name: Build distribution
+        shell: pwsh
+        run: .\build.cmd -Task dist
+
+      - name: Build package
+        shell: pwsh
+        run: .\build.cmd -Task package
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          @'
+          Umbra 3.2.1 — security-hardened Java bytecode protection suite.
+
+          - Sample-bound archive master key + per-entry nonce KDF
+          - HMAC-keyed class/resource/loader digests
+          - Integrity level >= 2 with sampled watchdog and heartbeat
+          - Silent refusals and stripped runtime debug info
+          - String hardening: random site ids, per-artifact salt, plaintext cache off by default
+          - Native guard random path/export/PE hygiene
+          - GUI: per-mode detailed options with animated sliders and 60 fps animations
+
+          Encrypted archives use index v3; rebuild archives protected by 3.1-pre.
+          '@ | Set-Content -Path release-notes.md -Encoding UTF8
+
+          gh release create $env:GITHUB_REF_NAME `
+            --title "Umbra 3.2.1" `
+            --notes-file release-notes.md `
+            dist\umbra.jar dist\umbra-3.2.1.zip dist\SHA256SUMS
