@@ -281,7 +281,7 @@ demo-obf.jar                   example protected demo
 
 ## 中文简介
 
-Umbra 是一套面向 Java 字节码的商业级保护套件：兼容 Spring Boot fat JAR、
+Umbra 是一套面向 Java 字节码的混淆器：兼容 Spring Boot fat JAR、
 WAR、多版本 JAR、JPMS、签名 JAR、agent、OSGi 与 Minecraft 模组；提供重命名、
 多引擎字符串加密、控制流、VM2 虚拟化、原生 JNI、整包类加密、运行时反调试与
 反 dump，并附带桌面 GUI、CLI、YAML、Gradle/Maven 插件。每个模式都可在
