@@ -59,26 +59,29 @@ final class GuardDynamicCode {
      * Emits the randomized code-section sample table.
      *
      * <p>The table is an <b>exported data symbol</b>
-     * ({@code umbra_code_sample_table}) so the protection pass can fill in the
+     * ({@code umbra_sample_table}) so the protection pass can fill in the
      * random RVAs/bytes after the single guard compilation by patching the
      * library file ({@link PeImage#withCodeSamples}). The compiled placeholder has
      * {@code count = 0}; until the table is patched the runtime check is a no-op,
      * so a failed patch can never produce a false positive.</p>
      */
-    static void emitCodeSamples(StringBuilder out, int count, int window) {
+    static void emitCodeSamples(StringBuilder out, int count, int window, long magic) {
         int size = Math.max(1, Math.min(64, window));
         int slots = Math.max(1, Math.min(64, count));
         out.append("#define UMBRA_SAMPLE_SLOTS ").append(slots).append('\n');
         out.append("#define UMBRA_SAMPLE_WINDOW ").append(size).append("\n");
+        out.append("#define UMBRA_SAMPLE_MAGIC 0x").append(java.lang.Long.toHexString(magic))
+                .append("ULL\n");
         out.append("typedef struct {\n");
+        out.append("    unsigned long long magic;\n");
         out.append("    int count;\n");
         out.append("    int window;\n");
         out.append("    unsigned int rva[UMBRA_SAMPLE_SLOTS];\n");
         out.append("    unsigned char bytes[UMBRA_SAMPLE_SLOTS * UMBRA_SAMPLE_WINDOW];\n");
         out.append("} umbra_sample_table_t;\n");
-        out.append("/* exported data symbol: patched post-link by Umbra */\n");
-        out.append("JNIEXPORT umbra_sample_table_t umbra_code_sample_table = {\n");
-        out.append("    0, UMBRA_SAMPLE_WINDOW, {0}, {0}\n");
+        out.append("/* Located by its magic value and patched post-link; not exported. */\n");
+        out.append("static volatile umbra_sample_table_t umbra_sample_table = {\n");
+        out.append("    UMBRA_SAMPLE_MAGIC, 0, UMBRA_SAMPLE_WINDOW, {0}, {0}\n");
         out.append("};\n\n");
     }
     // ------------------------------------------------------------------
@@ -165,14 +168,14 @@ final class GuardDynamicCode {
         out.append("    unsigned char* base = NULL;\n");
         out.append("    int i;\n");
         out.append("    int j;\n");
-        out.append("    if (!UMBRA_F_CODE_SAMPLING || umbra_code_sample_table.count <= 0) return 1;\n");
+        out.append("    if (!UMBRA_F_CODE_SAMPLING || umbra_sample_table.count <= 0) return 1;\n");
         out.append("    if (!umbra_self_image(&base, NULL) || base == NULL) return 1;\n");
-        out.append("    for (i = 0; i < umbra_code_sample_table.count; i++) {\n");
+        out.append("    for (i = 0; i < umbra_sample_table.count; i++) {\n");
         out.append("        const unsigned char* actual;\n");
-        out.append("        unsigned int rva = umbra_code_sample_table.rva[i];\n");
+        out.append("        unsigned int rva = umbra_sample_table.rva[i];\n");
         out.append("        actual = base + rva;\n");
-        out.append("        for (j = 0; j < umbra_code_sample_table.window; j++) {\n");
-        out.append("            unsigned char expected = umbra_code_sample_table.bytes[i * umbra_code_sample_table.window + j];\n");
+        out.append("        for (j = 0; j < umbra_sample_table.window; j++) {\n");
+        out.append("            unsigned char expected = umbra_sample_table.bytes[i * umbra_sample_table.window + j];\n");
         out.append("            if (actual[j] != expected) {\n");
         out.append("                g_sample_mismatch = i;\n");
         out.append("                return 0;\n");
@@ -451,14 +454,12 @@ final class GuardDynamicCode {
 
     private static void appendWindowsTestHooks(StringBuilder out, GuardFeatures features) {
         String prefix = JniNames.shortName(features.testHookClass, "");
-        out.append("JNIEXPORT jlong JNICALL ").append(JniNames.shortName(features.testHookClass,
-                "testAllocExec")).append("(JNIEnv* env, jclass cls) {\n");
+        out.append("static jlong JNICALL umbra_hook_testAllocExec").append("(JNIEnv* env, jclass cls) {\n");
         out.append("    (void)env; (void)cls;\n");
         out.append("    return (jlong)(ULONG_PTR)VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE,\n");
         out.append("            PAGE_EXECUTE_READ);\n");
         out.append("}\n\n");
-        out.append("JNIEXPORT jint JNICALL ").append(JniNames.shortName(features.testHookClass,
-                "testRemoteThread")).append("(JNIEnv* env, jclass cls) {\n");
+        out.append("static jint JNICALL umbra_hook_testRemoteThread").append("(JNIEnv* env, jclass cls) {\n");
         out.append("    unsigned char* code;\n");
         out.append("    HANDLE thread;\n");
         out.append("    (void)env; (void)cls;\n");
@@ -477,55 +478,46 @@ final class GuardDynamicCode {
         out.append("    CloseHandle(thread);\n");
         out.append("    return 1;\n");
         out.append("}\n\n");
-        out.append("JNIEXPORT jint JNICALL ").append(JniNames.shortName(features.testHookClass,
-                "testPatchSample")).append("(JNIEnv* env, jclass cls) {\n");
+        out.append("static jint JNICALL umbra_hook_testPatchSample").append("(JNIEnv* env, jclass cls) {\n");
         out.append("    (void)env; (void)cls;\n");
         out.append("    /* Flips one expected byte of the verified sample table: from the\n");
         out.append("       verifier's point of view this is exactly a patched code byte, without\n");
         out.append("       corrupting code that is executed later in a test process. */\n");
-        out.append("    if (umbra_code_sample_table.count > 0) umbra_code_sample_table.bytes[0] ^= 0xFF;\n");
+        out.append("    if (umbra_sample_table.count > 0) umbra_sample_table.bytes[0] ^= 0xFF;\n");
         out.append("    return 1;\n");
         out.append("}\n\n");
-        out.append("JNIEXPORT jint JNICALL ").append(JniNames.shortName(features.testHookClass,
-                "testAgeTiming")).append("(JNIEnv* env, jclass cls, jlong milliseconds) {\n");
+        out.append("static jint JNICALL umbra_hook_testAgeTiming").append("(JNIEnv* env, jclass cls, jlong milliseconds) {\n");
         out.append("    (void)env; (void)cls;\n");
         out.append("    g_last_check_ms -= (long)milliseconds;\n");
         out.append("    return 1;\n");
         out.append("}\n\n");
-        out.append("JNIEXPORT jint JNICALL ").append(JniNames.shortName(features.testHookClass,
-                "testSampleMismatch")).append("(JNIEnv* env, jclass cls) {\n");
+        out.append("static jint JNICALL umbra_hook_testSampleMismatch").append("(JNIEnv* env, jclass cls) {\n");
         out.append("    (void)env; (void)cls;\n");
         out.append("    return (jint)g_sample_mismatch;\n");
         out.append("}\n\n");
-        out.append("JNIEXPORT jint JNICALL ").append(JniNames.shortName(features.testHookClass,
-                "testSampleCount")).append("(JNIEnv* env, jclass cls) {\n");
+        out.append("static jint JNICALL umbra_hook_testSampleCount").append("(JNIEnv* env, jclass cls) {\n");
         out.append("    (void)env; (void)cls;\n");
-        out.append("    return (jint)umbra_code_sample_table.count;\n");
+        out.append("    return (jint)umbra_sample_table.count;\n");
         out.append("}\n\n");
-        out.append("JNIEXPORT jint JNICALL ").append(JniNames.shortName(features.testHookClass,
-                "testReadByte")).append("(JNIEnv* env, jclass cls, jint rva) {\n");
+        out.append("static jint JNICALL umbra_hook_testReadByte").append("(JNIEnv* env, jclass cls, jint rva) {\n");
         out.append("    unsigned char* base = NULL;\n");
         out.append("    (void)env; (void)cls;\n");
         out.append("    if (!umbra_self_image(&base, NULL) || base == NULL) return -1;\n");
         out.append("    return (jint)base[(unsigned int)rva];\n");
         out.append("}\n\n");
-        out.append("JNIEXPORT jint JNICALL ").append(JniNames.shortName(features.testHookClass,
-                "testQuick")).append("(JNIEnv* env, jclass cls) {\n");
+        out.append("static jint JNICALL umbra_hook_testQuick").append("(JNIEnv* env, jclass cls) {\n");
         out.append("    (void)env; (void)cls;\n");
         out.append("    return (jint)umbra_detect_quick();\n");
         out.append("}\n\n");
-        out.append("JNIEXPORT jint JNICALL ").append(JniNames.shortName(features.testHookClass,
-                "testDeep")).append("(JNIEnv* env, jclass cls) {\n");
+        out.append("static jint JNICALL umbra_hook_testDeep").append("(JNIEnv* env, jclass cls) {\n");
         out.append("    (void)env; (void)cls;\n");
         out.append("    return (jint)umbra_detect_deep();\n");
         out.append("}\n\n");
-        out.append("JNIEXPORT jint JNICALL ").append(JniNames.shortName(features.testHookClass,
-                "testExecScan")).append("(JNIEnv* env, jclass cls) {\n");
+        out.append("static jint JNICALL umbra_hook_testExecScan").append("(JNIEnv* env, jclass cls) {\n");
         out.append("    (void)env; (void)cls;\n");
         out.append("    return (jint)(umbra_exec_private() ? 1 : 0);\n");
         out.append("}\n\n");
-        out.append("JNIEXPORT jint JNICALL ").append(JniNames.shortName(features.testHookClass,
-                "testRemoteScan")).append("(JNIEnv* env, jclass cls) {\n");
+        out.append("static jint JNICALL umbra_hook_testRemoteScan").append("(JNIEnv* env, jclass cls) {\n");
         out.append("    (void)env; (void)cls;\n");
         out.append("    return (jint)(umbra_remote_threads() ? 1 : 0);\n");
         out.append("}\n\n");

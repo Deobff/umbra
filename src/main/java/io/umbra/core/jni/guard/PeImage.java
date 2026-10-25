@@ -185,30 +185,54 @@ public final class PeImage {
         }
     }
 
-    /** File offset of the exported code-sample table, or -1. */
-    public static long codeSampleTableOffset(byte[] image) {
-        return exportFileOffset(image, "umbra_code_sample_table");
+    /**
+     * File offset of the unique little-endian 8-byte {@code magic} in the image,
+     * or -1 when it is missing or ambiguous. Used to locate post-link-patched data
+     * tables without a PE export symbol.
+     */
+    public static long magicOffset(byte[] image, long magic) {
+        if (image == null || image.length < 16) {
+            return -1L;
+        }
+        byte[] wanted = new byte[8];
+        for (int i = 0; i < 8; i++) {
+            wanted[i] = (byte) (magic >>> (i * 8));
+        }
+        long found = -1L;
+        int limit = image.length - 8;
+        outer:
+        for (int i = 0; i <= limit; i++) {
+            for (int j = 0; j < 8; j++) {
+                if (image[i + j] != wanted[j]) {
+                    continue outer;
+                }
+            }
+            if (found >= 0) {
+                return -1L;
+            }
+            found = i;
+        }
+        return found;
     }
 
     /**
      * Patches the compiled guard image with the randomized code-section samples.
      *
-     * <p>The generated guard exports a fixed-size data table
-     * ({@code umbra_code_sample_table}: count, window, RVAs, expected bytes) whose
-     * compiled placeholder has {@code count = 0}. This method computes the samples
-     * from the linked image, writes them into the table in the file, and returns
-     * the patched image; the runtime check becomes active exactly when the table
-     * count is non-zero, so a failed patch degrades to "no check" instead of a
-     * false positive. The guard is therefore compiled only once per protection.</p>
+     * <p>The generated guard contains a magic-located sample table whose compiled
+     * placeholder has {@code count = 0}. This method finds the table by its magic,
+     * computes the samples from the linked image, writes count/window/RVAs/bytes
+     * into the file, and returns the patched image. The runtime check only becomes
+     * active when the count is non-zero, so a failed patch degrades to "no check"
+     * instead of a false positive (single compile, no export symbol).</p>
      *
-     * @return patched image or {@code null} when the table/table values are absent
+     * @return patched image or {@code null} when the table is absent/ambiguous
      */
-    public static byte[] withCodeSamples(byte[] image, long seed) {
+    public static byte[] withCodeSamples(byte[] image, long seed, long magic) {
         if (image == null) {
             return null;
         }
-        long table = codeSampleTableOffset(image);
-        if (table < 0 || table + 8 > image.length) {
+        long table = magicOffset(image, magic);
+        if (table < 0 || table + 16 > image.length) {
             return null;
         }
         int slots = 12;
@@ -217,12 +241,12 @@ public final class PeImage {
             return null;
         }
         int window = samples[0].bytes.length;
-        int required = 8 + slots * 4 + slots * window;
+        int required = 16 + slots * 4 + slots * window;
         if (table + required > image.length) {
             return null;
         }
         byte[] patched = image.clone();
-        int position = (int) table;
+        int position = (int) table + 8;
         writeInt(patched, position, samples.length);
         writeInt(patched, position + 4, window);
         int rvaStart = position + 8;
@@ -237,6 +261,151 @@ public final class PeImage {
         return patched;
     }
 
+    /**
+     * Reads the first {@code length} file bytes of the {@code functions} native
+     * entry points from the magic-located pointer table (order: init, check, self,
+     * token). Returns an empty array when the table is missing/ambiguous.
+     */
+    public static byte[][] functionPrologues(byte[] image, long magic, int functions,
+                                             int length) {
+        if (image == null || functions <= 0 || length <= 0) {
+            return new byte[0][];
+        }
+        long table = magicOffset(image, magic);
+        if (table < 0 || table + 8 + functions * 8 > image.length) {
+            return new byte[0][];
+        }
+        int pe = u32(image, 0x3C);
+        if (pe <= 0 || pe + 24 >= image.length) {
+            return new byte[0][];
+        }
+        int coff = pe + 4;
+        int sections = u16(image, coff + 2);
+        int optionalSize = u16(image, coff + 16);
+        int optional = coff + 20;
+        if (optional + optionalSize > image.length) {
+            return new byte[0][];
+        }
+        long imageBase = pe32Plus(image, optional) ? u64(image, optional + 24)
+                : (u32(image, optional + 28) & 0xFFFFFFFFL);
+        byte[][] prologues = new byte[functions][];
+        int sectionTable = optional + optionalSize;
+        for (int i = 0; i < functions; i++) {
+            long pointer = u64(image, (int) table + 8 + i * 8);
+            long rva = pointer - imageBase;
+            if (rva <= 0 || rva > 0x7FFFFFFFL) {
+                return new byte[0][];
+            }
+            int offset = rvaToFileOffset(image, sections, sectionTable, (int) rva);
+            if (offset < 0 || offset + length > image.length) {
+                return new byte[0][];
+            }
+            byte[] prologue = new byte[length];
+            System.arraycopy(image, offset, prologue, 0, length);
+            prologues[i] = prologue;
+        }
+        return prologues;
+    }
+
+    /** Name of every entry in the PE export table (empty when there is none). */
+    public static java.util.List<String> exportNames(byte[] image) {
+        java.util.List<String> names = new java.util.ArrayList<String>();
+        if (image == null || image.length < 0x100) {
+            return names;
+        }
+        try {
+            if (u16(image, 0) != 0x5A4D) {
+                return names;
+            }
+            int pe = u32(image, 0x3C);
+            if (pe <= 0 || pe + 24 >= image.length || u32(image, pe) != 0x00004550) {
+                return names;
+            }
+            int coff = pe + 4;
+            int sections = u16(image, coff + 2);
+            int optionalSize = u16(image, coff + 16);
+            int optional = coff + 20;
+            int directoryOffset = optional + (pe32Plus(image, optional) ? 112 : 96);
+            int exportRva = u32(image, directoryOffset);
+            if (exportRva == 0) {
+                return names;
+            }
+            int export = rvaToFileOffset(image, sections, optional + optionalSize, exportRva);
+            if (export < 0) {
+                return names;
+            }
+            int nameCount = u32(image, export + 24);
+            int nameTable = rvaToFileOffset(image, sections, optional + optionalSize,
+                    u32(image, export + 32));
+            if (nameTable < 0 || nameCount < 0 || nameCount > 4096) {
+                return names;
+            }
+            for (int i = 0; i < nameCount; i++) {
+                int nameOffset = rvaToFileOffset(image, sections, optional + optionalSize,
+                        u32(image, nameTable + i * 4));
+                if (nameOffset >= 0) {
+                    names.add(cString(image, nameOffset));
+                }
+            }
+        } catch (RuntimeException ignored) {
+            // best effort: a malformed export table yields no names
+        }
+        return names;
+    }
+
+    /** PE COFF timeDateStamp (0 for reproducible builds). */
+    public static int timestamp(byte[] image) {
+        if (image == null || image.length < 0x40) {
+            return 0;
+        }
+        int pe = u32(image, 0x3C);
+        if (pe <= 0 || pe + 12 >= image.length || u32(image, pe) != 0x00004550) {
+            return 0;
+        }
+        return u32(image, pe + 8);
+    }
+
+    /** Section names in header order (e.g. {@code .text}, {@code .rdata}). */
+    public static String[] sectionNames(byte[] image) {
+        if (image == null || image.length < 0x40) {
+            return new String[0];
+        }
+        int pe = u32(image, 0x3C);
+        if (pe <= 0 || pe + 24 >= image.length || u32(image, pe) != 0x00004550) {
+            return new String[0];
+        }
+        int coff = pe + 4;
+        int sections = u16(image, coff + 2);
+        int optionalSize = u16(image, coff + 16);
+        int sectionTable = coff + 20 + optionalSize;
+        String[] names = new String[sections];
+        for (int i = 0; i < sections; i++) {
+            int section = sectionTable + i * 40;
+            if (section + 40 > image.length) {
+                return new String[0];
+            }
+            StringBuilder name = new StringBuilder(8);
+            for (int j = 0; j < 8; j++) {
+                int b = image[section + j] & 0xFF;
+                if (b == 0) {
+                    break;
+                }
+                name.append((char) b);
+            }
+            names[i] = name.toString();
+        }
+        return names;
+    }
+
+    private static boolean pe32Plus(byte[] image, int optional) {
+        return u16(image, optional) == 0x20B;
+    }
+
+    private static long u64(byte[] image, int offset) {
+        long low = u32(image, offset) & 0xFFFFFFFFL;
+        long high = u32(image, offset + 4) & 0xFFFFFFFFL;
+        return low | (high << 32);
+    }
     private static void writeInt(byte[] data, int offset, int value) {
         data[offset] = (byte) value;
         data[offset + 1] = (byte) (value >>> 8);

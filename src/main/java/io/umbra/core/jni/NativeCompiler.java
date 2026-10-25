@@ -151,9 +151,23 @@ public final class NativeCompiler {
         return false;
     }
 
-    /** Builds the compiler command line for the requested target. */
+    /** Builds the compiler command line for the requested target (reproducible). */
     public static List<String> command(String compiler, Path source, Path library, String target,
                                        String extraFlags) {
+        return command(compiler, source, library, target, extraFlags, true);
+    }
+
+    /**
+     * Builds the compiler command line for the requested target.
+     *
+     * @param reproducible when true (default) the PE timestamp is pinned to zero and
+     *                     the image base is fixed, so identical input yields
+     *                     identical bytes; when false the linker stamps the current
+     *                     time (normal-looking PE, used for release builds via
+     *                     {@code native.timestamp})
+     */
+    public static List<String> command(String compiler, Path source, Path library, String target,
+                                       String extraFlags, boolean reproducible) {
         List<String> command = new ArrayList<String>();
         command.add(compiler);
         String normalized = target == null ? "windows" : target.trim().toLowerCase(java.util.Locale.ROOT);
@@ -170,7 +184,9 @@ public final class NativeCompiler {
             // reproducible for identical input; the linker otherwise randomises the
             // preferred load address and stamps the current time.
             command.add("-Wl,--image-base,0x10000000");
-            command.add("-Wl,--no-insert-timestamp");
+            if (reproducible) {
+                command.add("-Wl,--no-insert-timestamp");
+            }
         }
         command.add("-O2");
         command.add("-fwrapv");
@@ -185,10 +201,22 @@ public final class NativeCompiler {
         return command;
     }
 
-    /** Compiles {@code source} into {@code library}. */
+    /** Compiles {@code source} into {@code library} (reproducible PE timestamp). */
     public static Result compile(String compiler, Path source, Path library, String target,
                                  String extraFlags, Log log) {
-        List<String> command = command(compiler, source, library, target, extraFlags);
+        return compile(compiler, source, library, target, extraFlags, log, true);
+    }
+
+    /**
+     * Compiles {@code source} into {@code library}.
+     *
+     * @param reproducible pin the PE timestamp to zero for byte-for-byte
+     *                     reproducible output; false lets the linker stamp the
+     *                     build time (see {@code native.timestamp})
+     */
+    public static Result compile(String compiler, Path source, Path library, String target,
+                                 String extraFlags, Log log, boolean reproducible) {
+        List<String> command = command(compiler, source, library, target, extraFlags, reproducible);
         long start = System.currentTimeMillis();
         Path logFile = null;
         try {

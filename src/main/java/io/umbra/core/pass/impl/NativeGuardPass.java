@@ -133,14 +133,15 @@ public final class NativeGuardPass implements Pass {
                 source = build.source;
                 features = build.features;
                 buildSamples = build.codeSamples;
-                resourceName = "umbra/guard/" + names.random(16) + ".dat";
+                resourceName = names.random(10) + "/" + names.random(14) + ".bin";
+                assertGuardHygiene(context, library, resourceName);
                 fileHashHex = GuardOptions.hex(GuardOptions.fnv1a64(library), 16);
-                prologueCheckHex = GuardOptions.bytesToHex(PeImage.exportPrologue(library,
-                        GuardCodeGenerator.exportSymbol(guardName, "nativeCheck"),
-                        NATIVE_CHECK_PROLOGUE));
-                prologueTokenHex = GuardOptions.bytesToHex(PeImage.exportPrologue(library,
-                        GuardCodeGenerator.exportSymbol(guardName, "nativeToken"),
-                        NATIVE_CHECK_PROLOGUE));
+                byte[][] prologues = PeImage.functionPrologues(library,
+                        GuardCodeGenerator.functionTableMagic(secret), 4, NATIVE_CHECK_PROLOGUE);
+                if (prologues.length == 4) {
+                    prologueCheckHex = GuardOptions.bytesToHex(prologues[1]);
+                    prologueTokenHex = GuardOptions.bytesToHex(prologues[3]);
+                }
             }
         } else {
             context.log().warn("native-guard: no C toolchain/JNI headers; "
@@ -259,6 +260,95 @@ public final class NativeGuardPass implements Pass {
      * failure falls back to the Java guard with a warning instead of emitting a
      * broken library.</p>
      */
+    /**
+     * Build-time hygiene gate for the generated guard library: the compiled PE
+     * must not contain leftover {@code @@} placeholders, plaintext {@code Java_*}
+     * export symbols or the old exported sample-table symbol, and the JAR resource
+     * path must not carry a fixed {@code umbra}/{@code guard} name. A violation
+     * fails the protection instead of shipping a fingerprintable library.
+     */
+    private static void assertGuardHygiene(PassContext context, byte[] library, String resourceName) {
+        int javaExports = 0;
+        int oldTable = 0;
+        int exportsCount = 0;
+        StringBuilder joined = new StringBuilder();
+        for (String name : PeImage.exportNames(library)) {
+            exportsCount++;
+            if (joined.length() > 0) {
+                joined.append(',');
+            }
+            joined.append(name);
+            if (name.startsWith("Java_")) {
+                javaExports++;
+            }
+            if ("umbra_code_sample_table".equals(name)) {
+                oldTable++;
+            }
+        }
+        if (javaExports > 0 || oldTable > 0
+                || resourceName.contains("umbra") || resourceName.contains("guard")) {
+            throw new IllegalStateException("native-guard hygiene assertion failed: "
+                    + "javaExports=" + javaExports + ", oldSampleTable=" + oldTable
+                    + ", exports=[" + joined + "], resource=" + resourceName);
+        }
+        context.stats().add("antiDebug.nativeGuard.exports", exportsCount);
+        context.stats().text("antiDebug.nativeGuard.exportNames", joined.toString());
+        int plaintextHits = countOf(library, "umbra");
+        context.stats().add("antiDebug.nativeGuard.plaintextHits", plaintextHits);
+        // One remaining occurrence is the native-code tick entry point (required by
+        // the CGenerator integration, which is outside this task's scope).
+        if (plaintextHits > 1) {
+            String contexts = "";
+            try {
+                String text = new String(library, StandardCharsets.ISO_8859_1);
+                int at = -1;
+                while ((at = text.indexOf("umbra", at + 1)) >= 0) {
+                    int from = Math.max(0, at - 16);
+                    contexts = contexts + " @" + at + "["
+                            + text.substring(from, Math.min(text.length(), at + 48))
+                            .replace('\0', '.') + "]";
+                }
+            } catch (Exception ignored) {
+                // diagnostics only
+            }
+            throw new IllegalStateException("native-guard hygiene assertion failed: "
+                    + plaintextHits + " plaintext 'umbra' strings remain in the guard PE:"
+                    + contexts);
+        }
+        context.stats().add("antiDebug.nativeGuard.peTimestamp",
+                PeImage.timestamp(library) & 0xFFFFFFFFL);
+        context.stats().text("antiDebug.nativeGuard.sections",
+                java.util.Arrays.toString(PeImage.sectionNames(library)));
+    }
+
+    private static int indexOf(byte[] data, String text, int from) {
+        byte[] needle = text.getBytes(StandardCharsets.UTF_8);
+        outer:
+        for (int i = Math.max(0, from); i + needle.length <= data.length; i++) {
+            for (int j = 0; j < needle.length; j++) {
+                if (data[i + j] != needle[j]) {
+                    continue outer;
+                }
+            }
+            return i;
+        }
+        return -1;
+    }
+
+    private static int countOf(byte[] data, String text) {
+        byte[] needle = text.getBytes(StandardCharsets.UTF_8);
+        int count = 0;
+        outer:
+        for (int i = 0; i + needle.length <= data.length; i++) {
+            for (int j = 0; j < needle.length; j++) {
+                if (data[i + j] != needle[j]) {
+                    continue outer;
+                }
+            }
+            count++;
+        }
+        return count;
+    }
     private static GuardBuild buildGuard(PassContext context, String compiler, String guardName,
                                          long secret, GuardFeatures features, long sampleSeed) {
         String target = guardTarget();
@@ -270,12 +360,22 @@ public final class NativeGuardPass implements Pass {
         Path temp = null;
         try {
             temp = Files.createTempDirectory("umbra-guard");
-            Path sourceFile = temp.resolve("umbra_guard.c");
-            Path libraryFile = temp.resolve("umbra_guard" + suffix);
+            String neutral = "m" + GuardOptions.hex(
+                    secret ^ 0x4D4F44554C454E41L, 16);
+            Path sourceFile = temp.resolve("g" + neutral.substring(1) + ".c");
+            Path libraryFile = temp.resolve(neutral + suffix);
             String source = GuardCodeGenerator.generate(guardName, secret, features);
+            if (source.indexOf("@@") >= 0) {
+                throw new IllegalStateException(
+                        "native-guard hygiene assertion failed: generated C still has @@ placeholders");
+            }
             Files.write(sourceFile, source.getBytes(StandardCharsets.UTF_8));
+            // native.timestamp=true lets the linker stamp the current time for a
+            // normal-looking release PE; the default keeps builds reproducible.
+            boolean reproducible = !context.config().optionBool("native.timestamp", false);
+            // -s strips the COFF symbol table (no plaintext internal identifiers in the PE).
             NativeCompiler.Result result = NativeCompiler.compile(compiler, sourceFile, libraryFile,
-                    target, "", context.log());
+                    target, "-s", context.log(), reproducible);
             context.stats().add("antiDebug.nativeGuard.compile.ms", result.millis());
             if (!result.success()) {
                 return failedGuardBuild(context, result);
@@ -283,7 +383,8 @@ public final class NativeGuardPass implements Pass {
             byte[] library = Files.readAllBytes(result.library());
             int samples = 0;
             if (features.codeSampling) {
-                byte[] patched = PeImage.withCodeSamples(library, sampleSeed);
+                byte[] patched = PeImage.withCodeSamples(library, sampleSeed,
+                        GuardCodeGenerator.sampleMagic(secret));
                 if (patched != null && patched.length == library.length) {
                     library = patched;
                     samples = GuardCodeGenerator.CODE_SAMPLE_COUNT;

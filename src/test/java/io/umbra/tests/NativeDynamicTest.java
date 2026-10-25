@@ -211,7 +211,8 @@ public final class NativeDynamicTest {
                 "umbra_remote_threads(", "NtQueryInformationThread",
                 "umbra_exec_private(", "MEM_PRIVATE", "PAGE_EXECUTE",
                 "umbra_image_protection_ok(", "PAGE_GUARD",
-                "umbra_code_samples_ok(", "umbra_code_sample_table",
+                "umbra_code_samples_ok(", "umbra_sample_table", "UMBRA_SAMPLE_MAGIC",
+                "umbra_fn_table", "RegisterNatives",
                 "umbra_timing_drift(", "GetTickCount64",
                 "umbra_module_anomaly(", "GetFileAttributesA",
                 "umbra_handle_dump(", "NtQuerySystemInformation", "PROCESS_VM_READ",
@@ -223,8 +224,9 @@ public final class NativeDynamicTest {
             check(level3.contains(marker), "generated guard C contains " + marker);
         }
         check(level3.contains("UMBRA_SAMPLE_SLOTS 12")
-                        && level3.contains("umbra_code_sample_table ="),
-                "randomized code-sample table is a fixed-size exported data symbol");
+                        && level3.contains("umbra_sample_table =")
+                        && level3.contains("UMBRA_SAMPLE_MAGIC"),
+                "randomized code-sample table is magic-located and fixed-size");
         check(level1.equals(GuardCodeGenerator.generate("umbra/runtime/Gtest", 42L,
                         GuardFeatures.forLevel(1).build())),
                 "guard source generation is deterministic");
@@ -265,8 +267,12 @@ public final class NativeDynamicTest {
         check(unicode.contains("_04e2d"), "unicode guard class names are escaped: " + unicode);
         String source = GuardCodeGenerator.generate("umbra/runtime/G$test", 7L,
                 GuardFeatures.forLevel(1).build());
-        check(source.contains("Java_umbra_runtime_G_00024test_nativeInit"),
-                "generated C exports the mangled nested-class symbols");
+        check(source.contains("umbra_find_guard")
+                        && source.contains("FindClass(env, name)")
+                        && source.contains("RegisterNatives"),
+                "generated C binds native methods with RegisterNatives");
+        check(!source.contains("JNIEXPORT jint JNICALL Java_"),
+                "generated C has no plaintext Java_* JNI exports");
     }
 
     private static void testOsLibrarySuffix() {
@@ -315,41 +321,50 @@ public final class NativeDynamicTest {
     // ------------------------------------------------------------------
 
     private static void testTempLibraryCleanup() throws Exception {
-        File directory = new File(System.getProperty("java.io.tmpdir", "."));
-        String stamp = Long.toHexString(System.nanoTime());
-        File staleGuard = new File(directory, "umbra-guard-stale-" + stamp + ".dll");
-        File staleNative = new File(directory, "umbra-native-stale-" + stamp + ".dll");
-        File freshGuard = new File(directory, "umbra-guard-fresh-" + stamp + ".dll");
-        writeAndAge(staleGuard, 60000L);
-        writeAndAge(staleNative, 60000L);
-        writeAndAge(freshGuard, 0L);
+        File tmp = new File(System.getProperty("java.io.tmpdir", "."));
+        String guardMarker = markerOf(UmbraNativeGuard.class);
+        String nativeMarker = markerOf(io.umbra.core.runtime.UmbraNativeLoader.class);
+        File staleGuard = markerDirectory(tmp, guardMarker, 60000L);
+        File staleNative = markerDirectory(tmp, nativeMarker, 60000L);
+        File freshGuard = markerDirectory(tmp, guardMarker, 0L);
         try {
             invokeNoArg(UmbraNativeGuard.class, "cleanupStaleLibraries");
             invokeNoArg(io.umbra.core.runtime.UmbraNativeLoader.class, "cleanupStaleLibraries");
-            check(!staleGuard.exists(), "stale guard temp library is removed");
-            check(!staleNative.exists(), "stale native-code temp library is removed");
+            check(!staleGuard.exists(), "stale guard temp directory is removed via its marker");
+            check(!staleNative.exists(), "stale native-code temp directory is removed via its marker");
             check(freshGuard.exists(),
-                    "a freshly extracted library is not removed (no active-file race)");
+                    "a freshly extracted directory is not removed (no active-file race)");
         } finally {
-            freshGuard.delete();
-        }
-    }
-
-    private static void writeAndAge(File file, long ageMillis) throws Exception {
-        Files.write(file.toPath(), new byte[] { 1, 2, 3, 4 });
-        if (ageMillis > 0L) {
-            long time = System.currentTimeMillis() - ageMillis;
-            if (!file.setLastModified(time)) {
-                Files.setLastModifiedTime(file.toPath(),
-                        java.nio.file.attribute.FileTime.fromMillis(time));
-            }
+            delete(freshGuard.toPath());
         }
     }
 
     private static void invokeNoArg(Class<?> owner, String name) throws Exception {
-        Method method = owner.getDeclaredMethod(name);
+        java.lang.reflect.Method method = owner.getDeclaredMethod(name);
         method.setAccessible(true);
         method.invoke(null);
+    }
+    private static File markerDirectory(File parent, String marker, long ageMillis) throws Exception {
+        String name = Long.toHexString(System.nanoTime()) + Long.toHexString(System.identityHashCode(parent));
+        File dir = new File(parent, "d" + name);
+        if (!dir.mkdirs()) {
+            throw new AssertionError("could not create test temp dir " + dir);
+        }
+        Files.write(new File(dir, "m").toPath(),
+                marker.getBytes(StandardCharsets.UTF_8));
+        Files.write(new File(dir, "payload.bin").toPath(), new byte[] { 1, 2, 3 });
+        if (ageMillis > 0L) {
+            long time = System.currentTimeMillis() - ageMillis;
+            dir.setLastModified(time);
+            new File(dir, "m").setLastModified(time);
+        }
+        return dir;
+    }
+
+    private static String markerOf(Class<?> owner) throws Exception {
+        java.lang.reflect.Field field = owner.getDeclaredField("MARKER");
+        field.setAccessible(true);
+        return (String) field.get(null);
     }
     // ------------------------------------------------------------------
     // Compiled guard: clean-JVM matrix, positives, rebuilt refusal
@@ -374,6 +389,40 @@ public final class NativeDynamicTest {
             check(artifact.samples == (level >= 2
                             ? GuardCodeGenerator.CODE_SAMPLE_COUNT : 0),
                     "level " + level + " randomized code samples patched into the guard");
+            java.util.List<String> exports = PeImage.exportNames(artifact.library);
+            check(exports.contains("JNI_OnLoad"), "level " + level + " guard exports JNI_OnLoad");
+            check(exports.contains("umbra_guard_tick"),
+                    "level " + level + " guard exports the tick entry point");
+            boolean javaExport = false;
+            for (String name : exports) {
+                if (name.startsWith("Java_") || "umbra_code_sample_table".equals(name)) {
+                    javaExport = true;
+                }
+            }
+            check(!javaExport, "level " + level + " guard has no plaintext Java_* / table exports");
+            String artifactText = new String(artifact.library, StandardCharsets.ISO_8859_1);
+            int umbraHits = 0;
+            for (int at = artifactText.indexOf("umbra"); at >= 0; at = artifactText.indexOf("umbra", at + 1)) {
+                umbraHits++;
+            }
+            check(umbraHits <= 1,
+                    "level " + level + " guard PE has at most the tick symbol as plaintext 'umbra' ("
+                            + umbraHits + ")");
+            check(GuardCodeGenerator.generate(GUARD_CLASS, artifact.secret, features).indexOf("@@") < 0,
+                    "level " + level + " guard source has no @@ placeholders");
+            byte[][] prologues = PeImage.functionPrologues(artifact.library,
+                    GuardCodeGenerator.functionTableMagic(artifact.secret), 4, 16);
+            check(prologues.length == 4 && prologues[1].length == 16,
+                    "level " + level + " guard function table yields prologue bytes");
+            String[] sections = PeImage.sectionNames(artifact.library);
+            check(sections.length > 0 && sections[0].startsWith("."),
+                    "level " + level + " guard PE section names are normal: "
+                            + java.util.Arrays.toString(sections));
+            if (level >= 2) {
+                check(PeImage.magicOffset(artifact.library,
+                                GuardCodeGenerator.sampleMagic(artifact.secret)) >= 0,
+                        "level " + level + " sample table is located by its magic");
+            }
             for (Jdk jdk : runtimes) {
                 String output = runChild(jdk, new String[] { "child", String.valueOf(level),
                         artifact.libraryPath.toString(),
@@ -498,12 +547,13 @@ public final class NativeDynamicTest {
         Files.write(sourceFile, source.getBytes(StandardCharsets.UTF_8));
         Path libraryFile = work.resolve("guard-" + level + ".dll");
         NativeCompiler.Result result = NativeCompiler.compile(compiler, sourceFile, libraryFile,
-                "windows", "", new Log(null, false));
+                "windows", "-s", new Log(null, false));
         check(result.success(), "guard C for level " + level + " compiles: " + result.output());
         byte[] library = Files.readAllBytes(result.library());
         int samples = 0;
         if (features.codeSampling) {
-            byte[] patched = PeImage.withCodeSamples(library, sampleSeed);
+            byte[] patched = PeImage.withCodeSamples(library, sampleSeed,
+                    GuardCodeGenerator.sampleMagic(secret));
             if (patched != null) {
                 library = patched;
                 samples = GuardCodeGenerator.CODE_SAMPLE_COUNT;
@@ -511,10 +561,12 @@ public final class NativeDynamicTest {
         }
         Files.write(libraryFile, library);
         String hash = GuardOptions.hex(GuardOptions.fnv1a64(library), 16);
-        String checkPrologue = GuardOptions.bytesToHex(PeImage.exportPrologue(library,
-                GuardCodeGenerator.exportSymbol(guardClass, "nativeCheck"), 16));
-        String tokenPrologue = GuardOptions.bytesToHex(PeImage.exportPrologue(library,
-                GuardCodeGenerator.exportSymbol(guardClass, "nativeToken"), 16));
+        byte[][] prologues = PeImage.functionPrologues(library,
+                GuardCodeGenerator.functionTableMagic(secret), 4, 16);
+        String checkPrologue = prologues.length == 4
+                ? GuardOptions.bytesToHex(prologues[1]) : "";
+        String tokenPrologue = prologues.length == 4
+                ? GuardOptions.bytesToHex(prologues[3]) : "";
         return new GuardArtifact(library, source, hash, checkPrologue, tokenPrologue, samples,
                 secret, libraryFile);
     }

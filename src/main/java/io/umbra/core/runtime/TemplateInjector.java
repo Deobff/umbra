@@ -88,8 +88,39 @@ public final class TemplateInjector {
         // The injected helper must run on every supported JVM; keep it at the
         // class file version the obfuscator itself is compiled for.
         remapped.version = Math.min(remapped.version, Opcodes.V1_8);
+        stripDebugInfo(remapped);
         pool.addGenerated(remapped);
         return candidate;
+    }
+
+    /**
+     * Removes source-file/line-number/local-variable metadata from an injected
+     * runtime template, so {@code javap} on the protected archive cannot reveal
+     * {@code UmbraClassLoader.java}/{@code UmbraRuntimeGuard.java} names or the
+     * exact line numbers of the guard checks.
+     */
+    public static void stripDebugInfo(ClassNode node) {
+        if (node == null) {
+            return;
+        }
+        node.sourceFile = null;
+        node.sourceDebug = null;
+        for (org.objectweb.asm.tree.MethodNode method : node.methods) {
+            if (method.localVariables != null) {
+                method.localVariables.clear();
+            }
+            if (method.instructions == null) {
+                continue;
+            }
+            for (org.objectweb.asm.tree.AbstractInsnNode insn = method.instructions.getFirst();
+                 insn != null; ) {
+                org.objectweb.asm.tree.AbstractInsnNode next = insn.getNext();
+                if (insn instanceof org.objectweb.asm.tree.LineNumberNode) {
+                    method.instructions.remove(insn);
+                }
+                insn = next;
+            }
+        }
     }
 
     private static void replaceConstants(ClassNode node, Map<String, String> replacements) {

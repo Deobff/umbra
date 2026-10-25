@@ -27,6 +27,7 @@ import javax.swing.AbstractAction;
 import javax.swing.ActionMap;
 import javax.swing.BorderFactory;
 import javax.swing.InputMap;
+import javax.swing.JButton;
 import javax.swing.JComponent;
 import javax.swing.JFileChooser;
 import javax.swing.JPanel;
@@ -93,6 +94,7 @@ public final class GuiRoot extends JPanel implements Aurora.SurfaceProvider {
     private final PathRow mappingRow;
     private final PresetSelector presetSelector;
     private final io.umbra.gui.ui.AdvancedEditor advancedEditor;
+    private JButton modeOptionsButton;
 
     private Mode mode = Mode.WIDE;
     private BufferedImage surface;
@@ -111,6 +113,10 @@ public final class GuiRoot extends JPanel implements Aurora.SurfaceProvider {
     private Timer statsNudgeTimer;
 
     private String preset = GuiPresets.DEFAULT;
+    /** Per-mode detailed values (mode options dialog); authoritative for the run. */
+    private final Map<String, String> detailedOptions = new LinkedHashMap<String, String>();
+    /** Last non-custom mode, used by "Reset to mode defaults" and Custom runs. */
+    private String detailedMode = GuiPresets.DEFAULT;
     private String lastAutoOutput = "";
     private Path lastOutput;
 
@@ -217,7 +223,7 @@ public final class GuiRoot extends JPanel implements Aurora.SurfaceProvider {
                 group.addRow(mappingRow, PathRow.HEIGHT);
             } else if (def.kind == GuiSwitches.Kind.PRESET) {
                 group.addRow(presetSelector, PresetSelector.HEIGHT);
-                group.addRow(buildPresetActions(), 38);
+                group.addRow(buildPresetActions(), 66);
             } else if (def.kind == GuiSwitches.Kind.ADVANCED) {
                 group.addRow(advancedEditor, io.umbra.gui.ui.AdvancedEditor.HEIGHT);
             }
@@ -238,9 +244,16 @@ public final class GuiRoot extends JPanel implements Aurora.SurfaceProvider {
     }
 
     private JPanel buildPresetActions() {
-        JPanel actions = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 3));
+        JPanel actions = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 2));
         actions.setOpaque(false);
         actions.setBorder(BorderFactory.createEmptyBorder(0, 32, 0, 0));
+        modeOptionsButton = Buttons.quiet("Mode options\u2026", new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                openModeOptions();
+            }
+        });
+        actions.add(modeOptionsButton);
         actions.add(Buttons.quiet("Load YAML", new ActionListener() {
             @Override
             public void actionPerformed(ActionEvent e) {
@@ -306,11 +319,20 @@ public final class GuiRoot extends JPanel implements Aurora.SurfaceProvider {
     /* ------------------------------------------------------------ behaviour */
 
     private void applyPreset(String name, boolean fromUser) {
-        Map<String, Boolean> states = GuiPresets.states(name);
         applyingPreset = true;
         try {
-            for (Map.Entry<String, Boolean> entry : states.entrySet()) {
-                sidebar.setOn(entry.getKey(), entry.getValue().booleanValue());
+            if (!"Custom".equals(name)) {
+                Map<String, Boolean> states = GuiPresets.states(name);
+                for (Map.Entry<String, Boolean> entry : states.entrySet()) {
+                    sidebar.setOn(entry.getKey(), entry.getValue().booleanValue());
+                }
+                detailedMode = name;
+                detailedOptions.clear();
+                detailedOptions.putAll(GuiModeOptions.defaults(name));
+            } else if (detailedOptions.isEmpty()) {
+                // Custom keeps the current switches; it only needs a base for
+                // the detailed editor to start from.
+                detailedOptions.putAll(GuiModeOptions.defaults(detailedMode));
             }
             presetSelector.setSelected(name);
             preset = name;
@@ -318,7 +340,9 @@ public final class GuiRoot extends JPanel implements Aurora.SurfaceProvider {
             applyingPreset = false;
         }
         if (fromUser) {
-            console.append("INFO", "Preset applied: " + name);
+            console.append("INFO", "Mode applied: " + name
+                    + ("Custom".equals(name) ? " (current values kept)"
+                    : " (preset + detailed defaults)"));
         }
         prefs.setPreset(name);
         updateFacts();
@@ -328,11 +352,86 @@ public final class GuiRoot extends JPanel implements Aurora.SurfaceProvider {
         if (applyingPreset) {
             return;
         }
+        // Keep the detailed mode values in step with the left-column switch.
+        String toggleId = sidebar.lastToggleId();
+        Map<String, Boolean> states = sidebar.switchStates();
+        Boolean value = states.get(toggleId);
+        if (value != null) {
+            GuiModeOptions.applyToggle(detailedOptions, toggleId, value.booleanValue());
+        }
         if (!"Custom".equals(preset)) {
             preset = "Custom";
             presetSelector.setSelected("Custom");
             prefs.setPreset("Custom");
         }
+        updateFacts();
+    }
+
+    /** Current detailed values; a preset uses its defaults, Custom keeps edits. */
+    Map<String, String> currentDetailedValues() {
+        Map<String, String> values = new LinkedHashMap<String, String>();
+        if ("Custom".equals(preset) && !detailedOptions.isEmpty()) {
+            values.putAll(detailedOptions);
+        } else if (!"Custom".equals(preset)) {
+            values.putAll(GuiModeOptions.defaults(preset));
+        } else {
+            values.putAll(GuiModeOptions.defaults(detailedMode));
+        }
+        values.put("gui.seed", topBar.seedField().getText().trim());
+        values.put("gui.mapping", mappingRow.text());
+        values.put("gui.verify", String.valueOf(sidebar.isOn("verify")));
+        return values;
+    }
+
+    /** Opens the per-mode detailed option dialog from the Preset group. */
+    void openModeOptions() {
+        String mode = "Custom".equals(preset) ? detailedMode : preset;
+        GuiModeOptionsDialog.Result result = GuiModeOptionsDialog.show(
+                this, currentDetailedValues(), mode);
+        if (result == null) {
+            return;
+        }
+        applyModeOptions(result.values, result.mode);
+    }
+
+    /** Applies values returned by the mode-options dialog (also used by tests). */
+    void applyModeOptions(Map<String, String> values, String mode) {
+        applyingPreset = true;
+        try {
+            detailedOptions.clear();
+            detailedOptions.putAll(values);
+            for (GuiModeOptions.Spec spec : GuiModeOptions.allSpecs()) {
+                if (spec.uiOnly() && !"gui.verify".equals(spec.id)) {
+                    continue;
+                }
+                String value = values.get(spec.id);
+                if (value == null) {
+                    continue;
+                }
+                if ("gui.seed".equals(spec.id)) {
+                    topBar.seedField().setText(value.trim());
+                } else if ("gui.mapping".equals(spec.id)) {
+                    mappingRow.setText(value.trim());
+                }
+            }
+            // The detailed values drive the left-column switches, whichever
+            // mode was selected (mode defaults are simply a preset shortcut).
+            Map<String, Boolean> synced = GuiModeOptions.syncToggles(values);
+            for (Map.Entry<String, Boolean> entry : synced.entrySet()) {
+                sidebar.setOn(entry.getKey(), entry.getValue().booleanValue());
+            }
+            preset = mode;
+            if (!"Custom".equals(mode)) {
+                detailedMode = mode;
+            }
+            presetSelector.setSelected(preset);
+        } finally {
+            applyingPreset = false;
+        }
+        prefs.setPreset(preset);
+        console.append("INFO", "Mode options applied: " + mode
+                + ("Custom".equals(mode) ? " (custom edits)" : " defaults")
+                + " \u00b7 " + GuiModeOptions.allSpecs().size() + " controls");
         updateFacts();
     }
 
@@ -558,7 +657,21 @@ public final class GuiRoot extends JPanel implements Aurora.SurfaceProvider {
             advancedEditor.setOptionsText(GuiSwitches.formatAdvanced(
                     GuiSwitches.advancedOverrides(config)));
             topBar.seedField().setText(String.valueOf(config.seed()));
+            Map<String, String> effective = GuiConfig.describe(config);
+            Map<String, String> loaded = GuiModeOptions.fromEffective(effective);
+            loaded.put("gui.seed", String.valueOf(config.seed()));
+            loaded.put("gui.mapping", config.mapping().file());
+            loaded.put("gui.verify", String.valueOf(sidebar.isOn("verify")));
+            detailedOptions.clear();
+            detailedOptions.putAll(loaded);
             String detected = GuiPresets.detect(states);
+            if (!"Custom".equals(detected)
+                    && GuiModeOptions.overridesModeDefaults(detected, loaded)) {
+                detected = "Custom";
+            }
+            if (!"Custom".equals(detected)) {
+                detailedMode = detected;
+            }
             presetSelector.setSelected(detected);
             preset = detected;
             prefs.setPreset(detected);
@@ -637,17 +750,21 @@ public final class GuiRoot extends JPanel implements Aurora.SurfaceProvider {
         return mapping;
     }
 
-    private Map<String, String> collectOptions() {
+    Map<String, String> collectOptions() {
         Map<String, String> options = new LinkedHashMap<String, String>();
         options.putAll(GuiSwitches.baseOptions(sidebar.switchStates()));
         options.putAll(GuiPresets.extraOptions(preset));
+        if (sidebar.isOn("classEnc")) {
+            options.put("classEncryption.antiDump", "true");
+        }
+        // Detailed per-mode values are authoritative for every option they
+        // expose (seed/mapping are handled separately, not as engine options).
+        options.putAll(GuiModeOptions.toOptionMap(currentDetailedValues()));
         String compiler = advancedEditor.compilerField().getText().trim();
         if (!compiler.isEmpty()) {
             options.put("native.compiler", compiler);
         }
-        if (sidebar.isOn("classEnc")) {
-            options.put("classEncryption.antiDump", "true");
-        }
+        // The advanced editor stays the last word.
         options.putAll(GuiSwitches.parseAdvanced(advancedEditor.getOptionsText()));
         return options;
     }
@@ -683,6 +800,13 @@ public final class GuiRoot extends JPanel implements Aurora.SurfaceProvider {
         }
         presetSelector.setSelected(name);
         preset = name;
+        if (!"Custom".equals(name)) {
+            detailedMode = name;
+            detailedOptions.clear();
+            detailedOptions.putAll(GuiModeOptions.defaults(name));
+        } else if (detailedOptions.isEmpty()) {
+            detailedOptions.putAll(GuiModeOptions.defaults(detailedMode));
+        }
         updateFacts();
     }
 
@@ -1551,6 +1675,14 @@ public final class GuiRoot extends JPanel implements Aurora.SurfaceProvider {
 
     io.umbra.gui.ui.AdvancedEditor advancedEditor() {
         return advancedEditor;
+    }
+
+    JButton modeOptionsButton() {
+        return modeOptionsButton;
+    }
+
+    Map<String, String> detailedOptionsForTest() {
+        return currentDetailedValues();
     }
 
     boolean drawerOpen() {

@@ -252,6 +252,53 @@ public final class UmbraCrypto {
         }
     }
 
+    /**
+     * Per-entry key derivation used by the class-encryption loader (index v3):
+     * the entry's own nonce is mixed into the KDF, so the same class name in two
+     * builds has different keys even though the label is stable.
+     *
+     * @param master  archive master key
+     * @param label   {@code "c:<binary name>"} or {@code "r:<logical resource>"}
+     * @param nonce   the 12-byte envelope nonce of that payload
+     * @return 256-bit payload key
+     */
+    public static byte[] entryKey(byte[] master, String label, byte[] nonce) {
+        return hmacSha256(master, concat(utf8(label), nonce));
+    }
+
+    /** Extracts and validates the nonce prefix of a sealed envelope. */
+    public static byte[] nonceOf(byte[] envelope) {
+        if (envelope == null || envelope.length < NONCE_BYTES + TAG_BYTES) {
+            throw new SecurityException("Malformed protected payload");
+        }
+        return Arrays.copyOfRange(envelope, 0, NONCE_BYTES);
+    }
+
+    /**
+     * Keyed digest for index v3 integrity metadata: an attacker who decrypts a
+     * payload cannot locally verify the result without the master key.
+     */
+    public static byte[] keyedDigest(byte[] master, String label, byte[] data) {
+        return hmacSha256(master, concat(utf8(label), data));
+    }
+
+    /**
+     * Sample-bound master key (class-encryption index v3). The ZIP comment and
+     * entry count are stable only after the archive is written, so the master key
+     * is bound to the concrete built sample and not just to the tool version.
+     */
+    public static byte[] masterFromSample(byte[] siteSeed, byte[] commentBytes, int entryCount) {
+        byte[] count = le32(entryCount);
+        return hmacSha256(siteSeed,
+                concat(utf8("umbra.master.v3"), commentBytes == null ? new byte[0] : commentBytes,
+                        count));
+    }
+
+    /** Diagnostic fallback binding (no comment/entry-count dependency). */
+    public static byte[] masterFromSeed(byte[] siteSeed) {
+        return hmacSha256(siteSeed, utf8("umbra.master.v3.seed"));
+    }
+
     // ------------------------------------------------------------------
     // Authenticated envelopes (mirrors Cipher.seal/unseal)
     // ------------------------------------------------------------------
@@ -260,6 +307,7 @@ public final class UmbraCrypto {
         if (envelope == null || envelope.length < NONCE_BYTES + TAG_BYTES) {
             throw new SecurityException("Malformed protected payload");
         }
+        requireSupportedAlgorithm(alg);
         byte[] nonce = Arrays.copyOfRange(envelope, 0, NONCE_BYTES);
         byte[] ciphertext = Arrays.copyOfRange(envelope, NONCE_BYTES, envelope.length - TAG_BYTES);
         byte[] tag = Arrays.copyOfRange(envelope, envelope.length - TAG_BYTES, envelope.length);
@@ -276,6 +324,10 @@ public final class UmbraCrypto {
     }
 
     public static byte[] seal(byte[] plain, byte[] key, byte[] nonce, int alg) {
+        requireSupportedAlgorithm(alg);
+        if (nonce == null || nonce.length != NONCE_BYTES) {
+            throw new IllegalArgumentException("unexpected nonce length");
+        }
         byte[] ciphertext;
         if (alg == ALG_AES_CTR) {
             ciphertext = aesCtr(key, aesIv(key, nonce), plain);
@@ -284,6 +336,13 @@ public final class UmbraCrypto {
         }
         byte[] tag = hmacSha256(key, concat(nonce, ciphertext));
         return concat(nonce, ciphertext, tag);
+    }
+
+    /** Archive payloads only support ChaCha20 (1) and AES-256-CTR (2); no XOR. */
+    private static void requireSupportedAlgorithm(int alg) {
+        if (alg != ALG_CHACHA20 && alg != ALG_AES_CTR) {
+            throw new SecurityException("Unsupported payload algorithm");
+        }
     }
 
     /**

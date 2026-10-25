@@ -1,6 +1,7 @@
 package io.umbra.gui;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -16,9 +17,12 @@ import java.util.Map;
  */
 public final class GuiPresets {
 
-    /** Ordered names shown by the preset selector. */
-    public static final List<String> NAMES = Arrays.asList(
-            "Light", "Balanced", "Aggressive", "Maximum", "Nocturne", "Custom");
+    /**
+     * Ordered names shown by the preset selector (immutable: shared by the GUI
+     * panels and public API, so a caller must not be able to mutate the list).
+     */
+    public static final List<String> NAMES = Collections.unmodifiableList(Arrays.asList(
+            "Light", "Balanced", "Aggressive", "Maximum", "Nocturne", "Custom"));
 
     public static final String DEFAULT = "Balanced";
 

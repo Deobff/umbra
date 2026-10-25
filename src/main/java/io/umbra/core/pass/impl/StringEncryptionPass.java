@@ -28,6 +28,7 @@ import org.objectweb.asm.tree.TypeInsnNode;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -109,8 +110,14 @@ public final class StringEncryptionPass implements Pass {
      */
     private static final int CLASS_SITE_LIMIT = 4000;
 
-    /** Template placeholder: bit 0 = wipe, bit 1 = stack-trace hiding. */
+    /** Template placeholder: bit 0 = wipe, bit 1 = stack-trace hiding, bit 2 = cache. */
     private static final String FLAGS_SPEC = "@@FLAGS@@";
+
+    /** Template placeholder for the per-build artifact salt. */
+    private static final String SALT_SPEC = "@@SALT@@";
+
+    /** Payload/key-schedule version produced by this pass (see UmbraStringCipher). */
+    static final int PAYLOAD_VERSION = 3;
 
     @Override
     public String name() {
@@ -153,10 +160,12 @@ public final class StringEncryptionPass implements Pass {
             boolean perClass = options.perClassKey
                     && (node.access & (Opcodes.ACC_INTERFACE | Opcodes.ACC_ANNOTATION | Opcodes.ACC_MODULE)) == 0;
             String classKeyField = perClass ? allocateFieldName(node, context) : null;
-            byte[] classKey = perClass ? Cipher.deriveClassKey(context.config().seed(), node.name) : null;
+            byte[] classKey = perClass
+                    ? UmbraStringCipher.classKeyV2(run.artifactSalt, context.config().seed(), node.name)
+                    : null;
             boolean indyAllowed = indyAllowed(node, options);
             int sitesInClass = 0;
-            run.beginClass();
+            run.beginClass(node.name);
             try {
                 for (MethodNode method : node.methods) {
                     if (method.instructions == null || method.instructions.size() == 0) {
@@ -182,9 +191,11 @@ public final class StringEncryptionPass implements Pass {
                 Cipher.wipe(classKey);
             }
             if (perClass && sitesInClass > 0 && classKeyField != null) {
-                addClassKeyField(node, classKeyField, Cipher.deriveClassKey(context.config().seed(), node.name));
+                addClassKeyField(node, classKeyField, UmbraStringCipher.classKeyV2(
+                        run.artifactSalt, context.config().seed(), node.name));
                 run.perClassClasses++;
             }
+
         }
 
         context.stats().add("strings.encrypted", run.encrypted);
@@ -216,14 +227,25 @@ public final class StringEncryptionPass implements Pass {
         context.stats().add("strings.engineKinds", run.engineKinds());
         context.stats().add("strings.wipe", options.wipe ? 1 : 0);
         context.stats().add("strings.stackTraceHide", options.stackTraceHide ? 1 : 0);
+        context.stats().add("strings.cache", options.cache ? 1 : 0);
         context.stats().add("strings.encryptAll", options.encryptAll ? 1 : 0);
+        context.stats().add("strings.payloadVersion", PAYLOAD_VERSION);
+        if (options.unsupportedOptions > 0) {
+            context.stats().add("strings.unsupportedOptions", options.unsupportedOptions);
+        }
+        if (options.engineFallback) {
+            context.stats().add("strings.engineFallback", 1);
+        }
+        if (options.engineOrderIgnored > 0) {
+            context.stats().add("strings.engineOrderIgnored", options.engineOrderIgnored);
+        }
         context.log().info("string-encryption: encrypted %d string constants (%s, split=%s, cache=%s, "
                         + "perClassKey=%d classes, indy=%d sites, minLength=%d, wipe=%s, "
-                        + "stackTraceHide=%s, size-skips=%d/%d)",
+                        + "stackTraceHide=%s, payload=v%d, size-skips=%d/%d)",
                 run.encrypted, run.describeEngines(), Boolean.valueOf(options.split),
                 Boolean.valueOf(options.cache), run.perClassClasses, run.indySites, options.minLength,
                 Boolean.valueOf(options.wipe), Boolean.valueOf(options.stackTraceHide),
-                run.methodSizeSkips, run.classLimitSkips);
+                Integer.valueOf(PAYLOAD_VERSION), run.methodSizeSkips, run.classLimitSkips);
         if (run.methodSizeSkips > 0 || run.classLimitSkips > 0) {
             context.log().debug("string-encryption: left %d site(s) plaintext in methods close to the "
                     + "64KB code limit and %d site(s) in classes near the constant-pool limit",
@@ -254,7 +276,7 @@ public final class StringEncryptionPass implements Pass {
                             break;
                         }
                         projectedBytes += perSiteGrowth;
-                        int siteId = run.nextSiteId++;
+                        int siteId = run.nextSiteId();
                         Site site = encryptSite(run, value, node, siteId, perClass, classKey);
                         run.countEngine(site.engine);
                         if (site.partCount > 1) {
@@ -413,7 +435,7 @@ public final class StringEncryptionPass implements Pass {
                 continue;
             }
             projectedBytes += HELPER_SITE_GROWTH;
-            int siteId = run.nextSiteId++;
+            int siteId = run.nextSiteId();
             Site site = encryptSite(run, value, node, siteId, perClass, classKey);
             run.countEngine(site.engine);
             if (site.partCount > 1) {
@@ -478,7 +500,8 @@ public final class StringEncryptionPass implements Pass {
                                     boolean perClass, byte[] classKey) {
         int engine = run.engineFor(node.name, siteId);
         byte[] plain = value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        long siteSeed = Cipher.deriveSiteSeed(run.context.config().seed(), node.name, siteId);
+        long buildSeed = run.context.config().seed();
+        long siteSeed = UmbraStringCipher.siteSeedV2(run.artifactSalt, buildSeed, node.name, siteId);
         byte[] ciphertext;
         byte[] key = null;
         boolean temporaryKey = false;
@@ -489,13 +512,13 @@ public final class StringEncryptionPass implements Pass {
         if (engine == UmbraStringCipher.XOR) {
             ciphertext = UmbraStringCipher.transform(engine, plain, null, null, siteSeed);
         } else if (usePerClass) {
-            byte[] nonce = Cipher.stringClassNonce(classKey, siteId);
+            byte[] nonce = UmbraStringCipher.classNonceV2(run.artifactSalt, classKey, siteId);
             ciphertext = UmbraStringCipher.transform(engine, plain, classKey, nonce, siteSeed);
             Cipher.wipe(nonce);
         } else {
-            key = Cipher.stringSiteKey(siteSeed, siteId);
+            key = UmbraStringCipher.siteKeyV2(run.artifactSalt, siteSeed, siteId);
             temporaryKey = true;
-            byte[] nonce = Cipher.stringSiteNonce(siteSeed, siteId);
+            byte[] nonce = UmbraStringCipher.siteNonceV2(run.artifactSalt, siteSeed, siteId);
             ciphertext = UmbraStringCipher.transform(engine, plain, key, nonce, siteSeed);
             Cipher.wipe(nonce);
         }
@@ -601,6 +624,9 @@ public final class StringEncryptionPass implements Pass {
         private boolean wipe;
         private boolean stackTraceHide;
         private boolean encryptAll;
+        private boolean engineFallback;
+        private int engineOrderIgnored;
+        private int unsupportedOptions;
         private int minLength;
         private int splitParts;
         private int strength;
@@ -627,14 +653,14 @@ public final class StringEncryptionPass implements Pass {
                     presetEngine = UmbraStringCipher.CHACHA20;
                     options.perClassKey = true;
                     options.split = true;
-                    options.cache = true;
+                    options.cache = false;
                     options.splitParts = 2;
                     break;
                 default:
                     presetEngine = UmbraStringCipher.CHACHA20;
                     options.perClassKey = true;
                     options.split = true;
-                    options.cache = true;
+                    options.cache = false;
                     options.splitParts = 3;
                     break;
             }
@@ -643,12 +669,19 @@ public final class StringEncryptionPass implements Pass {
             if (options.strength >= 3 && options.minLength > 1) {
                 options.minLength = 1;
             }
-            Integer algorithm = parseEngineName(context.config().option("string.algorithm", null));
+            String legacyAlgorithm = context.config().option("string.algorithm", null);
+            Integer algorithm = parseEngineName(legacyAlgorithm);
+            if (legacyAlgorithm != null && !legacyAlgorithm.trim().isEmpty() && algorithm == null) {
+                context.log().warn("string-encryption: unsupported string.algorithm '%s' ignored",
+                        legacyAlgorithm.trim());
+                options.unsupportedOptions++;
+            }
             options.singleEngine = algorithm == null ? presetEngine : algorithm.intValue();
             options.perClassKey = context.config().optionBool("string.perClassKey", options.perClassKey);
             options.split = context.config().optionBool("string.split", options.split);
             options.indy = context.config().optionBool("string.indy", options.indy);
-            options.cache = context.config().optionBool("string.cache", options.cache);
+            // Plaintext memoization is opt-in only (heap-dump hygiene).
+            options.cache = context.config().optionBool("string.cache", false);
             options.wipe = context.config().optionBool("string.wipe", false);
             options.stackTraceHide = context.config().optionBool("string.stackTraceHide", false);
             options.encryptAll = context.config().optionBool("string.encryptAll", false);
@@ -663,16 +696,31 @@ public final class StringEncryptionPass implements Pass {
                 options.splitParts = 1;
             }
             String engineSpec = context.config().option("string.engine", null);
+            String orderSpec = context.config().option("string.engineOrder", DEFAULT_ENGINE_ORDER);
             if (engineSpec != null && "auto".equalsIgnoreCase(engineSpec.trim())) {
                 options.autoEngine = true;
-                options.rotation = parseEngineOrder(
-                        context.config().option("string.engineOrder", DEFAULT_ENGINE_ORDER));
+                int[] ignored = new int[1];
+                options.rotation = parseEngineOrder(orderSpec, ignored);
+                options.engineOrderIgnored = ignored[0];
             } else {
                 Integer explicit = parseEngineName(engineSpec);
-                if (explicit != null) {
-                    options.singleEngine = explicit.intValue();
+                if (engineSpec != null && !engineSpec.trim().isEmpty() && explicit == null) {
+                    // Never accept an unsupported cipher as a silent
+                    // single-engine build: fall back to the randomized whitelist.
+                    context.log().warn("string-encryption: unsupported string.engine '%s'; "
+                            + "falling back to the auto engine distribution", engineSpec.trim());
+                    options.autoEngine = true;
+                    options.engineFallback = true;
+                    options.unsupportedOptions++;
+                    int[] ignored = new int[1];
+                    options.rotation = parseEngineOrder(orderSpec, ignored);
+                    options.engineOrderIgnored = ignored[0];
+                } else {
+                    if (explicit != null) {
+                        options.singleEngine = explicit.intValue();
+                    }
+                    options.rotation.add(Integer.valueOf(options.singleEngine));
                 }
-                options.rotation.add(Integer.valueOf(options.singleEngine));
             }
             return options;
         }
@@ -721,13 +769,31 @@ public final class StringEncryptionPass implements Pass {
 
     /** Parses a comma/space/semicolon separated engine rotation; never empty. */
     static List<Integer> parseEngineOrder(String raw) {
+        return parseEngineOrder(raw, new int[1]);
+    }
+
+    /**
+     * Parses an engine rotation and counts unsupported/ignored tokens in
+     * {@code ignored[0]}. The result is never empty: unknown-only lists fall back
+     * to {@link #DEFAULT_ENGINE_ORDER}.
+     */
+    static List<Integer> parseEngineOrder(String raw, int[] ignored) {
         List<Integer> rotation = new ArrayList<Integer>();
         Set<Integer> seen = new LinkedHashSet<Integer>();
         if (raw != null) {
             String[] tokens = raw.split("[,;\\s]+");
             for (int i = 0; i < tokens.length; i++) {
+                if (tokens[i].trim().isEmpty()) {
+                    continue;
+                }
                 Integer engine = parseEngineName(tokens[i]);
-                if (engine != null && seen.add(engine)) {
+                if (engine == null) {
+                    if (ignored != null && ignored.length > 0) {
+                        ignored[0]++;
+                    }
+                    continue;
+                }
+                if (seen.add(engine)) {
                     rotation.add(engine);
                 }
             }
@@ -762,7 +828,9 @@ public final class StringEncryptionPass implements Pass {
         private final PassContext context;
         private final Options options;
         private final int[] engineCounts = new int[5];
-        private int nextSiteId;
+        private final long artifactSalt;
+        private final Set<Integer> classSiteIds = new HashSet<Integer>();
+        private Random classRandom;
         private int encrypted;
         private int fieldConstants;
         private int splitSites;
@@ -779,20 +847,73 @@ public final class StringEncryptionPass implements Pass {
         Run(PassContext context, Options options) {
             this.context = context;
             this.options = options;
+            this.artifactSalt = resolveArtifactSalt(context);
         }
 
-        void beginClass() {
+        /**
+         * Resolves the per-build artifact salt: explicit {@code string.siteSalt}
+         * (decimal/hex number, or hashed text) or a deterministic 64-bit value
+         * derived from the build seed. It is embedded in the injected decryptor
+         * and mixed into every key/nonce/seed derivation (payload v3).
+         */
+        private static long resolveArtifactSalt(PassContext context) {
+            String raw = context.config().option("string.siteSalt", "");
+            if (raw != null && !raw.trim().isEmpty()) {
+                String text = raw.trim();
+                try {
+                    long parsed = Long.decode(text).longValue();
+                    return parsed == 0L ? 0x5A17C0DEL : parsed;
+                } catch (NumberFormatException notNumeric) {
+                    long hashed = UmbraStringCipher.hashSaltText(text);
+                    return hashed == 0L ? 0x5A17C0DEL : hashed;
+                }
+            }
+            return UmbraStringCipher.deriveArtifactSalt(context.config().seed());
+        }
+
+        void beginClass(String className) {
             classSites = 0;
+            classSiteIds.clear();
+            long seed = context.config().seed();
+            long mixed = seed * 0x9E3779B97F4A7C15L
+                    ^ artifactSalt * 0xD6E8FEB86659FD93L
+                    ^ (className == null ? 0L : className.hashCode() * 0x100000001B3L);
+            classRandom = new Random(mixed);
         }
 
-        /** Deterministic per-site engine selection. */
+        /**
+         * Deterministic but non-sequential 31-bit call-site index, unique inside
+         * the class. The index participates in key/nonce derivation, so
+         * uniqueness is required to avoid keystream reuse, and random-looking
+         * values stop "grep the next index" batch extraction.
+         */
+        int nextSiteId() {
+            if (classRandom == null) {
+                throw new IllegalStateException("site id requested before beginClass");
+            }
+            for (int attempt = 0; attempt < 10000; attempt++) {
+                int candidate = classRandom.nextInt() & 0x7FFFFFFF;
+                if (classSiteIds.add(Integer.valueOf(candidate))) {
+                    return candidate;
+                }
+            }
+            throw new IllegalStateException("Unable to allocate a unique string site id");
+        }
+
+        /**
+         * Randomized per-site engine selection for {@code string.engine=auto}.
+         * Only whitelisted engines can appear (the rotation was parsed from
+         * {@link #parseEngineName}); selection is deterministic per seed.
+         */
         int engineFor(String className, int siteId) {
             if (!options.autoEngine) {
                 return options.singleEngine;
             }
             List<Integer> rotation = options.rotation;
-            int mixed = className.hashCode() * 0x9E3779B1 + siteId;
-            return rotation.get((mixed & 0x7FFFFFFF) % rotation.size()).intValue();
+            if (classRandom == null) {
+                beginClass(className);
+            }
+            return rotation.get(classRandom.nextInt(rotation.size())).intValue();
         }
 
         void countEngine(int engine) {
@@ -838,10 +959,12 @@ public final class StringEncryptionPass implements Pass {
             if (decryptor == null) {
                 crypto = CryptoSupport.ensureCrypto(context.classes(), context.config().seed());
                 decryptor = CryptoSupport.randomName(context.classes(), context.config().seed(),
-                        "string-decryptor-v2", "umbra/runtime/S");
-                int flags = (options.wipe ? 1 : 0) | (options.stackTraceHide ? 2 : 0);
+                        "string-decryptor-v3", "umbra/runtime/S");
+                int flags = (options.wipe ? 1 : 0) | (options.stackTraceHide ? 2 : 0)
+                        | (options.cache ? 4 : 0);
                 Map<String, String> replacements = new LinkedHashMap<String, String>();
                 replacements.put(FLAGS_SPEC, String.valueOf(flags));
+                replacements.put(SALT_SPEC, Long.toString(artifactSalt));
                 CryptoSupport.injectWithCrypto(context.classes(), UmbraStringCipher.class, decryptor,
                         crypto, replacements);
             }
@@ -854,7 +977,7 @@ public final class StringEncryptionPass implements Pass {
                 Map<String, String> extra = new LinkedHashMap<String, String>();
                 extra.put("io/umbra/core/runtime/crypto/UmbraStringCipher", target);
                 indyHelper = CryptoSupport.randomName(context.classes(), context.config().seed(),
-                        "string-indy-bootstrap-v2", "umbra/runtime/I");
+                        "string-indy-bootstrap-v3", "umbra/runtime/I");
                 CryptoSupport.injectWithCrypto(context.classes(), UmbraStringIndy.class, indyHelper,
                         crypto, null, extra);
             }

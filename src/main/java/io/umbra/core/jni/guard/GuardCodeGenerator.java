@@ -37,8 +37,6 @@ public final class GuardCodeGenerator {
     public static final int CODE_SAMPLE_COUNT = 12;
     /** Bytes compared per code-section sample. */
     public static final int CODE_SAMPLE_WINDOW = 8;
-    /** Exported data symbol the protection pass patches after compilation. */
-    public static final String CODE_SAMPLE_EXPORT = "umbra_code_sample_table";
 
     private GuardCodeGenerator() {
     }
@@ -84,10 +82,10 @@ public final class GuardCodeGenerator {
     public static String generate(String guardClassInternalName, long secret,
                                   GuardFeatures features, PeImage.CodeSample[] codeSamples) {
         GuardFeatures active = features == null ? GuardFeatures.legacy(true, true) : features;
-        String initSymbol = exportSymbol(guardClassInternalName, "nativeInit");
-        String checkSymbol = exportSymbol(guardClassInternalName, "nativeCheck");
-        String selfTestSymbol = exportSymbol(guardClassInternalName, "nativeSelfTest");
-        String tokenSymbol = exportSymbol(guardClassInternalName, "nativeToken");
+        String initSymbol = "umbra_native_init";
+        String checkSymbol = "umbra_native_check";
+        String selfTestSymbol = "umbra_native_self";
+        String tokenSymbol = "umbra_native_token";
         StringBuilder out = new StringBuilder(1 << 14);
         out.append("#include <jni.h>\n");
         out.append("#include <stdio.h>\n");
@@ -142,8 +140,7 @@ public final class GuardCodeGenerator {
         out.append("static int g_hash_check = ").append(active.hash ? 1 : 0).append(";\n");
         out.append("static int g_initialized;\n");
         out.append("static volatile long g_last_mask;\n");
-        out.append("static const char* g_check_symbol = \"").append(cString(checkSymbol)).append("\";\n");
-        out.append("static const char* g_token_symbol = \"").append(cString(tokenSymbol)).append("\";\n");
+
         out.append('\n');
 
         out.append("typedef union { unsigned long long u; double d; void* p; } umbra_u64;\n\n");
@@ -212,7 +209,8 @@ public final class GuardCodeGenerator {
         out.append("    (*env)->CallStaticVoidMethod(env, g_guard_class, g_on_detect, (jint)mask);\n");
         out.append("}\n\n");
         GuardDynamicCode.emitCommon(out, active);
-        GuardDynamicCode.emitCodeSamples(out, CODE_SAMPLE_COUNT, CODE_SAMPLE_WINDOW);
+        GuardDynamicCode.emitCodeSamples(out, CODE_SAMPLE_COUNT, CODE_SAMPLE_WINDOW,
+                sampleMagic(secret));
         out.append("#ifdef _WIN32\n");
         appendWindowsChecks(out);
         GuardDynamicCode.windows(out, active);
@@ -221,9 +219,12 @@ public final class GuardCodeGenerator {
         out.append("#else\n");
         GuardDynamicCode.portable(out);
         out.append("#endif\n\n");
+        appendNativeDeclarations(out);
         appendIntegrity(out, checkSymbol, tokenSymbol);
         appendNativeMethods(out, initSymbol, checkSymbol, selfTestSymbol, tokenSymbol, active);
-        appendOnLoad(out);
+        appendFunctionTable(out, secret, initSymbol, checkSymbol, selfTestSymbol, tokenSymbol);
+        appendOnLoad(out, guardClassInternalName, secret, active, initSymbol, checkSymbol,
+                selfTestSymbol, tokenSymbol);
         return out.toString();
     }
 
@@ -568,19 +569,13 @@ public final class GuardCodeGenerator {
         out.append("    fclose(file);\n");
         out.append("    return hash;\n");
         out.append("}\n\n");
-        out.append("static int umbra_prologue_ok(const char* symbol, const unsigned char* expected, int expected_length) {\n");
+        out.append("static int umbra_prologue_ok(const void* function, const unsigned char* expected, int expected_length) {\n");
         out.append("#ifdef _WIN32\n");
-        out.append("    HMODULE module = NULL;\n");
-        out.append("    void* function;\n");
-        out.append("    if (expected_length <= 0) return 1;\n");
-        out.append("    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS\n");
-        out.append("            | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,\n");
-        out.append("            (LPCSTR)&umbra_prologue_ok, &module) == 0 || module == NULL) return 1;\n");
-        out.append("    function = (void*)GetProcAddress(module, symbol);\n");
         out.append("    if (function == NULL) return 0;\n");
+        out.append("    if (expected_length <= 0) return 1;\n");
         out.append("    return memcmp(function, expected, (size_t)expected_length) == 0 ? 1 : 0;\n");
         out.append("#else\n");
-        out.append("    (void)symbol; (void)expected; (void)expected_length;\n");
+        out.append("    (void)function; (void)expected; (void)expected_length;\n");
         out.append("    return 1;\n");
         out.append("#endif\n");
         out.append("}\n\n");
@@ -594,16 +589,23 @@ public final class GuardCodeGenerator {
         out.append("            mask |= UMBRA_DETECT_HASH;\n");
         out.append("        }\n");
         out.append("    }\n");
-        out.append("    if (!umbra_prologue_ok(g_check_symbol, g_prologue_check, g_prologue_check_len)) {\n");
+        out.append("    if (!umbra_prologue_ok((const void*)&umbra_native_check, g_prologue_check, g_prologue_check_len)) {\n");
         out.append("        mask |= UMBRA_DETECT_HOOK;\n");
         out.append("    }\n");
-        out.append("    if (!umbra_prologue_ok(g_token_symbol, g_prologue_token, g_prologue_token_len)) {\n");
+        out.append("    if (!umbra_prologue_ok((const void*)&umbra_native_token, g_prologue_token, g_prologue_token_len)) {\n");
         out.append("        mask |= UMBRA_DETECT_HOOK;\n");
         out.append("    }\n");
         out.append("    return mask;\n");
         out.append("}\n\n");
     }
 
+    /** Forward declarations: the self-test compares these entry points' prologues. */
+    private static void appendNativeDeclarations(StringBuilder out) {
+        out.append("static jint JNICALL umbra_native_init(JNIEnv*, jclass, jint, jlong, jstring, jstring, jstring);\n");
+        out.append("static jint JNICALL umbra_native_check(JNIEnv*, jclass);\n");
+        out.append("static jint JNICALL umbra_native_self(JNIEnv*, jclass);\n");
+        out.append("static jlong JNICALL umbra_native_token(JNIEnv*, jclass, jint);\n\n");
+    }
     // ------------------------------------------------------------------
     // JNI methods, tick and JNI_OnLoad
     // ------------------------------------------------------------------
@@ -611,7 +613,7 @@ public final class GuardCodeGenerator {
     private static void appendNativeMethods(StringBuilder out, String initSymbol, String checkSymbol,
                                             String selfTestSymbol, String tokenSymbol,
                                             GuardFeatures features) {
-        out.append("JNIEXPORT jint JNICALL ").append(initSymbol)
+        out.append("static jint JNICALL ").append(initSymbol)
                 .append("(JNIEnv* env, jclass cls, jint action, jlong secret,\n");
         out.append("        jstring hash_hex, jstring prologue_check_hex, jstring prologue_token_hex) {\n");
         out.append("    const char* text;\n");
@@ -650,7 +652,7 @@ public final class GuardCodeGenerator {
         out.append("    g_initialized = 1;\n");
         out.append("    return umbra_self_test();\n");
         out.append("}\n\n");
-        out.append("JNIEXPORT jint JNICALL ").append(checkSymbol)
+        out.append("static jint JNICALL ").append(checkSymbol)
                 .append("(JNIEnv* env, jclass cls) {\n");
         out.append("    int mask = 0;\n");
         out.append("    (void)env; (void)cls;\n");
@@ -668,12 +670,12 @@ public final class GuardCodeGenerator {
         out.append("    }\n");
         out.append("    return mask;\n");
         out.append("}\n\n");
-        out.append("JNIEXPORT jint JNICALL ").append(selfTestSymbol)
+        out.append("static jint JNICALL ").append(selfTestSymbol)
                 .append("(JNIEnv* env, jclass cls) {\n");
         out.append("    (void)env; (void)cls;\n");
         out.append("    return umbra_self_test();\n");
         out.append("}\n\n");
-        out.append("JNIEXPORT jlong JNICALL ").append(tokenSymbol)
+        out.append("static jlong JNICALL ").append(tokenSymbol)
                 .append("(JNIEnv* env, jclass cls, jint challenge) {\n");
         out.append("    unsigned long long hash;\n");
         out.append("    (void)env; (void)cls;\n");
@@ -695,18 +697,164 @@ public final class GuardCodeGenerator {
         out.append("    }\n");
         out.append("    return 0;\n");
         out.append("}\n\n");
+    }
+
+    /** XOR key for the encoded class-name literals (no plaintext class name in the PE). */
+    private static int classNameKey(long secret) {
+        int key = (int) ((secret >>> 8) & 0xFF);
+        return key == 0 ? 0x5A : key;
+    }
+
+    /** Emits a helper that decodes and resolves a class name via FindClass. */
+    private static void appendClassNameLookup(StringBuilder out, String functionName,
+                                              String internalName, int key) {
+        byte[] encoded = new byte[internalName.length()];
+        for (int i = 0; i < encoded.length; i++) {
+            encoded[i] = (byte) (internalName.charAt(i) ^ key);
+        }
+        out.append("static int ").append(functionName).append("(JNIEnv* env, jclass* out) {\n");
+        out.append("    static const unsigned char enc[] = {");
+        for (int i = 0; i < encoded.length; i++) {
+            if (i > 0) {
+                out.append(',');
+            }
+            out.append("0x").append(Integer.toHexString(encoded[i] & 0xFF));
+        }
+        out.append("};\n");
+        out.append("    char name[").append(encoded.length + 1).append("];\n");
+        out.append("    int i;\n");
+        out.append("    for (i = 0; i < ").append(encoded.length)
+                .append("; i++) name[i] = (char)(enc[i] ^ 0x")
+                .append(Integer.toHexString(key & 0xFF)).append(");\n");
+        out.append("    name[").append(encoded.length).append("] = 0;\n");
+        out.append("    *out = (*env)->FindClass(env, name);\n");
+        out.append("    if (*out == NULL) { (*env)->ExceptionClear(env); return -1; }\n");
+        out.append("    return 0;\n");
+        out.append("}\n\n");
+    }
+    /**
+     * Emits a magic-located table of the native entry points. The protection pass
+     * reads the function addresses from the compiled image (via the table magic)
+     * to compute the expected prologue bytes without needing PE export symbols.
+     */
+    private static void appendFunctionTable(StringBuilder out, long secret, String initSymbol,
+                                            String checkSymbol, String selfTestSymbol,
+                                            String tokenSymbol) {
+        out.append("typedef struct { unsigned long long magic; void* fn[4]; } umbra_fn_table_t;\n");
+        out.append("static volatile umbra_fn_table_t umbra_fn_table = {\n");
+        out.append("    0x").append(java.lang.Long.toHexString(functionTableMagic(secret)))
+                .append("ULL,\n");
+        out.append("    { (void*)&").append(initSymbol).append(", (void*)&").append(checkSymbol)
+                .append(", (void*)&").append(selfTestSymbol).append(", (void*)&")
+                .append(tokenSymbol).append(" }\n");
+        out.append("};\n\n");
+    }
+
+    /**
+     * Emits {@code JNI_OnLoad}: the only JNI export. The four guard methods (and
+     * the test hooks when enabled) are bound with {@code RegisterNatives}, so the
+     * PE export table exposes no plaintext {@code Java_*} symbols.
+     */
+    private static void appendOnLoad(StringBuilder out, String guardClassInternalName, long secret,
+                                     GuardFeatures features, String initSymbol, String checkSymbol,
+                                     String selfTestSymbol, String tokenSymbol) {
+        int key = classNameKey(secret);
+        appendClassNameLookup(out, "umbra_find_guard", guardClassInternalName, key);
+        out.append("static int umbra_register_natives(JNIEnv* env) {\n");
+        out.append("    jclass cls;\n");
+        out.append("    JNINativeMethod methods[4];\n");
+        out.append("    if (umbra_find_guard(env, &cls) != 0) return -1;\n");
+        out.append("    methods[0].name = (char*)\"nativeInit\";\n");
+        out.append("    methods[0].signature = (char*)\"").append(NATIVE_INIT_DESCRIPTOR)
+                .append("\";\n");
+        out.append("    methods[0].fnPtr = (void*)&").append(initSymbol).append(";\n");
+        out.append("    methods[1].name = (char*)\"nativeCheck\";\n");
+        out.append("    methods[1].signature = (char*)\"()I\";\n");
+        out.append("    methods[1].fnPtr = (void*)&").append(checkSymbol).append(";\n");
+        out.append("    methods[2].name = (char*)\"nativeSelfTest\";\n");
+        out.append("    methods[2].signature = (char*)\"()I\";\n");
+        out.append("    methods[2].fnPtr = (void*)&").append(selfTestSymbol).append(";\n");
+        out.append("    methods[3].name = (char*)\"nativeToken\";\n");
+        out.append("    methods[3].signature = (char*)\"(I)J\";\n");
+        out.append("    methods[3].fnPtr = (void*)&").append(tokenSymbol).append(";\n");
+        out.append("    if ((*env)->RegisterNatives(env, cls, methods, 4) != 0) {\n");
+        out.append("        (*env)->ExceptionClear(env);\n");
+        out.append("        return -1;\n");
+        out.append("    }\n");
+        out.append("    return 0;\n");
+        out.append("}\n\n");
+        if (features.testHooks && features.testHookClass != null) {
+            appendHookRegistration(out, features.testHookClass, key);
+        }
         out.append("JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {\n");
+        out.append("    JNIEnv* env = NULL;\n");
         out.append("    (void)reserved;\n");
         out.append("    g_vm = vm;\n");
+        out.append("    if (umbra_fn_table.fn[0] == NULL || umbra_fn_table.fn[3] == NULL)\n");
+        out.append("        return JNI_VERSION_1_6;\n");
+        out.append("    if ((*vm)->GetEnv(vm, (void**)&env, JNI_VERSION_1_6) != JNI_OK\n");
+        out.append("            || env == NULL) return JNI_VERSION_1_6;\n");
+        out.append("    umbra_register_natives(env);\n");
+        if (features.testHooks && features.testHookClass != null) {
+            out.append("    umbra_register_hooks(env);\n");
+        }
         out.append("    return JNI_VERSION_1_6;\n");
         out.append("}\n");
     }
 
-    private static void appendOnLoad(StringBuilder out) {
-        // JNI_OnLoad is emitted together with the native methods above.
-        out.append('\n');
+    /** RegisterNatives binding for the test-only hook class (never in production). */
+    private static void appendHookRegistration(StringBuilder out, String hookClassInternalName,
+                                               int key) {
+        appendClassNameLookup(out, "umbra_find_hooks", hookClassInternalName, key);
+        String[] names = {"testAllocExec", "testRemoteThread", "testPatchSample", "testAgeTiming",
+                "testSampleMismatch", "testSampleCount", "testReadByte", "testQuick", "testDeep",
+                "testExecScan", "testRemoteScan"};
+        String[] signatures = {"()J", "()I", "()I", "(J)I", "()I", "()I", "(I)I", "()I", "()I",
+                "()I", "()I"};
+        out.append("static int umbra_register_hooks(JNIEnv* env) {\n");
+        out.append("    jclass cls;\n");
+        out.append("    JNINativeMethod methods[").append(names.length).append("];\n");
+        out.append("    if (umbra_find_hooks(env, &cls) != 0) return -1;\n");
+        for (int i = 0; i < names.length; i++) {
+            out.append("    methods[").append(i).append("].name = (char*)\"").append(names[i])
+                    .append("\";\n");
+            out.append("    methods[").append(i).append("].signature = (char*)\"")
+                    .append(signatures[i]).append("\";\n");
+            out.append("    methods[").append(i).append("].fnPtr = (void*)&umbra_hook_")
+                    .append(names[i]).append(";\n");
+        }
+        out.append("    if ((*env)->RegisterNatives(env, cls, methods, ")
+                .append(names.length).append(") != 0) {\n");
+        out.append("        (*env)->ExceptionClear(env);\n");
+        out.append("        return -1;\n");
+        out.append("    }\n");
+        out.append("    return 0;\n");
+        out.append("}\n\n");
     }
 
+    /**
+     * FNV-1a over the little-endian secret^salt: 64-bit magic that identifies the
+     * post-link-patched data structures without a PE export symbol.
+     */
+    private static long magic(long secret, long salt) {
+        long hash = 0xcbf29ce484222325L;
+        long value = secret ^ salt;
+        for (int i = 0; i < 8; i++) {
+            hash ^= (value >>> (i * 8)) & 0xFFL;
+            hash *= 0x100000001b3L;
+        }
+        return hash;
+    }
+
+    /** Magic of the randomized code-sample table inside the compiled guard. */
+    public static long sampleMagic(long secret) {
+        return magic(secret, 0x53414D504C454D41L);
+    }
+
+    /** Magic of the native entry-point pointer table inside the compiled guard. */
+    public static long functionTableMagic(long secret) {
+        return magic(secret, 0x464E54424C4D4147L);
+    }
     private static String hex64(long value) {
         return "0x" + GuardOptions.hex(value, 16);
     }

@@ -2,6 +2,7 @@ package io.umbra.core.runtime;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -75,6 +76,19 @@ public final class UmbraNativeGuard {
     private static volatile boolean watchdogStarted;
     private static volatile boolean nativeLoaded;
     private static volatile long challengeCounter;
+
+    /**
+     * Neutral content marker written next to every extracted guard library. The
+     * random directory/file names carry no fixed prefix; stale directories from
+     * earlier runs are recognized only by this marker (and only when they are old
+     * enough that no live process can still be mapping their library).
+     */
+    private static final String MARKER = "9f2c7a4e1b8d6350a5c9e2f7b4d1863e";
+    private static final String MARKER_FILE = "m";
+    private static final String NAME_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789";
+    private static final java.security.SecureRandom RANDOM = new java.security.SecureRandom();
+    private static volatile File extractedLibrary;
+    private static volatile File extractedDirectory;
 
     private UmbraNativeGuard() {
     }
@@ -238,19 +252,31 @@ public final class UmbraNativeGuard {
         if (library == null) {
             return DETECT_HASH;
         }
-        System.load(library.getAbsolutePath());
+        try {
+            System.load(library.getAbsolutePath());
+        } catch (Throwable failure) {
+            disposeExtracted();
+            return DETECT_HASH;
+        }
+        disposeAfterLoad(library);
         System.setProperty("umbra.guard.path", library.getAbsolutePath());
         nativeLoaded = true;
-        int init = nativeInit(ACTION, SECRET, FILE_HASH_HEX, PROLOGUE_CHECK_HEX, PROLOGUE_TOKEN_HEX);
-        if (init != 0) {
-            mask |= init;
-        }
-        int selfTest = nativeSelfTest();
-        if (selfTest != 0) {
-            mask |= selfTest;
-        }
-        if (tokenMismatch()) {
-            mask |= DETECT_TOKEN;
+        try {
+            int init = nativeInit(ACTION, SECRET, FILE_HASH_HEX, PROLOGUE_CHECK_HEX,
+                    PROLOGUE_TOKEN_HEX);
+            if (init != 0) {
+                mask |= init;
+            }
+            int selfTest = nativeSelfTest();
+            if (selfTest != 0) {
+                mask |= selfTest;
+            }
+            if (tokenMismatch()) {
+                mask |= DETECT_TOKEN;
+            }
+        } catch (Throwable failure) {
+            // JNI binding/extraction failure must fail closed, not crash the app.
+            return mask | DETECT_HASH;
         }
         mask |= verifyNativeMethods();
         return mask;
@@ -276,28 +302,58 @@ public final class UmbraNativeGuard {
         return nativeToken(challenge) != expected;
     }
 
+    /**
+     * Writes the guard library into a random directory with a random
+     * alphanumeric file name (no fixed prefix), plus a marker file used for
+     * stale-directory cleanup.
+     */
     private static File extractLibrary() {
         cleanupStaleLibraries();
         byte[] data = readResource();
         if (data == null || data.length == 0) {
             return null;
         }
+        File root = new File(System.getProperty("java.io.tmpdir", "."));
+        File directory = new File(root, randomName(16));
         File file = null;
         try {
-            file = File.createTempFile("umbra-guard-", librarySuffix());
-            file.deleteOnExit();
+            if (!directory.mkdirs()) {
+                return null;
+            }
+            file = new File(directory, randomName(16) + librarySuffix());
             OutputStream out = new FileOutputStream(file);
             try {
                 out.write(data);
             } finally {
                 out.close();
             }
+            writeMarker(directory);
+            extractedDirectory = directory;
+            extractedLibrary = file;
+            file.deleteOnExit();
+            // The marker intentionally survives: after this process exits the
+            // cleanup of the next run needs it to identify the leftover directory.
+            directory.deleteOnExit();
             return file;
         } catch (IOException failure) {
             if (file != null && file.exists() && !file.delete()) {
                 file.deleteOnExit();
             }
+            deleteTree(directory);
             return null;
+        }
+    }
+
+    private static void writeMarker(File directory) {
+        try {
+            OutputStream out = new FileOutputStream(new File(directory, MARKER_FILE));
+            try {
+                out.write(MARKER.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            } finally {
+                out.close();
+            }
+        } catch (IOException ignored) {
+            // the extracted dir is still cleaned by deleteOnExit best effort
         }
     }
 
@@ -313,43 +369,126 @@ public final class UmbraNativeGuard {
         return ".so";
     }
 
+    private static String randomName(int length) {
+        StringBuilder name = new StringBuilder(length);
+        for (int i = 0; i < length; i++) {
+            name.append(NAME_CHARS.charAt(RANDOM.nextInt(NAME_CHARS.length())));
+        }
+        return name.toString();
+    }
+
     /**
-     * Best-effort cleanup of guard libraries extracted by earlier processes.
+     * Destroys the extracted file after {@link System#load} so a copy of the
+     * on-disk library is not usable for analysis.
      *
-     * <p>On Windows a loaded DLL cannot be deleted while any process still has it
-     * mapped, so a guard extracted by one run can survive that run's exit and
-     * accumulate in the temp directory. Files that are still mapped by another
-     * live process simply fail the delete and are skipped; files older than a few
-     * seconds that are not locked are stale leftovers and are removed. The
-     * current process never deletes its own library (it is younger than the
-     * protection window when this runs).</p>
+     * <p>POSIX allows unlinking a mapped library: the directory entry disappears
+     * immediately and the mapping stays valid. On Windows a mapped image file is
+     * locked against write/delete; the truncate/overwrite attempt therefore fails
+     * with a sharing violation and the file is left for the stale-directory
+     * cleanup of the next run (documented residual, no portable workaround without
+     * a manual mapper).</p>
+     */
+    private static void disposeAfterLoad(File library) {
+        if (!isWindows()) {
+            disposeExtracted();
+            return;
+        }
+        boolean removed = false;
+        try {
+            java.io.RandomAccessFile file = new java.io.RandomAccessFile(library, "rw");
+            try {
+                file.setLength(0);
+                file.seek(0);
+                byte[] junk = new byte[64];
+                RANDOM.nextBytes(junk);
+                file.write(junk);
+            } finally {
+                file.close();
+            }
+            removed = library.delete();
+        } catch (IOException lockedOnWindows) {
+            removed = false;
+        } catch (Throwable ignored) {
+            removed = false;
+        }
+        if (!removed) {
+            library.deleteOnExit();
+        }
+    }
+
+    /** Removes the current extraction (marker, library and directory) best effort. */
+    private static void disposeExtracted() {
+        File library = extractedLibrary;
+        File directory = extractedDirectory;
+        if (library != null) {
+            library.delete();
+        }
+        if (directory != null) {
+            new File(directory, MARKER_FILE).delete();
+            deleteTree(directory);
+        }
+    }
+
+    /**
+     * Removes stale guard directories from earlier runs. Only old directories
+     * (60s+) carrying our marker are considered; a library still mapped by a live
+     * process fails to delete and is retried by a later run. No file name prefix is
+     * matched.
      */
     private static void cleanupStaleLibraries() {
         try {
-            File directory = new File(System.getProperty("java.io.tmpdir", "."));
-            File[] files = directory.listFiles();
-            if (files == null) {
+            File root = new File(System.getProperty("java.io.tmpdir", "."));
+            File[] children = root.listFiles();
+            if (children == null) {
                 return;
             }
-            long cutoff = System.currentTimeMillis() - 5000L;
-            String suffix = librarySuffix();
-            for (File file : files) {
-                if (!file.isFile()) {
+            long cutoff = System.currentTimeMillis() - 60000L;
+            for (File child : children) {
+                if (!child.isDirectory() || child.lastModified() > cutoff) {
                     continue;
                 }
-                String name = file.getName();
-                if (!name.startsWith("umbra-guard-") || !name.endsWith(suffix)) {
+                if (!MARKER.equals(readMarker(child))) {
                     continue;
                 }
-                if (file.lastModified() > cutoff) {
-                    continue;
-                }
-                if (!file.delete()) {
-                    file.deleteOnExit();
-                }
+                deleteTree(child);
             }
         } catch (Throwable ignored) {
-            // best effort only: cleanup must never break the guard
+            // best effort: cleanup must never break the guard
+        }
+    }
+
+    private static String readMarker(File directory) {
+        File marker = new File(directory, MARKER_FILE);
+        if (!marker.isFile()) {
+            return null;
+        }
+        try {
+            InputStream in = new FileInputStream(marker);
+            try {
+                byte[] buffer = new byte[64];
+                int read = in.read(buffer);
+                return read <= 0 ? null : new String(buffer, 0, read,
+                        java.nio.charset.StandardCharsets.UTF_8);
+            } finally {
+                in.close();
+            }
+        } catch (IOException ignored) {
+            return null;
+        }
+    }
+
+    private static void deleteTree(File file) {
+        if (file == null || !file.exists()) {
+            return;
+        }
+        File[] children = file.listFiles();
+        if (children != null) {
+            for (File child : children) {
+                deleteTree(child);
+            }
+        }
+        if (!file.delete()) {
+            file.deleteOnExit();
         }
     }
     private static byte[] readResource() {

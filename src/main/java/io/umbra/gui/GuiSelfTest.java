@@ -4,6 +4,7 @@ import io.umbra.core.config.ConfigLoader;
 import io.umbra.core.config.UmbraConfig;
 import io.umbra.gui.theme.Tokens;
 import io.umbra.gui.ui.ConsolePanel;
+import io.umbra.gui.ui.ModeOptionsPanel;
 import io.umbra.gui.ui.GroupSection;
 import io.umbra.gui.ui.RightColumn;
 import io.umbra.gui.ui.StatCard;
@@ -58,6 +59,7 @@ public final class GuiSelfTest {
                 checkPresets(root);
                 checkResponsive(root);
                 checkShortcutsAndPrefs(root, temp);
+                checkModeOptions(root, temp);
                 checkOptionsAndConfig(temp);
                 checkScreenshot(root, temp);
             } finally {
@@ -333,6 +335,220 @@ public final class GuiSelfTest {
         return colors.size();
     }
 
+    private static void checkModeOptions(GuiRoot root, Path temp) throws Exception {
+        List<GuiModeOptions.Group> groups = GuiModeOptions.groups();
+        check(groups.size() == 12, "mode options sheet has 12 groups (was " + groups.size() + ")");
+        int expectedGroups = 12;
+        check(groups.size() == expectedGroups, "mode options group count is stable");
+        List<GuiModeOptions.Spec> specs = GuiModeOptions.allSpecs();
+        check(specs.size() >= 100, "mode options exposes " + specs.size() + " controls");
+        int booleans = 0;
+        int enums = 0;
+        int numbers = 0;
+        int texts = 0;
+        java.util.Set<String> ids = new java.util.HashSet<String>();
+        for (GuiModeOptions.Spec spec : specs) {
+            check(ids.add(spec.id), "mode option id is unique: " + spec.id);
+            check(spec.label != null && !spec.label.trim().isEmpty(),
+                    "mode option labelled: " + spec.id);
+            check(spec.label.matches("[\\x20-\\x7E]+"),
+                    "mode option label is English: " + spec.id);
+            if (spec.kind == GuiModeOptions.Kind.BOOL) {
+                booleans++;
+                check("true".equals(spec.defaultValue) || "false".equals(spec.defaultValue),
+                        "boolean default valid: " + spec.id);
+            } else if (spec.kind == GuiModeOptions.Kind.ENUM) {
+                enums++;
+                check(!spec.values.isEmpty(), "enum has values: " + spec.id);
+                check(spec.values.contains(spec.defaultValue),
+                        "enum default is a listed value: " + spec.id);
+            } else if (spec.kind == GuiModeOptions.Kind.INT) {
+                numbers++;
+                int defaultValue = Integer.parseInt(spec.defaultValue);
+                check(defaultValue >= spec.min && defaultValue <= spec.max,
+                        "int default inside range: " + spec.id);
+            } else {
+                texts++;
+                check(spec.defaultValue != null, "text default present: " + spec.id);
+            }
+            if (spec.key != null && !spec.uiOnly()) {
+                check(!spec.key.startsWith("gui."),
+                        "engine option key is not a GUI key: " + spec.key);
+                check(spec.key.indexOf(' ') < 0, "option key has no spaces: " + spec.key);
+            }
+        }
+        check(booleans > 60 && enums >= 9 && numbers > 20 && texts >= 8,
+                "mode options covers booleans/ints/enums/text"
+                        + " (" + booleans + "/" + numbers + "/" + enums + "/" + texts + ")");
+
+        // Every mode's detailed defaults must reproduce the left-column preset
+        // exactly; this is the core "mode == preset defaults" invariant.
+        for (String mode : new String[]{"Light", "Balanced", "Aggressive", "Maximum",
+                "Nocturne"}) {
+            Map<String, String> values = GuiModeOptions.defaults(mode);
+            check(values.size() == specs.size(),
+                    "mode defaults are complete for " + mode);
+            Map<String, Boolean> synced = GuiModeOptions.syncToggles(values);
+            Map<String, Boolean> preset = GuiPresets.states(mode);
+            check(synced.size() == preset.size(),
+                    "mode " + mode + " syncs every left switch ("
+                            + synced.size() + "/" + preset.size() + ")");
+            for (Map.Entry<String, Boolean> entry : preset.entrySet()) {
+                check(entry.getValue().equals(synced.get(entry.getKey())),
+                        "mode " + mode + " switch " + entry.getKey()
+                                + " matches preset defaults");
+            }
+            Map<String, String> options = GuiModeOptions.toOptionMap(values);
+            check("preserve".equals(options.get("layout.multiRelease")),
+                    "mode " + mode + " keeps the multi-release layout option");
+            check(!options.containsKey("gui.seed"), "UI-only seed is not an engine option");
+        }
+        check("true".equals(GuiModeOptions.defaults("Maximum")
+                        .get("typeConfusion.enabled")),
+                "Maximum mode enables type confusion in the detailed catalog");
+        check("false".equals(GuiModeOptions.defaults("Light")
+                        .get("classEncryption.enabled")),
+                "Light mode disables class encryption in the detailed catalog");
+
+        // Dialog panel behaviour (headless, no window).
+        ModeOptionsPanel panel = new ModeOptionsPanel(
+                GuiModeOptions.defaults("Balanced"), "Balanced", null);
+        panel.setSize(ModeOptionsPanel.SHEET_WIDTH, ModeOptionsPanel.SHEET_HEIGHT);
+        GuiScreenshot.layoutTree(panel);
+        check(panel.sectionTitles().size() == 12, "panel renders all 12 sections");
+        check(panel.sectionTitles().contains("Names"), "panel has a Names section");
+        check(panel.sectionTitles().contains("Strings"), "panel has a Strings section");
+        check(panel.sectionTitles().contains("Virtualization"),
+                "panel has a Virtualization section");
+        check(panel.sectionTitles().contains("Compatibility"),
+                "panel has a Compatibility section");
+        check(panel.sectionTitles().contains("Output"), "panel has an Output section");
+        check(panel.controlCount() == specs.size(), "panel builds one control per spec");
+        for (GuiModeOptions.Spec spec : specs) {
+            check(panel.control(spec.id) != null, "panel control present: " + spec.id);
+        }
+        check("Balanced".equals(panel.selectedMode()), "panel starts in the given mode");
+        check("true".equals(panel.value("renamer.enabled")),
+                "panel loads balanced defaults");
+        check(panel.bodyPreferredHeight() > ModeOptionsPanel.SHEET_HEIGHT,
+                "mode options body is scrollable");
+        panel.setValue("decompilerNoise.level", "4");
+        check("Custom".equals(panel.selectedMode()), "editing a control marks Custom");
+        check("4".equals(panel.value("decompilerNoise.level")), "edit stored");
+        panel.resetToModeDefaults();
+        check("Balanced".equals(panel.selectedMode()), "reset restores the mode");
+        check("1".equals(panel.value("decompilerNoise.level")),
+                "reset restores the mode default value");
+        panel.setMode("Maximum");
+        check("Maximum".equals(panel.selectedMode()), "setMode selects Maximum");
+        check("true".equals(panel.value("classEncryption.enabled")),
+                "Maximum mode detail enables class encryption");
+        check("true".equals(panel.value("typeConfusion.enabled")),
+                "Maximum mode detail enables type confusion");
+        check("true".equals(panel.value("mba.enabled")),
+                "Maximum mode detail enables MBA");
+        panel.setValue("gui.seed", "not-a-number");
+        check(panel.validationError() != null, "invalid seed is rejected");
+        panel.setValue("gui.seed", "23303");
+        check(panel.validationError() == null, "valid seed is accepted");
+        panel.scrollToSection("Native");
+        Path optionsPng = temp.resolve("mode-options.png");
+        GuiScreenshot.writePanel(panel, ModeOptionsPanel.SHEET_WIDTH,
+                ModeOptionsPanel.SHEET_HEIGHT, optionsPng);
+        check(Files.isRegularFile(optionsPng), "mode options PNG written");
+        check(Files.size(optionsPng) > 15000, "mode options PNG has content ("
+                + Files.size(optionsPng) + " bytes)");
+        BufferedImage optionsImage = ImageIO.read(optionsPng.toFile());
+        check(optionsImage != null && optionsImage.getWidth() == 900
+                        && optionsImage.getHeight() == 700,
+                "mode options PNG is 900x700");
+
+        // Root integration: dialog values drive switches, options and YAML.
+        check(root.modeOptionsButton() != null, "Mode options button exists");
+        check(root.modeOptionsButton().getAccessibleContext().getAccessibleName() != null,
+                "Mode options button has an accessible name");
+        check(root.modeOptionsButton().getText().indexOf("Mode options") >= 0,
+                "Mode options button is labelled 'Mode options'");
+        root.applyModeOptions(GuiModeOptions.defaults("Maximum"), "Maximum");
+        check("Maximum".equals(root.presetSelector().selected()),
+                "applying Maximum selects the Maximum mode");
+        check(root.sidebarPanel().isOn("classEnc"),
+                "Maximum mode enables the class encryption switch");
+        check(root.sidebarPanel().isOn("typeConfusion"),
+                "Maximum mode enables the type confusion switch");
+        check("3".equals(root.detailedOptionsForTest().get("string.strength")),
+                "Maximum mode carries string strength 3 to the run options");
+
+        Map<String, String> custom = new LinkedHashMap<String, String>(
+                GuiModeOptions.defaults("Maximum"));
+        custom.put("classEncryption.enabled", "false");
+        custom.put("decompilerNoise.level", "4");
+        root.applyModeOptions(custom, "Custom");
+        check("Custom".equals(root.presetSelector().selected()),
+                "custom detail edits switch the sidebar selector to Custom");
+        check(!root.sidebarPanel().isOn("classEnc"),
+                "custom detail edit disables the class encryption switch");
+        check("4".equals(root.detailedOptionsForTest().get("decompilerNoise.level")),
+                "custom detail edits are kept");
+        check(root.sidebarPanel().triggerToggleForTest("strings", false),
+                "left switch can be flipped by the test hook");
+        check(!root.sidebarPanel().isOn("strings"), "strings switch is off");
+        check("false".equals(root.detailedOptionsForTest().get("stringEncryption.enabled")),
+                "left switch edit syncs into the detailed values");
+
+        root.applyModeOptions(GuiModeOptions.defaults("Maximum"), "Maximum");
+        Map<String, String> collected = root.collectOptions();
+        check("true".equals(collected.get("typeConfusion.enabled")),
+                "run options include detailed type confusion value");
+        check("3".equals(collected.get("string.strength")),
+                "run options include detailed string strength");
+        check("normal".equals(collected.get("flowObfuscation.level")),
+                "run options include detailed flow level");
+        check("true".equals(collected.get("mba.enabled")),
+                "run options include detailed MBA switch");
+        check(collected.containsKey("layout.moduleInfo"),
+                "run options include detailed module-info mode");
+
+        // Detailed typed keys reach the typed configuration and round-trip YAML.
+        Path input = temp.resolve("mode-app.jar");
+        Files.write(input, new byte[0]);
+        Path output = temp.resolve("mode-app-obf.jar");
+        Map<String, String> detailed = GuiModeOptions.toOptionMap(
+                GuiModeOptions.defaults("Maximum"));
+        detailed.put("renamer.renameClasses", "false");
+        detailed.put("renamer.prefix", "z_");
+        detailed.put("renamer.minimumNameLength", "3");
+        detailed.put("antiLlm.decoyMethodsPerClass", "5");
+        UmbraConfig config = GuiConfig.build(input, output, 4242L, detailed,
+                temp.resolve("mode-mapping.txt"));
+        check(!config.renamer().renameClasses(),
+                "detailed rename-classes flag reaches the typed renamer");
+        check("z_".equals(config.renamer().prefix()),
+                "detailed rename prefix reaches the typed renamer");
+        check(config.renamer().minimumNameLength() == 3,
+                "detailed minimum name length reaches the typed renamer");
+        check(config.antiLlm().decoyMethodsPerClass() == 5,
+                "detailed anti-LLM decoy count reaches the typed section");
+        String yaml = GuiConfig.toYaml(config);
+        Path yamlFile = temp.resolve("mode-options.yml");
+        Files.write(yamlFile, yaml.getBytes(StandardCharsets.UTF_8));
+        UmbraConfig loaded = ConfigLoader.load(yamlFile);
+        Map<String, String> reloaded = GuiModeOptions.fromEffective(
+                GuiConfig.describe(loaded));
+        for (GuiModeOptions.Spec spec : specs) {
+            if (spec.key == null) {
+                continue;
+            }
+            String expected = GuiModeOptions.normalize(spec, detailed.get(spec.key));
+            check(expected.equals(reloaded.get(spec.id)),
+                    "YAML round trip keeps mode option " + spec.key);
+        }
+        root.applyPresetForScreenshot("Balanced");
+        root.setSize(1440, 900);
+        GuiScreenshot.layoutTree(root);
+        check("Balanced".equals(root.presetSelector().selected()),
+                "mode options self-test restores the Balanced preset");
+    }
     private static void check(boolean condition, String message) {
         checks++;
         if (!condition) {

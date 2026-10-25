@@ -59,6 +59,11 @@ public final class GuiMain {
             System.exit(code);
             return;
         }
+        if (options.optionsScreenshot != null) {
+            int code = runModeOptionsScreenshot(options);
+            System.exit(code);
+            return;
+        }
         if (GraphicsEnvironment.isHeadless()) {
             System.err.println("Umbra GUI requires a graphical desktop. Use the CLI instead: "
                     + "java -jar umbra.jar -i input.jar -o output.jar");
@@ -93,12 +98,12 @@ public final class GuiMain {
         GuiScreenshot.layoutTree(root);
 
         if (!options.run) {
-            if (options.seed != null) {
-                root.topBar().seedField().setText(String.valueOf(options.seed.longValue()));
-            }
-            if (options.preset != null) {
-                root.applyPresetForScreenshot(options.preset);
-            }
+            // QA screenshots are deterministic: explicit or default seed/preset,
+            // independent of the persisted user preferences.
+            root.topBar().seedField().setText(String.valueOf(
+                    options.seed == null ? 23303L : options.seed.longValue()));
+            root.applyPresetForScreenshot(options.preset == null
+                    ? GuiPresets.DEFAULT : options.preset);
             if (options.drawer) {
                 root.openDrawerForScreenshot();
             }
@@ -180,6 +185,29 @@ public final class GuiMain {
         return 0;
     }
 
+    /** Renders the per-mode detailed option sheet offscreen (QA evidence). */
+    private static int runModeOptionsScreenshot(Options options) {
+        Path png = Paths.get(options.optionsScreenshot).toAbsolutePath();
+        String mode = options.preset == null ? GuiPresets.DEFAULT : options.preset;
+        Map<String, String> values = GuiModeOptions.defaults(mode);
+        io.umbra.gui.ui.ModeOptionsPanel panel =
+                new io.umbra.gui.ui.ModeOptionsPanel(values, mode, null);
+        if (options.optionsScroll != null) {
+            panel.scrollToSection(options.optionsScroll);
+        }
+        try {
+            GuiScreenshot.writePanel(panel, io.umbra.gui.ui.ModeOptionsPanel.SHEET_WIDTH,
+                    io.umbra.gui.ui.ModeOptionsPanel.SHEET_HEIGHT, png);
+        } catch (IOException e) {
+            System.err.println("Cannot write mode-options screenshot: " + e.getMessage());
+            return 1;
+        }
+        System.out.println("Wrote mode-options screenshot: " + png + " ("
+                + io.umbra.gui.ui.ModeOptionsPanel.SHEET_WIDTH + "x"
+                + io.umbra.gui.ui.ModeOptionsPanel.SHEET_HEIGHT + ") mode=" + mode
+                + " controls=" + panel.controlCount());
+        return 0;
+    }
     private static long value(Map<String, Long> values, String key) {
         if (values == null) {
             return 0L;
@@ -263,6 +291,10 @@ public final class GuiMain {
             String value = args[++i];
             if ("--screenshot".equals(arg)) {
                 options.screenshot = value;
+            } else if ("--options-screenshot".equals(arg)) {
+                options.optionsScreenshot = value;
+            } else if ("--options-scroll".equals(arg)) {
+                options.optionsScroll = value;
             } else if ("--input".equals(arg)) {
                 options.input = value;
             } else if ("--output".equals(arg)) {
@@ -289,7 +321,9 @@ public final class GuiMain {
     }
 
     private static boolean isValueOption(String arg) {
-        return "--screenshot".equals(arg) || "--input".equals(arg) || "--output".equals(arg)
+        return "--screenshot".equals(arg) || "--options-screenshot".equals(arg)
+                || "--options-scroll".equals(arg) || "--input".equals(arg)
+                || "--output".equals(arg)
                 || "--preset".equals(arg) || "--seed".equals(arg) || "--width".equals(arg)
                 || "--height".equals(arg) || "--delay".equals(arg);
     }
@@ -330,11 +364,15 @@ public final class GuiMain {
         System.out.println("  --preset <name>      Light | Balanced | Aggressive | Maximum | Nocturne");
         System.out.println("  --delay <ms>         with --run, capture after this delay (running state)");
         System.out.println("  --drawer             open the compact configuration drawer (narrow width)");
+        System.out.println("  --options-screenshot <png>  render the per-mode detailed options sheet (900x700)");
+        System.out.println("  --options-scroll <group>    scroll the rendered sheet to a group (e.g. Native)");
         System.out.println("  --self-test          structural/accessibility/YAML self test");
     }
 
     private static final class Options {
         String screenshot;
+        String optionsScreenshot;
+        String optionsScroll;
         String input;
         String output;
         String preset;

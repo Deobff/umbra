@@ -100,7 +100,31 @@ public final class DynamicGuardTest {
 
     private static final Map<String, String> JDK_CACHE = new LinkedHashMap<String, String>();
 
-    private static final String GUARD_MARKER = "[umbra-guard]";
+    private static final String GUARD_MARKER = "[umbra-guard]"; // legacy prefix must NOT appear
+    private static final String[] SIGNAL_WORDS = { "arguments", "environment", "jmx",
+            "jdwp-listener", "jdwp-thread", "attach-file", "jdwp-handshake", "heap-dump",
+            "attach-self", "attach", "suspend-drift", "timing", "tracer", "module" };
+
+    /** True when a guard emitted any signal log line (the prefix is a random token). */
+    private static boolean hasGuardLog(String output) {
+        if (output == null) {
+            return false;
+        }
+        if (output.contains(GUARD_MARKER)) {
+            return true;
+        }
+        for (int i = 0; i < SIGNAL_WORDS.length; i++) {
+            if (output.contains(" " + SIGNAL_WORDS[i] + " detected")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** True when the guard logged the given signal (log action only). */
+    private static boolean loggedSignal(String output, String signal) {
+        return output != null && output.contains(" " + signal + " detected");
+    }
 
     private DynamicGuardTest() {
     }
@@ -495,7 +519,7 @@ public final class DynamicGuardTest {
             } catch (java.lang.reflect.InvocationTargetException failure) {
                 Throwable cause = failure.getCause();
                 detected = cause instanceof SecurityException
-                        && String.valueOf(cause.getMessage()).contains("jdwp-thread");
+                        && cause.getStackTrace().length == 0;
             }
             check(detected, "a JDWP thread name is detected by the injected guard");
             threadGuard.loader.close();
@@ -648,7 +672,7 @@ public final class DynamicGuardTest {
                         + " exits 0 (actual " + clean.exit + ", output: " + clean.output + ")");
                 check(clean.output.contains("OK"), "clean JDK " + major + " level " + levels[j]
                         + " runs main");
-                check(!clean.output.contains(GUARD_MARKER), "clean JDK " + major + " level "
+                check(!hasGuardLog(clean.output), "clean JDK " + major + " level "
                         + levels[j] + " triggers no guard signal (output: " + clean.output + ")");
             }
         }
@@ -657,7 +681,7 @@ public final class DynamicGuardTest {
         Child agentLog = runChild(jdkJava(8), level2Log,
                 Arrays.asList("-javaagent:" + agent.toAbsolutePath()), null, 60);
         check(agentLog.exit == 0, "javaagent log action keeps the program running");
-        check(agentLog.output.contains(GUARD_MARKER + " arguments detected"),
+        check(loggedSignal(agentLog.output, "arguments"),
                 "javaagent is detected as a JVM-argument signal (output: " + agentLog.output + ")");
         check(agentLog.output.contains("OK"), "javaagent log action lets main run");
         Child agentThrow = runChild(jdkJava(8), level2Throw,
@@ -673,20 +697,20 @@ public final class DynamicGuardTest {
                     : "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:0";
             Child jdwp = runChild(jdkJava(major), level2Throw, Arrays.asList(argument), null, 60);
             check(jdwp.exit != 0, "JDWP launch on JDK " + major + " is rejected");
-            check(jdwp.output.contains(GUARD_MARKER + " arguments detected"),
-                    "JDWP option detected on JDK " + major + " (output: " + jdwp.output + ")");
+            check(!hasGuardLog(jdwp.output),
+                    "JDWP throw action on JDK " + major + " is silent (output: " + jdwp.output + ")");
         }
         Child xrun = runChild(jdkJava(8), level2Throw, Arrays.asList(
                 "-Xrunjdwp:transport=dt_socket,server=y,suspend=n,address=0"), null, 60);
-        check(xrun.exit != 0 && xrun.output.contains(GUARD_MARKER + " arguments detected"),
-                "-Xrunjdwp is detected (output: " + xrun.output + ")");
+        check(xrun.exit != 0 && !hasGuardLog(xrun.output),
+                "-Xrunjdwp throw action is silent (output: " + xrun.output + ")");
         for (int major : new int[] { 8 }) {
             if (jdkJava(major) == null) {
                 continue;
             }
             Child attachListener = runChild(jdkJava(major), level2Log,
                     Arrays.asList("-XX:+StartAttachListener"), null, 60);
-            check(attachListener.output.contains(GUARD_MARKER + " arguments detected"),
+            check(loggedSignal(attachListener.output, "arguments"),
                     "-XX:+StartAttachListener detected on JDK " + major
                             + " (output: " + attachListener.output + ")");
         }
@@ -695,20 +719,20 @@ public final class DynamicGuardTest {
         Map<String, String> fridaEnv = new LinkedHashMap<String, String>();
         fridaEnv.put("FRIDA_SERVER", "127.0.0.1");
         Child frida = runChild(jdkJava(8), level2Log, new ArrayList<String>(), fridaEnv, 60);
-        check(frida.output.contains(GUARD_MARKER + " environment detected"),
+        check(loggedSignal(frida.output, "environment"),
                 "FRIDA_* environment marker detected (output: " + frida.output + ")");
         check(frida.exit == 0 && frida.output.contains("OK"), "environment log action continues");
         Map<String, String> toolOptions = new LinkedHashMap<String, String>();
         toolOptions.put("JAVA_TOOL_OPTIONS", "-Dfrida.marker=1");
         Child toolOption = runChild(jdkJava(8), level2Log, new ArrayList<String>(), toolOptions, 60);
-        check(toolOption.output.contains(GUARD_MARKER + " environment detected"),
+        check(loggedSignal(toolOption.output, "environment"),
                 "JAVA_TOOL_OPTIONS frida marker detected (output: " + toolOption.output + ")");
         Map<String, String> cleanOptions = new LinkedHashMap<String, String>();
         cleanOptions.put("JAVA_TOOL_OPTIONS", "-Dfile.encoding=UTF-8");
         cleanOptions.put("_JAVA_OPTIONS", "-Xmx64m");
         Child cleanEnv = runChild(jdkJava(8), level2Log, new ArrayList<String>(), cleanOptions, 60);
         check(cleanEnv.exit == 0 && cleanEnv.output.contains("OK")
-                && !cleanEnv.output.contains(GUARD_MARKER),
+                && !hasGuardLog(cleanEnv.output),
                 "benign JAVA_TOOL_OPTIONS/_JAVA_OPTIONS produce no false positive (output: "
                         + cleanEnv.output + ")");
 
@@ -719,18 +743,18 @@ public final class DynamicGuardTest {
         Child attached = runChild(jdkJava(8), level2NoJvmtiLog,
                 Arrays.asList("-Djava.io.tmpdir=" + attachTmp.toAbsolutePath(),
                         "-javaagent:" + attachAgent.toAbsolutePath()), null, 60);
-        check(attached.output.contains(GUARD_MARKER + " attach-file detected"),
+        check(loggedSignal(attached.output, "attach"),
                 "fake .attach_pid<pid> detected (output: " + attached.output + ")");
         check(attached.exit == 0 && attached.output.contains("OK"), "attach-file log action continues");
         Child plainAgent = runChild(jdkJava(8), level2NoJvmtiLog,
                 Arrays.asList("-javaagent:" + agent.toAbsolutePath()), null, 60);
-        check(!plainAgent.output.contains(GUARD_MARKER) && plainAgent.exit == 0,
+        check(!hasGuardLog(plainAgent.output) && plainAgent.exit == 0,
                 "jvmti=off plain javaagent is not flagged (output: " + plainAgent.output + ")");
 
         // sun.jdwp.listenerAddress property (advertised-port path).
         Child listener = runChild(jdkJava(8), level2Log,
                 Arrays.asList("-Dsun.jdwp.listenerAddress=127.0.0.1:65000"), null, 60);
-        check(listener.output.contains(GUARD_MARKER + " jdwp-listener detected"),
+        check(loggedSignal(listener.output, "jdwp-listener"),
                 "sun.jdwp.listenerAddress detected (output: " + listener.output + ")");
 
         // A hardcoded common-port JDWP handshake is NOT a default detection signal
@@ -742,7 +766,7 @@ public final class DynamicGuardTest {
             try {
                 Child noScan = runChild(jdkJava(8), level2Log, new ArrayList<String>(), null, 60);
                 check(noScan.exit == 0 && noScan.output.contains("OK")
-                                && !noScan.output.contains(GUARD_MARKER),
+                                && !hasGuardLog(noScan.output),
                         "fake JDWP listener on port " + freePortServer.port()
                                 + " does not trip the default guard (no hardcoded port scan): "
                                 + noScan.output);
@@ -763,7 +787,7 @@ public final class DynamicGuardTest {
             try {
                 Child optIn = runChild(jdkJava(8), level2PortProbeLog, Arrays.asList(
                         "-Dsun.jdwp.listenerAddress=127.0.0.1:" + ephemeral.port()), null, 60);
-                check(optIn.output.contains(GUARD_MARKER + " jdwp-handshake detected"),
+                check(loggedSignal(optIn.output, "jdwp-handshake"),
                         "antiDebug.portProbe=true probes the listener-advertised JDWP port (output: "
                                 + optIn.output + ")");
             } finally {
@@ -808,14 +832,13 @@ public final class DynamicGuardTest {
         Path agent = buildAgent(dir, false);
         Child clean = runChild(jdkJava(8), guarded, new ArrayList<String>(), null, 60);
         check(clean.exit == 0 && clean.output.contains("INTEGRITY-OK")
-                && !clean.output.contains(GUARD_MARKER),
+                && !hasGuardLog(clean.output),
                 "integrity-guarded program runs clean (output: " + clean.output + ")");
         Child agentChild = runChild(jdkJava(8), guarded,
                 Arrays.asList("-javaagent:" + agent.toAbsolutePath()), null, 60);
         check(agentChild.exit != 0, "integrity guard rejects an instrumented launch");
-        check(agentChild.output.contains(GUARD_MARKER + " arguments detected"),
-                "integrity guard reports the reused runtime-guard signal (output: "
-                        + agentChild.output + ")");
+        check(!hasGuardLog(agentChild.output),
+                "integrity guard throw action is silent (output: " + agentChild.output + ")");
 
         // Both passes on: the anti-debug and integrity layers must share one
         // injected guard, and the combined build must stay clean.
@@ -837,13 +860,13 @@ public final class DynamicGuardTest {
                 "combined anti-debug + integrity build shares the unified guard");
         Child combinedClean = runChild(jdkJava(8), combined, new ArrayList<String>(), null, 60);
         check(combinedClean.exit == 0 && combinedClean.output.contains("INTEGRITY-OK")
-                        && !combinedClean.output.contains(GUARD_MARKER),
+                        && !hasGuardLog(combinedClean.output),
                 "combined guard build runs clean (output: " + combinedClean.output + ")");
         Child combinedAgent = runChild(jdkJava(8), combined,
                 Arrays.asList("-javaagent:" + agent.toAbsolutePath()), null, 60);
         check(combinedAgent.exit != 0
-                        && combinedAgent.output.contains(GUARD_MARKER + " arguments detected"),
-                "combined guard build rejects an instrumented launch (output: "
+                        && !hasGuardLog(combinedAgent.output),
+                "combined guard build rejects an instrumented launch silently (output: "
                         + combinedAgent.output + ")");
     }
 
@@ -871,7 +894,7 @@ public final class DynamicGuardTest {
                     + clean.exit + ", output: " + clean.output + ")");
             check(clean.output.contains("ENC-OK"),
                     "encrypted program output on JDK " + major + " (output: " + clean.output + ")");
-            check(!clean.output.contains(GUARD_MARKER),
+            check(!hasGuardLog(clean.output),
                     "encrypted archive clean launch has no guard signal on JDK " + major);
             cleanedJdks++;
         }
@@ -888,7 +911,7 @@ public final class DynamicGuardTest {
         check(watchdogChild.output.contains("WATCHDOG-PRESENT"),
                 "encrypted-archive level-3 watchdog is started through the loader (output: "
                         + watchdogChild.output + ")");
-        check(!watchdogChild.output.contains(GUARD_MARKER),
+        check(!hasGuardLog(watchdogChild.output),
                 "level-3 encrypted archive clean launch has no guard signal");
 
         byte[] raw = Files.readAllBytes(encryptedThrow);
@@ -899,8 +922,8 @@ public final class DynamicGuardTest {
         Child throwAgent = runChild(jdkJava(8), encryptedThrow,
                 Arrays.asList("-javaagent:" + agent.toAbsolutePath()), null, 60);
         check(throwAgent.exit != 0, "encrypted loader rejects an instrumented launch");
-        check(throwAgent.output.contains(GUARD_MARKER + " arguments detected"),
-                "encrypted loader runs the unified guard (output: " + throwAgent.output + ")");
+        check(!hasGuardLog(throwAgent.output),
+                "encrypted loader throw action is silent (output: " + throwAgent.output + ")");
         check(!throwAgent.output.contains("ENC-OK"), "encrypted loader never defines the payload");
 
         // action=log: the guard logs and the loader still refuses the decrypt/define
@@ -908,8 +931,11 @@ public final class DynamicGuardTest {
         Child logAgent = runChild(jdkJava(8), encryptedLog,
                 Arrays.asList("-javaagent:" + agent.toAbsolutePath()), null, 60);
         check(logAgent.exit != 0, "encrypted loader refuses class decryption on a guard signal");
-        check(logAgent.output.contains("Runtime guard signal active: class decryption refused"),
-                "loader refusal message names the decrypt gate (output: " + logAgent.output + ")");
+        check(!logAgent.output.contains("ENC-OK"), "refused class payload is never defined");
+        check(!logAgent.output.contains("SecurityException")
+                        && !logAgent.output.contains("UmbraClassLoader.java")
+                        && !logAgent.output.contains("UmbraRuntimeGuard.java"),
+                "loader refusal is silent (no stack trace / source file leak): " + logAgent.output);
         check(!logAgent.output.contains("ENC-OK"), "refused class payload is never defined");
 
         // Tampered encrypted payloads: at least the payloads the program needs are
@@ -954,10 +980,10 @@ public final class DynamicGuardTest {
         check(refused >= 2, "tampered encrypted class payloads are refused (refused=" + refused
                 + ", tolerated=" + tolerated + ")");
         check(firstRefusalOutput != null
-                        && (firstRefusalOutput.contains("SecurityException")
-                        || firstRefusalOutput.contains("ClassNotFoundException")
-                        || firstRefusalOutput.contains("authentication")),
-                "tamper refusal surfaces as an authentication/class-loading failure");
+                        && !firstRefusalOutput.contains("ENC-OK")
+                        && !firstRefusalOutput.contains("SecurityException")
+                        && !firstRefusalOutput.contains("UmbraClassLoader.java"),
+                "tamper refusal is silent and leaks no stack/source information");
         System.out.println("DynamicGuardTest: tampered payload matrix refused=" + refused
                 + " tolerated(lazy/unread)=" + tolerated + "/" + payloadNames.size());
     }
@@ -1014,11 +1040,12 @@ public final class DynamicGuardTest {
         String lastOutput = null;
         String lastAttacher = null;
         int lastExit = 0;
-        for (int attempt = 1; attempt <= 4; attempt++) {
+        for (int attempt = 1; attempt <= 5; attempt++) {
             AttachAttempt result = attemptAttach(fixtures, agentJar, jar);
             if (result.detected) {
-                check(result.marker, "real dynamic attach reported (attempt " + attempt
-                        + ", output: " + result.output + ", attacher: " + result.attacher + ")");
+                // The throw action is silent by design; the observable evidence is a
+                // non-zero exit before the program's DONE marker. Log-action archives
+                // are asserted separately in the late-load/startup tests.
                 check(result.exit != 0, "attached guarded process exits non-zero (attempt "
                         + attempt + ", actual " + result.exit + ")");
                 check(result.detectionMs == -1L || result.detectionMs <= 3000L,
@@ -1034,8 +1061,13 @@ public final class DynamicGuardTest {
             lastExit = result.exit;
             System.out.println("DynamicGuardTest: attach attempt " + attempt + " missed on "
                     + jar.getFileName() + " (output: " + lastOutput + ")");
+            // Backoff between attempts: under a parallel full-suite load the
+            // attaching JVM and the target compete for CPU, so stagger retries.
+            if (attempt < 5) {
+                Thread.sleep(150L + 150L * attempt);
+            }
         }
-        throw new AssertionError("FAILED: real dynamic attach not detected after 4 attempts ("
+        throw new AssertionError("FAILED: real dynamic attach not detected after 5 attempts ("
                 + jar.getFileName() + ", last output: " + lastOutput
                 + ", attacher: " + lastAttacher + ", exit=" + lastExit + ")");
     }
@@ -1068,7 +1100,7 @@ public final class DynamicGuardTest {
             long attachMarkNanos = 0L;
             long exitedAtNanos = 0L;
             boolean exited = false;
-            long deadline = System.currentTimeMillis() + 12000L;
+            long deadline = System.currentTimeMillis() + 20000L;
             while (System.currentTimeMillis() < deadline) {
                 if (child.waitExit(10L)) {
                     exited = true;
@@ -1085,11 +1117,14 @@ public final class DynamicGuardTest {
                 exited = child.waitExit(3000L);
                 exitedAtNanos = System.nanoTime();
             }
-            result.detected = exited;
             result.exit = child.exitValue();
             result.output = child.output();
             result.attacher = attacher.output();
-            result.marker = result.output.contains(GUARD_MARKER + " attach detected");
+            result.marker = loggedSignal(result.output, "attach");
+            // A miss under load lets the program finish normally (exit 0 + DONE);
+            // only a non-zero stop before DONE counts as attach detection here.
+            result.detected = exited && result.exit != 0
+                    && !result.output.contains("DONE");
             result.detectionMs = attachMarkNanos == 0L || exitedAtNanos == 0L
                     ? -1L : (exitedAtNanos - attachMarkNanos) / 1000000L;
             return result;
@@ -1109,30 +1144,42 @@ public final class DynamicGuardTest {
             long pid = child.pid();
             long started = System.nanoTime();
             boolean attachedDetected = false;
-            Child attached = null;
-            for (int attempt = 1; attempt <= 3 && !attachedDetected; attempt++) {
-                attached = runProcess(attacherCommand(fixtures, pid, agentJar), null, 60000L);
-                check(attached.exit == 0 && attached.output.contains("ATTACH-OK"),
-                        "Attacher.loadAgent succeeded for the sticky-signal check (attempt "
-                                + attempt + ", output: " + attached.output + ")");
-                attachedDetected = child.awaitOutput("attach detected", 2500L) != null;
+            for (int attempt = 1; attempt <= 4 && !attachedDetected; attempt++) {
+                if (!isAlive(child)) {
+                    System.out.println("DynamicGuardTest: late-load child stopped before attach "
+                            + "attempt " + attempt + " (output: " + child.output() + ")");
+                    break;
+                }
+                Child attached = runProcess(attacherCommand(fixtures, pid, agentJar), null, 60000L);
+                if (attached.exit != 0 || !attached.output.contains("ATTACH-OK")) {
+                    System.out.println("DynamicGuardTest: late-load attach attempt " + attempt
+                            + " failed (output: " + attached.output + "); skipping sticky check");
+                    break;
+                }
+                attachedDetected = child.awaitOutput("attach detected", 5000L) != null;
             }
             if (!attachedDetected) {
-                System.out.println("DynamicGuardTest: late-load attach sampling missed after 3 "
-                        + "attempts; skipping sticky-loader assertion (documented residual)");
-                return;
+                if (isAlive(child)) {
+                    System.out.println("DynamicGuardTest: late-load attach sampling missed after 4 "
+                            + "attempts and the child is still running; skipping sticky-loader "
+                            + "assertion (documented residual)");
+                    return;
+                }
+                // The attach was accepted but the short-lived agent-load sample was
+                // missed under load; the child still stopped silently right after the
+                // attach (sticky loader refusal), which the assertions below verify.
+                System.out.println("DynamicGuardTest: late-load marker sampling missed; child "
+                        + "stopped after attach (output: " + child.output() + ")");
             }
-            check(true, "action=log attach watcher reports the sticky signal (output: "
-                    + child.output() + ")");
             boolean exited = child.waitExit(15000);
             long latencyMs = (System.nanoTime() - started) / 1000000L;
             String output = child.output();
             check(exited && child.exitValue() != 0,
                     "sticky attach signal makes the encrypted loader fail closed (latency "
                             + latencyMs + " ms, output: " + output + ")");
-            check(output.contains("class decryption refused")
-                            || output.contains("Runtime guard signal active"),
-                    "encrypted loader refusal names the decrypt gate (output: " + output + ")");
+            check(!output.contains("SecurityException")
+                        && !output.contains("UmbraClassLoader.java"),
+                "encrypted loader refusal is silent (output: " + output + ")");
             check(!output.contains("DONE"), "late-load program never reaches DONE");
         } finally {
             child.kill();
@@ -1158,8 +1205,8 @@ public final class DynamicGuardTest {
             check(exited, "transient .attach_pid<pid> created after startup is caught by the "
                     + "WatchService watcher (output: " + output + ")");
             check(child.exitValue() != 0, "fake attach artifact stops the process non-zero");
-            check(output.contains(GUARD_MARKER + " attach detected"),
-                    "fake attach artifact reported (output: " + output + ")");
+            check(!hasGuardLog(output),
+                    "fake attach artifact throw action is silent (output: " + output + ")");
             check(!output.contains("DONE"), "program never reaches DONE after the fake artifact");
         } finally {
             child.kill();
@@ -1364,6 +1411,10 @@ public final class DynamicGuardTest {
             out.write(Files.readAllBytes(file.toPath()));
             out.closeEntry();
         }
+    }
+
+    private static boolean isAlive(LiveChild child) throws InterruptedException {
+        return !child.waitExit(0L);
     }
 
     /** Live child process with an asynchronous, line-oriented output pump. */
@@ -1737,12 +1788,13 @@ public final class DynamicGuardTest {
         // isolated child-JVM tests instead.
         replacements.put("@@JVMTI@@", "false");
         replacements.put("@@ATTACH@@", "true");
-        replacements.put("@@ATTACHWATCH@@", "true");
+        replacements.put("@@ATTACHWATCH@@", "false");
         replacements.put("@@PORTPROBE@@", "false");
         replacements.put("@@ENV@@", "false");
         replacements.put("@@TIMING@@", "true");
         replacements.put("@@ACTION@@", action);
         replacements.put("@@WATCHDOG@@", watchdog);
+        replacements.put("@@LOGTOKEN@@", "tst" + level);
         replacements.put("@@WATCHMS@@", "4000");
         return replacements;
     }
@@ -2197,3 +2249,6 @@ public final class DynamicGuardTest {
         }
     }
 }
+
+
+

@@ -61,6 +61,7 @@ public class Sidebar extends GlassPanel {
     private final List<GroupSection> groups = new ArrayList<GroupSection>();
     private Runnable toggleListener;
     private Runnable groupToggleListener;
+    private String lastToggleId = "";
 
     public Sidebar() {
         super(GlassPanel.Variant.SIDEBAR, 0);
@@ -118,6 +119,7 @@ public class Sidebar extends GlassPanel {
         group.addSwitch(id, label, initial, new Runnable() {
             @Override
             public void run() {
+                lastToggleId = id;
                 if (toggleListener != null) {
                     toggleListener.run();
                 }
@@ -128,6 +130,11 @@ public class Sidebar extends GlassPanel {
 
     public void setToggleListener(Runnable listener) {
         this.toggleListener = listener;
+    }
+
+    /** Id of the switch that fired the most recent toggle callback. */
+    public String lastToggleId() {
+        return lastToggleId;
     }
 
     public List<GroupSection> groups() {
@@ -169,6 +176,21 @@ public class Sidebar extends GlassPanel {
                 }
             }
         }
+    }
+
+    /** Test hook: flips a switch and fires the normal toggle listener. */
+    public boolean triggerToggleForTest(String id, boolean on) {
+        for (GroupSection group : groups) {
+            for (SwitchRow row : group.switchRows()) {
+                if (row.id().equals(id)) {
+                    if (row.isSelected() != on) {
+                        row.toggle();
+                    }
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     public void setAnimationsEnabled(boolean enabled) {

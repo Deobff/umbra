@@ -23,7 +23,7 @@ import java.util.Map;
 public final class GuiConfig {
 
     /** Stable version string shown by the desktop GUI. */
-    public static final String VERSION = "3.1.0";
+    public static final String VERSION = "3.2.0";
 
     private GuiConfig() {
     }
@@ -108,9 +108,17 @@ public final class GuiConfig {
         b.preset("");
 
         boolean renamer = bool(opts, "renamer.enabled", true);
-        b.renamer(new UmbraConfig.RenamerOptions(renamer, "", bool(opts, "renamer.repackage", true),
-                "", true, true, true, mappingFile,
-                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", 1));
+        b.renamer(new UmbraConfig.RenamerOptions(renamer,
+                str(opts, "renamer.prefix", ""),
+                bool(opts, "renamer.repackage", true),
+                "",
+                bool(opts, "renamer.renameClasses", true),
+                bool(opts, "renamer.renameMethods", true),
+                bool(opts, "renamer.renameFields", true),
+                mappingFile,
+                str(opts, "renamer.dictionary",
+                        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"),
+                intOption(opts, "renamer.minimumNameLength", 1)));
         b.keepPublicApi(bool(opts, "keepPublicApi", false));
 
         b.stringEncryption(new UmbraConfig.StringEncryptionOptions(
@@ -131,7 +139,12 @@ public final class GuiConfig {
         b.methodVirtualization(new UmbraConfig.VirtualizationOptions(
                 bool(opts, "methodVirtualization.enabled", true), 4000, 0));
         b.antiLlm(new UmbraConfig.AntiLlmOptions(
-                bool(opts, "antiLlm.enabled", true), 2, 2, 1, 12, true));
+                bool(opts, "antiLlm.enabled", true),
+                intOption(opts, "antiLlm.decoyMethodsPerClass", 2),
+                intOption(opts, "antiLlm.decoyCallSitesPerClass", 2),
+                intOption(opts, "antiLlm.wrapperLayers", 1),
+                intOption(opts, "antiLlm.maxWrappedMethodsPerClass", 12),
+                bool(opts, "antiLlm.shieldVirtualization", true)));
 
         b.debug(new UmbraConfig.DebugOptions(
                 bool(opts, "debugInfo.enabled", true), true, true, true, false, false, true));
@@ -166,7 +179,13 @@ public final class GuiConfig {
     public static Map<String, String> describe(UmbraConfig config) {
         Map<String, String> map = new LinkedHashMap<String, String>();
         map.put("renamer.enabled", String.valueOf(config.renamer().enabled()));
+        map.put("renamer.renameClasses", String.valueOf(config.renamer().renameClasses()));
+        map.put("renamer.renameMethods", String.valueOf(config.renamer().renameMethods()));
+        map.put("renamer.renameFields", String.valueOf(config.renamer().renameFields()));
         map.put("renamer.repackage", String.valueOf(config.renamer().repackage()));
+        map.put("renamer.prefix", config.renamer().prefix());
+        map.put("renamer.dictionary", config.renamer().dictionary());
+        map.put("renamer.minimumNameLength", String.valueOf(config.renamer().minimumNameLength()));
         map.put("keepPublicApi", String.valueOf(config.keepPublicApi()));
         map.put("stringEncryption.enabled", String.valueOf(config.stringEncryption().enabled()));
         map.put("integerEncryption.enabled", String.valueOf(config.integerEncryption().enabled()));
@@ -178,6 +197,15 @@ public final class GuiConfig {
         map.put("methodVirtualization.enabled",
                 String.valueOf(config.methodVirtualization().enabled()));
         map.put("antiLlm.enabled", String.valueOf(config.antiLlm().enabled()));
+        map.put("antiLlm.decoyMethodsPerClass",
+                String.valueOf(config.antiLlm().decoyMethodsPerClass()));
+        map.put("antiLlm.decoyCallSitesPerClass",
+                String.valueOf(config.antiLlm().decoyCallSitesPerClass()));
+        map.put("antiLlm.wrapperLayers", String.valueOf(config.antiLlm().wrapperLayers()));
+        map.put("antiLlm.maxWrappedMethodsPerClass",
+                String.valueOf(config.antiLlm().maxWrappedMethodsPerClass()));
+        map.put("antiLlm.shieldVirtualization",
+                String.valueOf(config.antiLlm().shieldVirtualization()));
         map.put("watermark.enabled", String.valueOf(config.watermark().enabled()));
         map.put("reflection.enabled", String.valueOf(config.reflection().enabled()));
         map.put("mapping.file", config.mapping().file());

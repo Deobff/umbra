@@ -10,6 +10,7 @@ import io.umbra.core.config.YamlParser;
 import io.umbra.core.enterprise.LicenseTool;
 import io.umbra.gui.GuiConfig;
 import io.umbra.gui.GuiPrefs;
+import io.umbra.gui.GuiPresets;
 import io.umbra.gui.GuiSwitches;
 
 import javax.imageio.ImageIO;
@@ -327,6 +328,25 @@ public final class AuditTest {
         check(GuiConfig.validate(app, app) != null, "GUI validate rejects input == output");
         check(GuiConfig.validate(app, work.resolve("not-a-jar.zip")) != null,
                 "GUI validate rejects a non-jar output");
+
+        // SpotBugs MS_MUTABLE_COLLECTION: the shared public preset-name list is
+        // read by the GUI panels and must not be mutable by callers. set() is
+        // the operation Arrays.asList allows (add/remove throw anyway), so it
+        // is the one that proves the unmodifiable contract.
+        boolean mutable;
+        try {
+            GuiPresets.NAMES.set(0, "Injected");
+            mutable = true;
+        } catch (UnsupportedOperationException expected) {
+            mutable = false;
+        }
+        check(!mutable, "GuiPresets.NAMES must be immutable");
+        if (mutable) {
+            GuiPresets.NAMES.set(0, "Light");
+        }
+        check(GuiPresets.NAMES.size() == 6 && "Light".equals(GuiPresets.NAMES.get(0))
+                        && "Balanced".equals(GuiPresets.NAMES.get(1)),
+                "GuiPresets.NAMES keeps the six preset names in order");
     }
 
     private static void testGuiPrefs() throws Exception {

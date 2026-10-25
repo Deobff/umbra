@@ -40,7 +40,16 @@ import java.util.concurrent.ConcurrentHashMap;
  * char buffer is zeroed before returning), bit 1 enables stack-trace hiding
  * (a decryption failure is replaced by a sanitized exception with an empty
  * stack trace, so the helper's class, method and internal values never leak
- * into a report).</p>
+ * into a report), bit 2 enables the opt-in plaintext memoization cache. With
+ * bit 2 clear (the 3.2 default) the class does not even allocate the map.</p>
+ *
+ * <p>Payload format v3 adds a build-time artifact salt, substituted through
+ * {@code @@SALT@@}. It is mixed into the class-key, per-site seed, key and
+ * nonce derivations below, so the historical fixed domain strings are no
+ * longer a universal key schedule: the same input protected by two builds with
+ * different seeds produces unrelated key material. Each protected archive is
+ * self-contained (it carries its own decryptor bytecode), so old 3.x archives
+ * keep working unchanged; no cross-version reader is needed.</p>
  *
  * <p>Runtime template: no nested/anonymous classes and no references to other
  * Umbra classes (the {@link UmbraCrypto} reference is remapped by
@@ -55,15 +64,28 @@ public final class UmbraStringCipher {
     public static final int RC4 = 3;
     public static final int SPECK = 4;
 
-    /** "0" for plain, bit 0 = wipe, bit 1 = stack-trace hiding; replaced at injection time. */
+    /** Payload/key-schedule version implemented by this template. */
+    public static final int PAYLOAD_VERSION = 3;
+
+    /** "0" for plain, bit 0 = wipe, bit 1 = stack-trace hiding, bit 2 = plaintext cache. */
     private static final String FLAGS_SPEC = "@@FLAGS@@";
+    /** Build-time artifact salt (decimal 64-bit); replaced at injection time. */
+    private static final String SALT_SPEC = "@@SALT@@";
 
     private static final int FLAGS = parseFlags(FLAGS_SPEC);
     private static final boolean WIPE = (FLAGS & 1) != 0;
     private static final boolean HIDE_TRACE = (FLAGS & 2) != 0;
+    private static final boolean CACHE_ENABLED = (FLAGS & 4) != 0;
 
+    /**
+     * Only allocated when the opt-in cache bit is set; the default build keeps
+     * no plaintext map reachable from the decryptor at all.
+     */
     private static final ConcurrentHashMap<String, String> CACHE =
-            new ConcurrentHashMap<String, String>();
+            CACHE_ENABLED ? new ConcurrentHashMap<String, String>() : null;
+
+    /** Artifact salt embedded by the pass (0 when a foreign template is used). */
+    private static final long SALT = parseLong(SALT_SPEC);
 
     private UmbraStringCipher() {
     }
@@ -77,9 +99,9 @@ public final class UmbraStringCipher {
         return decrypt(parts, classKey, 0L, siteId, true, false, engine);
     }
 
-    /** Per-class key, memoized per call site. */
+    /** Per-class key, memoized per call site (only when the cache bit is set). */
     public static String e(String[] parts, String classKey, int siteId, int engine) {
-        return decrypt(parts, classKey, 0L, siteId, true, true, engine);
+        return decrypt(parts, classKey, 0L, siteId, true, CACHE_ENABLED, engine);
     }
 
     /** Per-site 64-bit seed, no memoization. */
@@ -87,9 +109,9 @@ public final class UmbraStringCipher {
         return decrypt(parts, null, siteSeed, siteId, false, false, engine);
     }
 
-    /** Per-site 64-bit seed, memoized per call site. */
+    /** Per-site 64-bit seed, memoized per call site (only when the cache bit is set). */
     public static String e(String[] parts, long siteSeed, int siteId, int engine) {
-        return decrypt(parts, null, siteSeed, siteId, false, true, engine);
+        return decrypt(parts, null, siteSeed, siteId, false, CACHE_ENABLED, engine);
     }
 
     /**
@@ -104,12 +126,77 @@ public final class UmbraStringCipher {
     }
 
     // ------------------------------------------------------------------
+    // Salted key schedule (payload format v3, shared build/runtime)
+    // ------------------------------------------------------------------
+
+    /**
+     * Derives the 256-bit per-class key from the artifact salt, the build seed
+     * and the class name. Build-time only (the runtime reads the Base64 form),
+     * but kept here so the pass and the template share one implementation.
+     */
+    public static byte[] classKeyV2(long salt, long buildSeed, String className) {
+        return UmbraCrypto.sha256(UmbraCrypto.concat(
+                UmbraCrypto.utf8("io.umbra.string.v3.class.key"),
+                UmbraCrypto.le64(salt), UmbraCrypto.le64(buildSeed),
+                UmbraCrypto.utf8(className)));
+    }
+
+    /** Derives the per-site 64-bit seed with the artifact salt folded in. */
+    public static long siteSeedV2(long salt, long buildSeed, String className, int siteId) {
+        byte[] digest = UmbraCrypto.sha256(UmbraCrypto.concat(
+                UmbraCrypto.utf8("io.umbra.string.v3.site.seed"),
+                UmbraCrypto.le64(salt), UmbraCrypto.le64(buildSeed),
+                UmbraCrypto.utf8(className), UmbraCrypto.le32(siteId)));
+        return readLongLE(digest, 0);
+    }
+
+    /** Per-site key: SHA-256 over salt, site seed and random site index. */
+    public static byte[] siteKeyV2(long salt, long siteSeed, int siteId) {
+        return UmbraCrypto.sha256(UmbraCrypto.concat(
+                UmbraCrypto.utf8("io.umbra.string.v3.site.key"),
+                UmbraCrypto.le64(salt), UmbraCrypto.le64(siteSeed), UmbraCrypto.le32(siteId)));
+    }
+
+    /** Per-site nonce: 96 bits of SHA-256 over salt, site seed and site index. */
+    public static byte[] siteNonceV2(long salt, long siteSeed, int siteId) {
+        return UmbraCrypto.first(UmbraCrypto.sha256(UmbraCrypto.concat(
+                UmbraCrypto.utf8("io.umbra.string.v3.site.nonce"),
+                UmbraCrypto.le64(salt), UmbraCrypto.le64(siteSeed), UmbraCrypto.le32(siteId))),
+                12);
+    }
+
+    /** Per-class nonce: 96 bits of SHA-256 over salt, class key and site index. */
+    public static byte[] classNonceV2(long salt, byte[] classKey, int siteId) {
+        return UmbraCrypto.first(UmbraCrypto.sha256(UmbraCrypto.concat(
+                UmbraCrypto.utf8("io.umbra.string.v3.class.nonce"),
+                UmbraCrypto.le64(salt), classKey, UmbraCrypto.le32(siteId))), 12);
+    }
+
+    /** Default artifact salt derived from the build seed (build-time only). */
+    public static long deriveArtifactSalt(long buildSeed) {
+        byte[] digest = UmbraCrypto.sha256(UmbraCrypto.concat(
+                UmbraCrypto.utf8("io.umbra.string.v3.artifact.salt"),
+                UmbraCrypto.le64(buildSeed)));
+        long salt = readLongLE(digest, 0);
+        return salt == 0L ? 0x5A17C0DEL : salt;
+    }
+
+    /** Deterministic salt derived from an explicit {@code string.siteSalt} text. */
+    public static long hashSaltText(String text) {
+        byte[] digest = UmbraCrypto.sha256(UmbraCrypto.concat(
+                UmbraCrypto.utf8("io.umbra.string.v3.user.salt"), UmbraCrypto.utf8(text)));
+        long salt = readLongLE(digest, 0);
+        return salt == 0L ? 0x5A17C0DEL : salt;
+    }
+
+    // ------------------------------------------------------------------
     // Per-site decryption
     // ------------------------------------------------------------------
 
     private static String decrypt(String[] parts, String classKeyBase64, long siteSeed, int siteId,
                                   boolean perClass, boolean cached, int engine) {
         try {
+            cached = cached && CACHE != null;
             String cacheKey = cached ? cacheKey(parts, classKeyBase64, siteSeed, siteId, engine) : null;
             if (cacheKey != null) {
                 String hit = CACHE.get(cacheKey);
@@ -126,10 +213,10 @@ public final class UmbraStringCipher {
                 if (perClass) {
                     classKey = UmbraCrypto.base64Decode(classKeyBase64);
                     key = classKey;
-                    nonce = UmbraCrypto.classNonce(classKey, siteId);
+                    nonce = classNonceV2(SALT, classKey, siteId);
                 } else {
-                    key = UmbraCrypto.siteKey(siteSeed, siteId);
-                    nonce = UmbraCrypto.siteNonce(siteSeed, siteId);
+                    key = siteKeyV2(SALT, siteSeed, siteId);
+                    nonce = siteNonceV2(SALT, siteSeed, siteId);
                     temporaryKey = true;
                 }
                 byte[] plain = transform(engine, ciphertext, key, nonce, siteSeed);
@@ -382,6 +469,25 @@ public final class UmbraStringCipher {
         } catch (NumberFormatException ignored) {
             return 0;
         }
+    }
+
+    private static long parseLong(String value) {
+        if (value == null) {
+            return 0L;
+        }
+        try {
+            return Long.parseLong(value.trim());
+        } catch (NumberFormatException ignored) {
+            return 0L;
+        }
+    }
+
+    private static long readLongLE(byte[] data, int offset) {
+        long value = 0L;
+        for (int i = 0; i < 8; i++) {
+            value |= (data[offset + i] & 0xFFL) << (8 * i);
+        }
+        return value;
     }
 
     private static int readIntLE(byte[] data, int offset) {

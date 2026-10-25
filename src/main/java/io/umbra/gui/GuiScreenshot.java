@@ -3,6 +3,7 @@ package io.umbra.gui;
 import io.umbra.gui.theme.Tokens;
 
 import javax.imageio.ImageIO;
+import javax.swing.JComponent;
 import java.awt.Component;
 import java.awt.Container;
 import java.awt.Graphics2D;
@@ -14,37 +15,50 @@ import java.nio.file.Path;
 /**
  * Deterministic offscreen rendering of the assembled GUI.
  *
- * <p>The UI is a plain panel tree ({@link GuiRoot}), so it can be laid out and
- * painted into a {@link BufferedImage} without ever showing a window or using
- * {@code java.awt.Robot}. This is what {@code --screenshot} and the layout test
- * use; it works on a headless CI as well as on a desktop.</p>
+ * <p>Both the main window ({@link GuiRoot}) and isolated sheets such as the
+ * per-mode option dialog ({@code ModeOptionsPanel}) are plain panels, so they
+ * can be laid out and painted into a {@link BufferedImage} without a display or
+ * {@code java.awt.Robot}. This is what {@code --screenshot},
+ * {@code --options-screenshot} and the layout test use; it works on a headless
+ * CI as well as on a desktop.</p>
  */
 public final class GuiScreenshot {
 
     private GuiScreenshot() {
     }
 
-    /** Renders the panel tree at the requested size. */
+    /** Renders the main window panel tree at the requested size. */
     public static BufferedImage render(GuiRoot root, int width, int height) {
+        return renderPanel(root, width, height);
+    }
+
+    /** Renders any panel tree at the requested size. */
+    public static BufferedImage renderPanel(JComponent panel, int width, int height) {
         int w = Math.max(320, width);
         int h = Math.max(240, height);
-        root.setSize(w, h);
-        layoutTree(root);
+        panel.setSize(w, h);
+        layoutTree(panel);
         BufferedImage image = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
         Graphics2D g = image.createGraphics();
         try {
             Tokens.prepare(g);
-            root.paint(g);
+            panel.paint(g);
         } finally {
             g.dispose();
         }
         return image;
     }
 
-    /** Renders the panel tree and writes it as a PNG file. */
+    /** Renders the main window panel tree and writes it as a PNG file. */
     public static void writePng(GuiRoot root, int width, int height, Path file)
             throws IOException {
-        BufferedImage image = render(root, width, height);
+        writePanel(root, width, height, file);
+    }
+
+    /** Renders any panel tree and writes it as a PNG file. */
+    public static void writePanel(JComponent panel, int width, int height, Path file)
+            throws IOException {
+        BufferedImage image = renderPanel(panel, width, height);
         Path parent = file.toAbsolutePath().getParent();
         if (parent != null) {
             Files.createDirectories(parent);

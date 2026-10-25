@@ -100,6 +100,7 @@ public final class UmbraRuntimeGuard implements Runnable {
     private static final String PORTPROBE_TEXT = "@@PORTPROBE@@";
     private static final String WATCHDOG = "@@WATCHDOG@@";
     private static final String WATCH_MS_TEXT = "@@WATCHMS@@";
+    private static final String LOG_TOKEN = "@@LOGTOKEN@@";
 
     /** No signal. */
     public static final int SIGNAL_NONE = 0;
@@ -127,12 +128,13 @@ public final class UmbraRuntimeGuard implements Runnable {
     public static final int SIGNAL_DRIFT = 11;
     /** A real dynamic attach was observed after startup (attach watcher). */
     public static final int SIGNAL_ATTACH = 12;
+    /** Heap-dump-on-OOM JVM flag is enabled (one dump exposes decrypted classes). */
+    public static final int SIGNAL_HEAP_DUMP = 13;
+    /** {@code jdk.attach.allowAttachSelf} is enabled (self-attach debugger path). */
+    public static final int SIGNAL_ATTACH_SELF = 14;
 
-    /** Property-gated diagnostics for field analysis; no effect unless set. */
-    private static final boolean ATTACH_DEBUG = Boolean.getBoolean("umbra.guard.debug");
-
-    /** Attach-watcher tick counter (diagnostic). */
-    private static volatile int attachWatchTicks;
+    /** Property-gated diagnostics; no output unless {@code -Dumbra.debug=true}. */
+    private static final boolean DEBUG = Boolean.getBoolean("umbra.debug");
 
     /** Common JDWP listen ports; a peer must answer the real handshake. */
     private static final int[] COMMON_DEBUG_PORTS = {
@@ -350,7 +352,6 @@ public final class UmbraRuntimeGuard implements Runnable {
                     return;
                 }
                 ticks++;
-                attachWatchTicks = ticks;
                 // Occasional full snapshot catches a JDWP/Attach Listener thread
                 // that appeared after install.
                 if (ticks % ATTACH_WATCH_FULL_SAMPLE_TICKS == 0 && sampleAttachSignal()) {
@@ -583,17 +584,12 @@ public final class UmbraRuntimeGuard implements Runnable {
             return;
         }
         setActive(SIGNAL_ATTACH);
-        emitAttach(source);
         String action = ACTION;
         if ("log".equals(action)) {
+            emitAttach(source);
             return;
         }
         if ("corrupt".equals(action)) {
-            try {
-                System.err.close();
-            } catch (Throwable ignored) {
-                // ignore
-            }
             Runtime.getRuntime().halt(0);
         }
         Runtime.getRuntime().halt(1);
@@ -601,8 +597,8 @@ public final class UmbraRuntimeGuard implements Runnable {
 
     private static void emitAttach(String source) {
         try {
-            System.err.println("[umbra-guard] attach detected" + (source == null ? ""
-                    : " (" + source + ")"));
+            System.err.println(logToken() + " attach detected"
+                    + (DEBUG && source != null ? " (" + source + ")" : ""));
         } catch (Throwable ignored) {
             // stderr may be closed.
         }
@@ -706,6 +702,13 @@ public final class UmbraRuntimeGuard implements Runnable {
                 // ignore
             }
             try {
+                if (attachSelfSignal(System.getProperty("jdk.attach.allowAttachSelf"))) {
+                    return SIGNAL_ATTACH_SELF;
+                }
+            } catch (Throwable ignored) {
+                // ignore
+            }
+            try {
                 if (jdwpListenerSignal()) {
                     return SIGNAL_LISTENER;
                 }
@@ -742,6 +745,13 @@ public final class UmbraRuntimeGuard implements Runnable {
             } catch (Throwable ignored) {
                 // ignore
             }
+        }
+        try {
+            if (heapDumpSignal(managementArguments())) {
+                return SIGNAL_HEAP_DUMP;
+            }
+        } catch (Throwable ignored) {
+            // ignore
         }
         if (isTrue(ENV_TEXT)) {
             try {
@@ -1181,6 +1191,42 @@ public final class UmbraRuntimeGuard implements Runnable {
         return value != null && value.trim().length() > 0 && !"false".equalsIgnoreCase(value.trim());
     }
 
+    /**
+     * Heap-dump-on-OOM flag policy (public for the guard unit tests). A heap dump
+     * exposes every decrypted class currently in memory; a clean JVM does not set
+     * this flag, so there is no false positive.
+     */
+    public static boolean heapDumpSignal(List<String> arguments) {
+        if (arguments == null) {
+            return false;
+        }
+        for (int i = 0; i < arguments.size(); i++) {
+            String argument = arguments.get(i);
+            if (argument == null) {
+                continue;
+            }
+            String lower = argument.toLowerCase(Locale.ROOT);
+            if (lower.startsWith("-d")) {
+                continue;
+            }
+            if (lower.indexOf("+heapdumponoutofmemoryerror") >= 0
+                    || lower.indexOf("+heapdumpbeforefullgc") >= 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * {@code jdk.attach.allowAttachSelf} policy (public for the guard unit tests):
+     * enabling self-attach opens jcmd/agent attach from inside the same JVM, which
+     * bypasses the external attach path.
+     */
+    public static boolean attachSelfSignal(String allowAttachSelfProperty) {
+        return allowAttachSelfProperty != null
+                && "true".equalsIgnoreCase(allowAttachSelfProperty.trim());
+    }
+
     private static int platformSignal() {
         String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
         if (os.indexOf("linux") < 0) {
@@ -1324,35 +1370,43 @@ public final class UmbraRuntimeGuard implements Runnable {
 
     private static void fail(int signal) {
         String name = signalName(signal);
-        if (signal == SIGNAL_ATTACH || signal == SIGNAL_ATTACH_FILE
-                || signal == SIGNAL_THREAD) {
-            emitAttach(name);
-        }
-        emit(name);
         String action = ACTION;
         if ("log".equals(action)) {
+            if (signal == SIGNAL_ATTACH || signal == SIGNAL_ATTACH_FILE
+                    || signal == SIGNAL_THREAD) {
+                emitAttach(name);
+            } else {
+                emit(name);
+            }
             return;
         }
         if ("exit".equals(action)) {
             Runtime.getRuntime().halt(1);
         }
         if ("corrupt".equals(action)) {
-            try {
-                System.err.close();
-            } catch (Throwable ignored) {
-                // ignore
-            }
             Runtime.getRuntime().halt(0);
         }
-        throw new SecurityException("[umbra-guard] " + name);
+        throw quietException(DEBUG ? logToken() + " " + name : null);
     }
 
     private static void emit(String name) {
         try {
-            System.err.println("[umbra-guard] " + name + " detected");
+            System.err.println(logToken() + " " + name + " detected");
         } catch (Throwable ignored) {
             // stderr may be closed by the caller.
         }
+    }
+
+    private static SecurityException quietException(String message) {
+        SecurityException failure = message == null ? new SecurityException()
+                : new SecurityException(message);
+        failure.setStackTrace(new StackTraceElement[0]);
+        return failure;
+    }
+
+    private static String logToken() {
+        return LOG_TOKEN == null || LOG_TOKEN.isEmpty() || LOG_TOKEN.charAt(0) == '@'
+                ? "umbra" : LOG_TOKEN;
     }
 
     private static String signalName(int signal) {
@@ -1381,6 +1435,10 @@ public final class UmbraRuntimeGuard implements Runnable {
                 return "suspend-drift";
             case SIGNAL_ATTACH:
                 return "attach";
+            case SIGNAL_HEAP_DUMP:
+                return "heap-dump";
+            case SIGNAL_ATTACH_SELF:
+                return "attach-self";
             default:
                 return "none";
         }

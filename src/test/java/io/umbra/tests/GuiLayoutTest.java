@@ -1,8 +1,10 @@
 package io.umbra.tests;
 
+import io.umbra.gui.GuiModeOptions;
 import io.umbra.gui.GuiRoot;
 import io.umbra.gui.GuiScreenshot;
 import io.umbra.gui.GuiSelfTest;
+import io.umbra.gui.ui.ModeOptionsPanel;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
@@ -58,6 +60,23 @@ public final class GuiLayoutTest {
                         "warm paper canvas at the corner: #" + Integer.toHexString(corner)
                                 + " (expected a warm off-white)");
             }
+
+            // The per-mode detailed options sheet renders offscreen as well.
+            ModeOptionsPanel options = new ModeOptionsPanel(
+                    GuiModeOptions.defaults("Maximum"), "Maximum", null);
+            Path optionsPng = temp.resolve("mode-options-900x700.png");
+            GuiScreenshot.writePanel(options, ModeOptionsPanel.SHEET_WIDTH,
+                    ModeOptionsPanel.SHEET_HEIGHT, optionsPng);
+            check(Files.isRegularFile(optionsPng), "mode options screenshot written");
+            long optionsSize = Files.size(optionsPng);
+            check(optionsSize > 15000, "mode options screenshot has content ("
+                    + optionsSize + " bytes)");
+            BufferedImage optionsImage = ImageIO.read(optionsPng.toFile());
+            check(optionsImage != null && optionsImage.getWidth() == 900
+                            && optionsImage.getHeight() == 700,
+                    "mode options screenshot is 900x700");
+            check(options.controlCount() >= 100,
+                    "mode options panel builds the full control set");
         } finally {
             System.setProperty("user.home", oldHome == null ? "" : oldHome);
             delete(temp);

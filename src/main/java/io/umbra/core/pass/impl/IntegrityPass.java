@@ -139,6 +139,7 @@ public final class IntegrityPass implements Pass {
             guardReplacements.put("@@TIMING@@", String.valueOf(config.optionBool("antiDebug.timing", true)));
             guardReplacements.put("@@ACTION@@", guardAction);
             guardReplacements.put("@@WATCHDOG@@", "");
+            guardReplacements.put("@@LOGTOKEN@@", AntiDebugPass.logToken(config));
             guardReplacements.put("@@WATCHMS@@", String.valueOf(
                     Math.max(1000L, config.optionLong("antiDebug.watchdogMs", 4000L))));
             runtimeGuard = GuardSupport.ensureRuntimeGuard(context.classes(), config.seed(),

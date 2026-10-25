@@ -8,6 +8,7 @@ import io.umbra.core.engine.Stats;
 import io.umbra.core.jni.NativeCompiler;
 import io.umbra.core.jni.guard.GuardCodeGenerator;
 import io.umbra.core.jni.guard.GuardOptions;
+import io.umbra.core.runtime.UmbraNativeGuard;
 import io.umbra.core.jni.guard.PeImage;
 import io.umbra.core.model.ClassPool;
 import io.umbra.core.model.Hierarchy;
@@ -186,6 +187,12 @@ public final class NativeGuardTest {
         check(first.equals(second), "guard C source is deterministic");
         check(first.contains("JNI_OnLoad"), "guard C has JNI_OnLoad");
         check(first.contains("umbra_guard_tick"), "guard C exports the guard tick");
+        check(first.contains("RegisterNatives") && first.contains("FindClass"),
+                "guard C binds the JNI methods with RegisterNatives");
+        check(!first.contains("JNIEXPORT jint JNICALL Java_"),
+                "guard C has no plaintext Java_* JNI exports");
+        check(first.contains("umbra_fn_table") && first.contains("umbra_sample_table"),
+                "guard C has magic-located function/sample tables");
         check(first.contains("NtQueryInformationProcess"), "guard C checks the debug port");
         check(first.contains("frida"), "guard C has Frida checks");
         check(first.contains("ProcessDebugObjectHandle") == false
@@ -203,16 +210,51 @@ public final class NativeGuardTest {
         {
             check(resources.library.length > 1024, "guard DLL was compiled");
             check(GuardOptions.fnv1a64(resources.library) != 0L, "guard DLL digest computed");
-            byte[] prologue = PeImage.exportPrologue(resources.library, resources.checkSymbol, 16);
-            check(prologue.length == 16, "nativeCheck prologue extracted from the PE export table");
-            check(!allZero(prologue), "nativeCheck prologue is real code");
-            byte[] tokenPrologue = PeImage.exportPrologue(resources.library, resources.tokenSymbol, 16);
-            check(tokenPrologue.length == 16, "nativeToken prologue extracted from the PE export table");
+            byte[][] prologues = PeImage.functionPrologues(resources.library,
+                    GuardCodeGenerator.functionTableMagic(0x1122334455667788L), 4, 16);
+            check(prologues.length == 4, "function table resolves all four entry points");
+            check(!allZero(prologues[1]), "nativeCheck prologue is real code");
+            check(!allZero(prologues[3]), "nativeToken prologue is real code");
             check(PeImage.exportFileOffset(resources.library, "definitely-not-exported") < 0,
                     "missing export handled gracefully");
+
+            java.util.List<String> exports = PeImage.exportNames(resources.library);
+            check(exports.contains("JNI_OnLoad"), "guard exports JNI_OnLoad");
+            check(exports.contains("umbra_guard_tick"),
+                    "guard keeps the native-code tick entry point");
+            boolean javaNames = false;
+            for (String name : exports) {
+                if (name.startsWith("Java_") || "umbra_code_sample_table".equals(name)) {
+                    javaNames = true;
+                }
+            }
+            check(!javaNames, "guard export table has no plaintext Java_*/sample-table symbols");
+            String artifactText = new String(resources.library, StandardCharsets.ISO_8859_1);
+            int umbraHits = 0;
+            for (int at = artifactText.indexOf("umbra"); at >= 0; at = artifactText.indexOf("umbra", at + 1)) {
+                umbraHits++;
+            }
+            check(umbraHits <= 1,
+                    "guard PE has at most the tick symbol as plaintext 'umbra' (" + umbraHits + ")");
+            check(resources.source.indexOf("@@") < 0,
+                    "generated guard source has no @@ placeholders");
+            String[] sections = PeImage.sectionNames(resources.library);
+            check(sections.length > 0 && sections[0].startsWith("."),
+                    "guard PE section names are normal: " + java.util.Arrays.toString(sections));
+            check(PeImage.timestamp(resources.library) == 0,
+                    "default guard build is reproducible (timestamp 0)");
+
+            // native.timestamp=true must produce a normal (non-zero) PE timestamp.
+            Path timestamped = resources.directory.resolve("guard-timestamp.dll");
+            NativeCompiler.Result stamped = NativeCompiler.compile(
+                    NativeCompiler.resolve("", new Log(null, false)),
+                    resources.directory.resolve("guard.c"), timestamped, "windows", "",
+                    new Log(null, false), false);
+            check(stamped.success(), "timestamped guard build compiles: " + stamped.output());
+            check(PeImage.timestamp(Files.readAllBytes(timestamped)) != 0,
+                    "native.timestamp=false stamps a normal PE build time");
         }
     }
-
     /**
      * Loads the compiled guard library in-process and verifies integrity, token
      * challenge and tamper rejection through its JNI methods.
@@ -221,6 +263,12 @@ public final class NativeGuardTest {
         {
             resources.libraryPath.toFile().deleteOnExit();
             System.load(resources.libraryPath.toAbsolutePath().toString());
+            java.lang.reflect.Method dispose = UmbraNativeGuard.class.getDeclaredMethod(
+                    "disposeAfterLoad", File.class);
+            dispose.setAccessible(true);
+            dispose.invoke(null, resources.libraryPath.toFile());
+            check(resources.libraryPath.toFile().exists(),
+                    "a mapped guard library cannot be wiped on Windows (documented residual)");
             Class<?> guard = Class.forName("io.umbra.core.runtime.UmbraNativeGuard");
             Method init = guard.getDeclaredMethod("nativeInit", int.class, long.class,
                     String.class, String.class, String.class);
@@ -275,8 +323,10 @@ public final class NativeGuardTest {
         try {
             Path jar = buildGuardedProgram(directory, compiler);
             check(Files.isRegularFile(jar), "guarded jar written");
+            java.util.Set<String> before = tempEntries();
             String cleanOutput = runJar(jar, null);
             check(cleanOutput.contains("OK"), "clean run passes the native guard");
+            checkNoFixedTempNames(before);
             String jdwpOutput = runJar(jar,
                     "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=0");
             check(jdwpOutput.contains("Umbra guard"), "JDWP-attached run is rejected");
@@ -289,6 +339,72 @@ public final class NativeGuardTest {
         }
     }
 
+    private static java.util.Set<String> tempEntries() {
+        java.util.Set<String> names = new java.util.HashSet<String>();
+        File[] entries = new File(System.getProperty("java.io.tmpdir", ".")).listFiles();
+        if (entries != null) {
+            for (File entry : entries) {
+                names.add(entry.getName());
+            }
+        }
+        return names;
+    }
+
+    /**
+     * The guard must not create a fixed-prefix temp file/dir: every new top-level
+     * entry is checked for {@code umbra}/{@code guard} in its name, and new
+     * directories containing a library must use a fully random alphanumeric name.
+     */
+    private static void checkNoFixedTempNames(java.util.Set<String> before) {
+        File tmp = new File(System.getProperty("java.io.tmpdir", "."));
+        File[] entries = tmp.listFiles();
+        if (entries == null) {
+            return;
+        }
+        java.util.List<File> candidateDirs = new java.util.ArrayList<File>();
+        for (File entry : entries) {
+            if (before.contains(entry.getName())) {
+                continue;
+            }
+            String lower = entry.getName().toLowerCase(java.util.Locale.ROOT);
+            check(!lower.contains("umbra") && !lower.contains("guard"),
+                    "new temp entry has no fixed umbra/guard name: " + entry.getName());
+            check(!lower.startsWith("umbra-guard-") && !lower.startsWith("umbra-native-"),
+                    "new temp entry does not use the legacy fixed prefix: " + entry.getName());
+            if (entry.isDirectory() && hasLibrary(entry)) {
+                candidateDirs.add(entry);
+            }
+        }
+        for (File dir : candidateDirs) {
+            check(dir.getName().matches("[a-z0-9]{8,24}"),
+                    "guard temp directory name is random alphanumeric: " + dir.getName());
+            File[] children = dir.listFiles();
+            if (children == null) {
+                continue;
+            }
+            for (File child : children) {
+                String name = child.getName();
+                if (name.endsWith(".dll") || name.endsWith(".so") || name.endsWith(".dylib")) {
+                    check(name.matches("[a-z0-9]{8,24}\\.(dll|so|dylib)"),
+                            "guard temp library file name is random alphanumeric: " + name);
+                }
+            }
+        }
+    }
+
+    private static boolean hasLibrary(File directory) {
+        File[] children = directory.listFiles();
+        if (children == null) {
+            return false;
+        }
+        for (File child : children) {
+            String name = child.getName();
+            if (name.endsWith(".dll") || name.endsWith(".so") || name.endsWith(".dylib")) {
+                return true;
+            }
+        }
+        return false;
+    }
     private static void testEndToEndFallback() throws Exception {
         Path directory = Files.createTempDirectory("umbra-guard-fallback");
         try {
@@ -397,8 +513,7 @@ public final class NativeGuardTest {
         Path directory;
         Path libraryPath;
         byte[] library;
-        String checkSymbol;
-        String tokenSymbol;
+        String source;
         byte[] checkPrologue;
         byte[] tokenPrologue;
     }
@@ -415,7 +530,7 @@ public final class NativeGuardTest {
         Path libraryFile = directory.resolve("guard.dll");
         Files.write(sourceFile, source.getBytes(StandardCharsets.UTF_8));
         NativeCompiler.Result result = NativeCompiler.compile(compiler, sourceFile, libraryFile,
-                "windows", "", log);
+                "windows", "-s", log);
         if (!result.success()) {
             deleteRecursively(directory);
             throw new AssertionError("FAILED: guard C source did not compile: " + result.output());
@@ -424,10 +539,16 @@ public final class NativeGuardTest {
         resources.directory = directory;
         resources.libraryPath = libraryFile;
         resources.library = Files.readAllBytes(libraryFile);
-        resources.checkSymbol = GuardCodeGenerator.exportSymbol(guardInternalName, "nativeCheck");
-        resources.tokenSymbol = GuardCodeGenerator.exportSymbol(guardInternalName, "nativeToken");
-        resources.checkPrologue = PeImage.exportPrologue(resources.library, resources.checkSymbol, 16);
-        resources.tokenPrologue = PeImage.exportPrologue(resources.library, resources.tokenSymbol, 16);
+        resources.source = source;
+        byte[][] prologues = PeImage.functionPrologues(resources.library,
+                GuardCodeGenerator.functionTableMagic(0x1122334455667788L), 4, 16);
+        if (prologues.length == 4) {
+            resources.checkPrologue = prologues[1];
+            resources.tokenPrologue = prologues[3];
+        } else {
+            resources.checkPrologue = new byte[0];
+            resources.tokenPrologue = new byte[0];
+        }
         return resources;
     }
 

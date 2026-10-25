@@ -88,6 +88,7 @@ public final class AntiDebugPass implements Pass {
         replacements.put("@@ACTION@@", action);
         replacements.put("@@WATCHDOG@@", watchdog);
         replacements.put("@@WATCHMS@@", String.valueOf(watchdogMs));
+        replacements.put("@@LOGTOKEN@@", logToken(config));
         String guard = GuardSupport.ensureRuntimeGuard(context.classes(), config.seed(), replacements);
 
         String[] entry = GuardSupport.parseEntryPoint(
@@ -142,6 +143,21 @@ public final class AntiDebugPass implements Pass {
             return value;
         }
         return "throw";
+    }
+
+    /**
+     * Random short log token substituted for the fixed {@code [umbra-guard]}
+     * prefix, so a log line does not fingerprint the guard in protected output.
+     */
+    static String logToken(UmbraConfig config) {
+        String alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+        java.util.Random random = new java.util.Random(
+                config.seed() ^ 0x4C4F47544F4B454EL);
+        StringBuilder builder = new StringBuilder(8);
+        for (int i = 0; i < 8; i++) {
+            builder.append(alphabet.charAt(random.nextInt(alphabet.length())));
+        }
+        return builder.toString();
     }
 
     private static int clamp(int level) {

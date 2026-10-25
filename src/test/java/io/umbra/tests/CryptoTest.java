@@ -221,7 +221,7 @@ public final class CryptoTest {
         try {
             Path first = dir.resolve("strings-a.jar");
             Path second = dir.resolve("strings-b.jar");
-            EngineResult result = runEngine(config(demo, first, "string.strength", "3"));
+            EngineResult result = runEngine(config(demo, first, "string.strength", "3", "string.cache", "true"));
             check(stat(result, "strings.encrypted") > 300, "string pass encrypted > 300 constants");
             check(stat(result, "strings.perClassKeys") > 0, "string pass used per-class keys");
             check(stat(result, "strings.splitSites") > 0, "string pass split payloads across constants");
@@ -248,7 +248,7 @@ public final class CryptoTest {
             check(!raw.contains("logic broken"), "raw archive does not contain the failure literal");
 
             // Same seed must produce the same archive (deterministic protection).
-            runEngine(config(demo, second, "string.strength", "3"));
+            runEngine(config(demo, second, "string.strength", "3", "string.cache", "true"));
             check(entryNames(first).equals(entryNames(second)), "string pass output is deterministic for a seed");
         } finally {
             deleteRecursively(dir);
@@ -575,7 +575,7 @@ public final class CryptoTest {
         if (bytes.length > 0) {
             bytes[0] ^= 0x01;
         }
-        writeZip(target, entries);
+        writeZip(target, entries, commentOf(source));
     }
 
     private static void tamperLargestEntry(Path source, Path target) throws IOException {
@@ -583,6 +583,12 @@ public final class CryptoTest {
         String largest = null;
         int largestSize = -1;
         for (Map.Entry<String, byte[]> entry : entries.entrySet()) {
+            // Only encrypted payload entries (random names), never the plaintext
+            // loader/helpers: v3 archives keep ZIP-comment binding, and tampering a
+            // class file would fail before the loader even starts.
+            if (entry.getKey().endsWith(".class") || entry.getKey().startsWith("META-INF/")) {
+                continue;
+            }
             if (entry.getValue().length > largestSize) {
                 largestSize = entry.getValue().length;
                 largest = entry.getKey();
@@ -592,11 +598,25 @@ public final class CryptoTest {
         if (bytes.length > 0) {
             bytes[1 % bytes.length] ^= 0x01;
         }
-        writeZip(target, entries);
+        writeZip(target, entries, commentOf(source));
+    }
+
+    private static String commentOf(Path jar) throws IOException {
+        try (JarFile file = new JarFile(jar.toFile())) {
+            return file.getComment();
+        }
     }
 
     private static void writeZip(Path target, Map<String, byte[]> entries) throws IOException {
+        writeZip(target, entries, null);
+    }
+
+    private static void writeZip(Path target, Map<String, byte[]> entries, String comment)
+            throws IOException {
         try (ZipOutputStream out = new ZipOutputStream(new FileOutputStream(target.toFile()))) {
+            if (comment != null) {
+                out.setComment(comment);
+            }
             for (Map.Entry<String, byte[]> entry : entries.entrySet()) {
                 out.putNextEntry(new ZipEntry(entry.getKey()));
                 out.write(entry.getValue());

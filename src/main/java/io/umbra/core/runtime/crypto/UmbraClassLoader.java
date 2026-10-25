@@ -23,7 +23,7 @@ import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 
 /**
- * Plaintext bootstrap loader for a fully encrypted archive.
+ * Plaintext bootstrap loader for a fully encrypted archive (index format v3).
  *
  * <p>Runtime template: no nested/anonymous classes and no direct references to
  * other Umbra classes except {@link UmbraCrypto} (dependencies are plaintext
@@ -31,41 +31,48 @@ import java.util.jar.JarFile;
  * plus the crypto/URL-connection helpers are the only plaintext class files in
  * the protected JAR; the loader becomes {@code Main-Class}.</p>
  *
- * <p>At startup it opens its own archive, rebuilds the archive master key from
- * split key parts, decrypts and authenticates the encrypted index, verifies its
- * own bytes, then decrypts class payloads on demand
- * ({@code findClass} - {@code defineClass} + {@code definePackage} with a
- * correct {@code CodeSource}/{@code ProtectionDomain}), serves decrypted
- * resources through a custom {@code URLStreamHandler}, and finally invokes the
- * original {@code main(String[])} through reflection with the loader installed
- * as thread context class loader.</p>
+ * <p>At startup it opens its own archive, rebuilds the sample-bound master key
+ * from the embedded random {@code siteSeed}, the ZIP comment and the archive
+ * entry count, decrypts and authenticates the sealed index, verifies its own
+ * bytes with a keyed digest, then decrypts class payloads on demand (per-entry
+ * nonce mixed into the KDF) with keyed-digest verification. Failures are silent:
+ * exceptions carry no message/stack unless {@code -Dumbra.debug=true}.</p>
  *
- * <p>Index version 2 carries both the class map and the resource map (logical
- * name, payload entry, SHA-256 digest, plaintext size); resources are sealed the
- * same way as class payloads and are authenticated on every read. Integrity
- * levels: 1 = index/loader only, 2 = per-class and per-resource digests on
- * access, 3 = eager verification of every payload plus watchdog re-checks.</p>
+ * <p>Index v3 layout: magic, version, flags, integrity level, master-binding
+ * byte, plaintext-class names, entry class/method, keyed loader digest, class
+ * entries (name, payload entry, keyed digest) and resource entries (name, payload
+ * entry, keyed digest, plaintext size). Integrity levels: 2 = per-class/resource
+ * keyed digest on access + sampled watchdog, 3 = eager full verification plus
+ * periodic full re-verification.</p>
  */
 public final class UmbraClassLoader extends ClassLoader {
 
     // Substituted at injection time.
     private static final String INDEX_ENTRY = "@@INDEX@@";
-    private static final String KEY_PART_0 = "@@P0@@";
-    private static final String KEY_PART_1 = "@@P1@@";
-    private static final String KEY_PART_2 = "@@P2@@";
-    private static final String KEY_PART_3 = "@@P3@@";
-    private static final String KEY_SALT = "@@SALT@@";
+    private static final String SITE_SEED = "@@SEED@@";
     private static final String ACTION = "@@ACTION@@";
+    private static final String LOG_TOKEN = "@@LOGTOKEN@@";
     private static final String WATCHDOG = "@@WATCHDOG@@";
     private static final String RUNTIME_GUARD = "@@GUARD@@";
+    private static final String WATCH_MS_TEXT = "@@WATCHMS@@";
 
     private static final int MAGIC = 0x554D4232;
-    private static final int VERSION = 2;
+    private static final int VERSION = 3;
     private static final int FLAG_INTEGRITY = 1;
     private static final int FLAG_ANTIDUMP = 2;
     private static final int FLAG_RESOURCE_INTEGRITY = 4;
     private static final int ALG_SHIFT = 3;
     private static final int ALG_MASK = 3;
+
+    private static final int BINDING_SAMPLE = 0;
+    private static final int BINDING_SEED = 1;
+
+    /** Maximum accepted UTF-8 string length in the sealed index (1 MiB). */
+    private static final int MAX_STRING_BYTES = 1024 * 1024;
+    /** Maximum accepted class/resource index entries (sanity cap). */
+    private static final int MAX_ENTRIES = 1_000_000;
+    /** Minimum bytes per index entry (two length-prefixed names + 32-byte digest). */
+    private static final int MIN_CLASS_ENTRY_BYTES = 8 + 32;
 
     /** Scheme of the decrypted-resource URLs served by the custom handler. */
     private static final String RESOURCE_PROTOCOL = "umbra";
@@ -89,11 +96,14 @@ public final class UmbraClassLoader extends ClassLoader {
     private final boolean integrityEnabled;
     private final boolean resourceIntegrityEnabled;
     private final boolean antiDump;
+    private int bindingUsed;
+    private int[] classOrder;
+    private int[] resourceOrder;
+    private int classCursor;
+    private int resourceCursor;
 
     public UmbraClassLoader() throws Exception {
         super(UmbraClassLoader.class.getClassLoader());
-        this.masterKey = UmbraCrypto.masterKey(
-                new String[] { KEY_PART_0, KEY_PART_1, KEY_PART_2, KEY_PART_3 }, KEY_SALT);
         this.location = locateOwnArchive();
         File file = new File(location.toURI());
         if (!file.isFile()) {
@@ -102,52 +112,74 @@ public final class UmbraClassLoader extends ClassLoader {
         this.jar = new JarFile(file);
         this.protectionDomain = new ProtectionDomain(
                 new CodeSource(location, (Certificate[]) null), null, this, null);
+        this.masterKey = deriveMasterKey();
 
         byte[] sealedIndex = readEntry(INDEX_ENTRY);
         byte[] index = UmbraCrypto.unseal(sealedIndex, masterKey, UmbraCrypto.ALG_CHACHA20);
         UmbraCrypto.wipe(sealedIndex);
 
         ByteBuffer buffer = ByteBuffer.wrap(index);
-        if (buffer.getInt() != MAGIC) {
-            throw new SecurityException("Encrypted archive index is not valid");
+        if (readInt(buffer) != MAGIC) {
+            throw silent("Encrypted archive index is not valid");
         }
-        if (buffer.get() != VERSION) {
-            throw new SecurityException("Unsupported encrypted archive version");
+        int version = buffer.get() & 0xFF;
+        if (version != VERSION) {
+            throw silent("Unsupported encrypted archive version");
         }
         byte flags = buffer.get();
         int level = buffer.get() & 0xFF;
+        int binding = buffer.get() & 0xFF;
+        if (binding != bindingUsed) {
+            throw silent("Encrypted archive binding mismatch");
+        }
         this.integrityEnabled = (flags & FLAG_INTEGRITY) != 0;
         this.antiDump = (flags & FLAG_ANTIDUMP) != 0;
         this.resourceIntegrityEnabled = (flags & FLAG_RESOURCE_INTEGRITY) != 0;
         this.payloadAlgorithm = (flags >>> ALG_SHIFT) & ALG_MASK;
+        if (payloadAlgorithm != UmbraCrypto.ALG_CHACHA20
+                && payloadAlgorithm != UmbraCrypto.ALG_AES_CTR) {
+            throw silent("Unsupported payload algorithm");
+        }
+        if (integrityEnabled && level < 2) {
+            throw silent("Encrypted archive integrity level is too weak");
+        }
         this.integrityLevel = level;
 
-        int plaintextCount = buffer.getInt();
+        int plaintextCount = readCount(buffer, 10_000);
         for (int i = 0; i < plaintextCount; i++) {
             plaintextClasses.add(readString(buffer));
         }
         this.entryClass = readString(buffer);
         this.entryMethod = readString(buffer);
-        this.loaderDigest = new byte[32];
-        buffer.get(loaderDigest);
-        int classCount = buffer.getInt();
+        this.loaderDigest = readBytes(buffer, 32);
+
+        int classCount = readCount(buffer, MAX_ENTRIES);
+        if (classCount > buffer.remaining() / MIN_CLASS_ENTRY_BYTES) {
+            throw silent("Encrypted archive index class map is truncated");
+        }
         for (int i = 0; i < classCount; i++) {
             String name = readString(buffer);
             String entry = readString(buffer);
-            byte[] digest = new byte[32];
-            buffer.get(digest);
-            classEntries.put(name, entry);
+            byte[] digest = readBytes(buffer, 32);
+            if (name.isEmpty() || entry.isEmpty() || classEntries.put(name, entry) != null) {
+                throw silent("Encrypted archive index class map is invalid");
+            }
             classDigests.put(name, digest);
             payloadEntries.add(entry);
         }
-        int resourceCount = buffer.getInt();
+        int resourceCount = readCount(buffer, MAX_ENTRIES);
+        if (resourceCount > buffer.remaining() / (8 + 32 + 4)) {
+            throw silent("Encrypted archive index resource map is truncated");
+        }
         for (int i = 0; i < resourceCount; i++) {
             String name = readString(buffer);
             String entry = readString(buffer);
-            byte[] digest = new byte[32];
-            buffer.get(digest);
-            int size = buffer.getInt();
-            resourceEntries.put(name, entry);
+            byte[] digest = readBytes(buffer, 32);
+            int size = readInt(buffer);
+            if (name.isEmpty() || entry.isEmpty() || size < 0
+                    || resourceEntries.put(name, entry) != null) {
+                throw silent("Encrypted archive index resource map is invalid");
+            }
             resourceDigests.put(name, digest);
             resourceSizes.put(name, Integer.valueOf(size));
             payloadEntries.add(entry);
@@ -168,6 +200,10 @@ public final class UmbraClassLoader extends ClassLoader {
         }
         if (integrityEnabled && integrityLevel >= 3) {
             verifyAllPayloads();
+        }
+        if (integrityEnabled && integrityLevel >= 2) {
+            classOrder = shuffledIndices(classEntries.size());
+            resourceOrder = shuffledIndices(resourceEntries.size());
             ACTIVE = this;
             startWatchdog();
         }
@@ -178,7 +214,9 @@ public final class UmbraClassLoader extends ClassLoader {
         try {
             run(args);
         } catch (Throwable failure) {
-            failure.printStackTrace();
+            if (DEBUG) {
+                failure.printStackTrace();
+            }
             Runtime.getRuntime().halt(1);
         }
     }
@@ -208,28 +246,75 @@ public final class UmbraClassLoader extends ClassLoader {
         }
     }
 
-    /** Re-verifies every encrypted payload; invoked by the runtime watchdog. */
+    /**
+     * Watchdog tick: samples a random slice of the payload index (full pass every
+     * 20th tick at level 3) and refreshes the heartbeat that the decrypt path
+     * checks, so a suspended watchdog thread is detectable. A failure halts
+     * silently from this background thread (a thrown exception would print a
+     * stack trace); it never returns a diagnostic to the program.
+     */
     public static void watch() {
         UmbraClassLoader loader = ACTIVE;
-        if (loader != null) {
-            loader.verifyAllPayloads();
+        if (loader == null) {
+            return;
+        }
+        WATCHDOG_HEARTBEAT++;
+        LAST_WATCHDOG_NANOS = System.nanoTime();
+        try {
+            loader.verifyWatchSample();
+        } catch (Throwable failure) {
+            loader.verifyFailure();
         }
     }
 
     private static volatile UmbraClassLoader ACTIVE;
+    private static final boolean DEBUG = Boolean.getBoolean("umbra.debug");
+    private static volatile boolean watchdogStarted;
+    private static volatile long WATCHDOG_HEARTBEAT;
+    private static volatile long LAST_WATCHDOG_NANOS;
 
     private void startWatchdog() {
         try {
-            // The watchdog class is an encrypted payload, so it must be resolved
-            // through this loader (its parent, the application loader, cannot see
-            // the encrypted entry). This fixes a latent 3.0 bug where the
-            // integrity watchdog silently never started on encrypted archives.
             Class<?> watchdogType = Class.forName(WATCHDOG, true, this);
             Object watchdog = watchdogType.getConstructor(String.class, String.class, long.class, int.class)
-                    .newInstance(getClass().getName(), "watch", Long.valueOf(4000L), Integer.valueOf(0));
+                    .newInstance(getClass().getName(), "watch", Long.valueOf(watchIntervalMs()),
+                            Integer.valueOf(0));
+            LAST_WATCHDOG_NANOS = System.nanoTime();
+            watchdogStarted = true;
             ((Thread) watchdog).start();
         } catch (Throwable ignored) {
             // A missing watchdog must not break the program.
+        }
+    }
+
+    private static long watchIntervalMs() {
+        try {
+            long value = Long.parseLong(WATCH_MS_TEXT.trim());
+            if (value < 1000L) {
+                return 1000L;
+            }
+            return value > 60000L ? 60000L : value;
+        } catch (Throwable unsubstituted) {
+            return 4000L;
+        }
+    }
+
+    /**
+     * Detects a watchdog thread that stopped ticking (for example suspended with a
+     * debugger): the next decrypt/define fails closed.
+     */
+    private void checkWatchdogHeartbeat() {
+        if (!watchdogStarted || !integrityEnabled || integrityLevel < 2) {
+            return;
+        }
+        long last = LAST_WATCHDOG_NANOS;
+        if (last == 0L) {
+            return;
+        }
+        long gapMs = (System.nanoTime() - last) / 1000000L;
+        long intervalMs = watchIntervalMs();
+        if (gapMs > intervalMs * 4L + 10000L) {
+            fail("Payload watchdog heartbeat lost");
         }
     }
 
@@ -339,18 +424,15 @@ public final class UmbraClassLoader extends ClassLoader {
     }
 
     /**
-     * Refuses decryption/define after a guard signal: the message is written to
-     * stderr (so a failed launch is diagnosable) and the class never becomes
-     * defined. Fail-closed regardless of the integrity action.
+     * Refuses decryption/define after a guard signal. The exception carries no
+     * message and an empty stack trace; diagnostics are only printed when
+     * {@code -Dumbra.debug=true}.
      */
     private static void guardRefuse(String what) {
-        String message = "Runtime guard signal active: " + what + " refused";
-        try {
-            System.err.println("[umbra-guard] " + message);
-        } catch (Throwable ignored) {
-            // stderr may be closed.
+        if (DEBUG) {
+            System.err.println(logToken() + " guard: " + what);
         }
-        throw new SecurityException(message);
+        throw silent("Runtime guard signal active");
     }
 
     // ------------------------------------------------------------------
@@ -392,9 +474,10 @@ public final class UmbraClassLoader extends ClassLoader {
         if (guardSignal()) {
             guardRefuse("class decryption");
         }
+        checkWatchdogHeartbeat();
         try {
             byte[] sealed = readEntry(entryName);
-            byte[] key = UmbraCrypto.hmacSha256(masterKey, UmbraCrypto.utf8("c:" + className));
+            byte[] key = payloadKey("c:" + className, sealed);
             try {
                 byte[] plain = UmbraCrypto.unseal(sealed, key, payloadAlgorithm);
                 // Re-check between decryption and define: an attach that happened
@@ -405,13 +488,13 @@ public final class UmbraClassLoader extends ClassLoader {
                 }
                 if (integrityEnabled && integrityLevel >= 2) {
                     byte[] expected = classDigests.get(className);
-                    byte[] actual = UmbraCrypto.sha256(plain);
-                    if (expected == null || !UmbraCrypto.constantTimeEquals(expected, actual)) {
-                        UmbraCrypto.wipe(actual);
+                    byte[] actual = UmbraCrypto.keyedDigest(masterKey, "d:c:" + className, plain);
+                    boolean valid = expected != null && UmbraCrypto.constantTimeEquals(expected, actual);
+                    UmbraCrypto.wipe(actual);
+                    if (!valid) {
                         UmbraCrypto.wipe(plain);
                         fail("Class payload integrity check failed");
                     }
-                    UmbraCrypto.wipe(actual);
                 }
                 String actualName = classNameOf(plain);
                 if (!className.equals(actualName)) {
@@ -426,7 +509,16 @@ public final class UmbraClassLoader extends ClassLoader {
         } catch (SecurityException e) {
             throw e;
         } catch (Throwable t) {
-            throw new ClassNotFoundException(className, t);
+            throw new ClassNotFoundException(className);
+        }
+    }
+
+    private byte[] payloadKey(String label, byte[] sealed) {
+        byte[] nonce = UmbraCrypto.nonceOf(sealed);
+        try {
+            return UmbraCrypto.entryKey(masterKey, label, nonce);
+        } finally {
+            UmbraCrypto.wipe(nonce);
         }
     }
 
@@ -445,7 +537,7 @@ public final class UmbraClassLoader extends ClassLoader {
         String name = decodeResourceName(encodedName);
         String entry = resourceEntries.get(name);
         if (entry == null) {
-            throw new IOException("Resource not found: " + name);
+            throw new IOException("Resource not found");
         }
         return loadResourcePayload(name, entry);
     }
@@ -454,9 +546,10 @@ public final class UmbraClassLoader extends ClassLoader {
         if (guardSignal()) {
             guardRefuse("resource decryption");
         }
+        checkWatchdogHeartbeat();
         try {
             byte[] sealed = readEntry(entryName);
-            byte[] key = UmbraCrypto.hmacSha256(masterKey, UmbraCrypto.utf8("r:" + name));
+            byte[] key = payloadKey("r:" + name, sealed);
             try {
                 byte[] plain = UmbraCrypto.unseal(sealed, key, payloadAlgorithm);
                 if (guardSignal()) {
@@ -466,7 +559,7 @@ public final class UmbraClassLoader extends ClassLoader {
                 if (integrityEnabled && resourceIntegrityEnabled && integrityLevel >= 2) {
                     byte[] expected = resourceDigests.get(name);
                     Integer size = resourceSizes.get(name);
-                    byte[] actual = UmbraCrypto.sha256(plain);
+                    byte[] actual = UmbraCrypto.keyedDigest(masterKey, "d:r:" + name, plain);
                     boolean valid = expected != null && UmbraCrypto.constantTimeEquals(expected, actual)
                             && (size == null || size.intValue() == plain.length);
                     UmbraCrypto.wipe(actual);
@@ -483,7 +576,7 @@ public final class UmbraClassLoader extends ClassLoader {
         } catch (SecurityException e) {
             throw e;
         } catch (Throwable t) {
-            throw new IOException("Encrypted resource is unreadable: " + name, t);
+            throw new IOException("Encrypted resource is unreadable");
         }
     }
 
@@ -583,7 +676,7 @@ public final class UmbraClassLoader extends ClassLoader {
         try {
             String selfEntry = UmbraClassLoader.class.getName().replace('.', '/') + ".class";
             byte[] self = readEntry(selfEntry);
-            byte[] digest = UmbraCrypto.sha256(self);
+            byte[] digest = UmbraCrypto.keyedDigest(masterKey, "d:loader", self);
             UmbraCrypto.wipe(self);
             boolean valid = UmbraCrypto.constantTimeEquals(digest, loaderDigest);
             UmbraCrypto.wipe(digest);
@@ -603,42 +696,7 @@ public final class UmbraClassLoader extends ClassLoader {
     private void verifyAllPayloads() {
         List<String> classNames = new ArrayList<String>(classEntries.keySet());
         for (int i = 0; i < classNames.size(); i++) {
-            String name = classNames.get(i);
-            String entry = classEntries.get(name);
-            if (entry == null) {
-                continue;
-            }
-            if (guardSignal()) {
-                guardRefuse("integrity re-check");
-            }
-            try {
-                byte[] sealed = readEntry(entry);
-                byte[] key = UmbraCrypto.hmacSha256(masterKey, UmbraCrypto.utf8("c:" + name));
-                byte[] plain = null;
-                try {
-                    plain = UmbraCrypto.unseal(sealed, key, payloadAlgorithm);
-                    if (integrityEnabled && integrityLevel >= 2) {
-                        byte[] expected = classDigests.get(name);
-                        byte[] actual = UmbraCrypto.sha256(plain);
-                        if (expected == null || !UmbraCrypto.constantTimeEquals(expected, actual)) {
-                            UmbraCrypto.wipe(actual);
-                            fail("Class payload integrity check failed");
-                        }
-                        UmbraCrypto.wipe(actual);
-                    }
-                    if (!name.equals(classNameOf(plain))) {
-                        fail("Class payload name mismatch");
-                    }
-                } finally {
-                    UmbraCrypto.wipe(key);
-                    UmbraCrypto.wipe(sealed);
-                    UmbraCrypto.wipe(plain);
-                }
-            } catch (SecurityException e) {
-                throw e;
-            } catch (Throwable t) {
-                fail("Class payload could not be verified");
-            }
+            verifyClassPayload(classNames.get(i));
         }
         List<String> resourceNames = new ArrayList<String>(resourceEntries.keySet());
         for (int i = 0; i < resourceNames.size(); i++) {
@@ -651,6 +709,83 @@ public final class UmbraClassLoader extends ClassLoader {
             } catch (Throwable t) {
                 fail("Resource payload could not be verified");
             }
+        }
+    }
+
+    /** Sampled watchdog verification: ~1/20 of the classes/resources per tick. */
+    private void verifyWatchSample() {
+        if (integrityLevel >= 3 && (WATCHDOG_HEARTBEAT % 20L) == 0L) {
+            verifyAllPayloads();
+            return;
+        }
+        if (guardSignal()) {
+            guardRefuse("integrity re-check");
+        }
+        List<String> classNames = new ArrayList<String>(classEntries.keySet());
+        int classSlice = Math.max(1, (classNames.size() + 19) / 20);
+        for (int i = 0; i < classSlice && !classNames.isEmpty(); i++) {
+            int index = classOrder == null
+                    ? (classCursor + i) % classNames.size()
+                    : classOrder[(classCursor + i) % classOrder.length];
+            verifyClassPayload(classNames.get(index));
+        }
+        classCursor = classNames.isEmpty() ? 0 : (classCursor + classSlice) % classNames.size();
+        List<String> resourceNames = new ArrayList<String>(resourceEntries.keySet());
+        if (!resourceNames.isEmpty()) {
+            int resourceSlice = Math.max(1, (resourceNames.size() + 19) / 20);
+            for (int i = 0; i < resourceSlice; i++) {
+                int index = resourceOrder == null
+                        ? (resourceCursor + i) % resourceNames.size()
+                        : resourceOrder[(resourceCursor + i) % resourceOrder.length];
+                String name = resourceNames.get(index);
+                try {
+                    byte[] plain = loadResourcePayload(name, resourceEntries.get(name));
+                    UmbraCrypto.wipe(plain);
+                } catch (SecurityException e) {
+                    throw e;
+                } catch (Throwable t) {
+                    fail("Resource payload could not be verified");
+                }
+            }
+            resourceCursor = (resourceCursor + resourceSlice) % resourceNames.size();
+        }
+    }
+
+    private void verifyClassPayload(String name) {
+        String entry = classEntries.get(name);
+        if (entry == null) {
+            return;
+        }
+        if (guardSignal()) {
+            guardRefuse("integrity re-check");
+        }
+        try {
+            byte[] sealed = readEntry(entry);
+            byte[] key = payloadKey("c:" + name, sealed);
+            byte[] plain = null;
+            try {
+                plain = UmbraCrypto.unseal(sealed, key, payloadAlgorithm);
+                if (integrityEnabled && integrityLevel >= 2) {
+                    byte[] expected = classDigests.get(name);
+                    byte[] actual = UmbraCrypto.keyedDigest(masterKey, "d:c:" + name, plain);
+                    boolean valid = expected != null && UmbraCrypto.constantTimeEquals(expected, actual);
+                    UmbraCrypto.wipe(actual);
+                    if (!valid) {
+                        fail("Class payload integrity check failed");
+                    }
+                }
+                if (!name.equals(classNameOf(plain))) {
+                    fail("Class payload name mismatch");
+                }
+            } finally {
+                UmbraCrypto.wipe(key);
+                UmbraCrypto.wipe(sealed);
+                UmbraCrypto.wipe(plain);
+            }
+        } catch (SecurityException e) {
+            throw e;
+        } catch (Throwable t) {
+            fail("Class payload could not be verified");
         }
     }
 
@@ -707,18 +842,104 @@ public final class UmbraClassLoader extends ClassLoader {
     }
 
     private static void fail(String message) {
+        if (DEBUG) {
+            System.err.println(logToken() + " " + message);
+        }
         if ("exit".equals(ACTION)) {
             Runtime.getRuntime().halt(1);
         }
         if ("corrupt".equals(ACTION)) {
             Runtime.getRuntime().halt(0);
         }
-        throw new SecurityException(message);
+        throw silent(message);
+    }
+
+    /** Background-thread failure: cannot throw into the program, so halt silently. */
+    private void verifyFailure() {
+        if (DEBUG) {
+            System.err.println(logToken() + " watchdog failure");
+        }
+        if ("corrupt".equals(ACTION)) {
+            Runtime.getRuntime().halt(0);
+        }
+        Runtime.getRuntime().halt(1);
+    }
+
+    private static SecurityException silent(String message) {
+        SecurityException failure = DEBUG ? new SecurityException(logToken() + " " + message)
+                : new SecurityException();
+        failure.setStackTrace(new StackTraceElement[0]);
+        return failure;
+    }
+
+    private static String logToken() {
+        return LOG_TOKEN == null || LOG_TOKEN.isEmpty() || LOG_TOKEN.charAt(0) == '@'
+                ? "umbra" : LOG_TOKEN;
     }
 
     // ------------------------------------------------------------------
     // Archive helpers
     // ------------------------------------------------------------------
+
+    /**
+     * Rebuilds the sample-bound master key (index v3). The binding mode is
+     * signalled by the ZIP comment: a base64 comment means the sample-bound mode
+     * (comment + entry count), an absent comment means the diagnostic seed mode.
+     * Editing the comment or adding/removing entries changes the master key, so
+     * decryption fails by design.
+     */
+    private byte[] deriveMasterKey() throws Exception {
+        byte[] siteSeed;
+        try {
+            siteSeed = UmbraCrypto.base64Decode(SITE_SEED.trim());
+        } catch (Throwable unreadable) {
+            throw silent("Archive seed is unreadable");
+        }
+        if (siteSeed.length != UmbraCrypto.KEY_BYTES) {
+            throw silent("Archive seed is invalid");
+        }
+        try {
+            String comment = jar.getComment();
+            byte[] master;
+            if (comment == null || comment.trim().isEmpty()) {
+                bindingUsed = BINDING_SEED;
+                master = UmbraCrypto.masterFromSeed(siteSeed);
+            } else {
+                byte[] commentBytes;
+                try {
+                    commentBytes = UmbraCrypto.base64Decode(comment.trim());
+                } catch (Throwable unreadable) {
+                    throw silent("Archive comment is unreadable");
+                }
+                try {
+                    bindingUsed = BINDING_SAMPLE;
+                    master = UmbraCrypto.masterFromSample(siteSeed, commentBytes, countEntries());
+                } finally {
+                    UmbraCrypto.wipe(commentBytes);
+                }
+            }
+            UmbraCrypto.wipe(siteSeed);
+            return master;
+        } catch (SecurityException failure) {
+            UmbraCrypto.wipe(siteSeed);
+            throw failure;
+        } catch (Throwable unreadable) {
+            UmbraCrypto.wipe(siteSeed);
+            throw silent("Archive master key derivation failed");
+        }
+    }
+
+    private int countEntries() {
+        int count = 0;
+        Enumeration<JarEntry> entries = jar.entries();
+        while (entries.hasMoreElements()) {
+            JarEntry entry = entries.nextElement();
+            if (!entry.isDirectory()) {
+                count++;
+            }
+        }
+        return count;
+    }
 
     private URL locateOwnArchive() throws Exception {
         ProtectionDomain domain = UmbraClassLoader.class.getProtectionDomain();
@@ -753,11 +974,60 @@ public final class UmbraClassLoader extends ClassLoader {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Bounded index parsing
+    // ------------------------------------------------------------------
+
+    private static int readInt(ByteBuffer buffer) {
+        if (buffer.remaining() < 4) {
+            throw silent("Encrypted archive index is truncated");
+        }
+        return buffer.getInt();
+    }
+
+    private static byte[] readBytes(ByteBuffer buffer, int length) {
+        if (length < 0 || buffer.remaining() < length) {
+            throw silent("Encrypted archive index is truncated");
+        }
+        byte[] bytes = new byte[length];
+        buffer.get(bytes);
+        return bytes;
+    }
+
+    private static int readCount(ByteBuffer buffer, int maximum) {
+        int value = readInt(buffer);
+        if (value < 0 || value > maximum) {
+            throw silent("Encrypted archive index count is invalid");
+        }
+        return value;
+    }
+
     private static String readString(ByteBuffer buffer) {
-        int length = buffer.getInt();
+        int length = readInt(buffer);
+        if (length < 0 || length > MAX_STRING_BYTES || length > buffer.remaining()) {
+            throw silent("Encrypted archive index string is invalid");
+        }
         byte[] bytes = new byte[length];
         buffer.get(bytes);
         return new String(bytes, StandardCharsets.UTF_8);
+    }
+
+    private static int[] shuffledIndices(int size) {
+        if (size <= 0) {
+            return new int[0];
+        }
+        int[] order = new int[size];
+        for (int i = 0; i < size; i++) {
+            order[i] = i;
+        }
+        java.util.Random random = new java.util.Random(System.nanoTime() ^ (long) size);
+        for (int i = size - 1; i > 0; i--) {
+            int swap = random.nextInt(i + 1);
+            int value = order[i];
+            order[i] = order[swap];
+            order[swap] = value;
+        }
+        return order;
     }
 
     /** Reads the internal class name out of a class file without loading it. */

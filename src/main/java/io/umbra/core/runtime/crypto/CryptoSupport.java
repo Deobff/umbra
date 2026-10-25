@@ -93,6 +93,7 @@ public final class CryptoSupport {
         remapped.access |= Opcodes.ACC_SYNTHETIC;
         remapped.version = Math.min(remapped.version, Opcodes.V1_8);
         replaceConstants(remapped, replacements);
+        TemplateInjector.stripDebugInfo(remapped);
         pool.addGenerated(remapped);
     }
 

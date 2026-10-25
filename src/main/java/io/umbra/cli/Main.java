@@ -26,7 +26,7 @@ import java.util.List;
 /** Command-line entry point. */
 public final class Main {
 
-    private static final String VERSION = "3.1.0";
+    private static final String VERSION = "3.2.0";
 
     private Main() {
     }

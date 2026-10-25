@@ -26,7 +26,7 @@ public final class GuiConfigTest {
     public static void main(String[] args) throws Exception {
         Path dir = Files.createTempDirectory("umbra-gui-test-");
         try {
-            check("3.1.0".equals(GuiConfig.VERSION), "GUI version is 3.1.0");
+            check("3.2.0".equals(GuiConfig.VERSION), "GUI version is 3.2.0");
 
             Path input = dir.resolve("app.jar");
             Files.write(input, new byte[0]);
@@ -169,6 +169,83 @@ public final class GuiConfigTest {
                     "Light preset is detectable");
             check("Balanced".equals(io.umbra.gui.GuiPresets.detect(GuiSwitches.defaults())),
                     "catalogue defaults equal the Balanced preset");
+            // Per-mode detailed options: defaults must mirror the GUI presets
+            // and the typed renamer/antiLlm values must survive a YAML trip.
+            for (String mode : new String[]{"Light", "Balanced", "Aggressive", "Maximum",
+                    "Nocturne"}) {
+                java.util.Map<String, Boolean> synced = io.umbra.gui.GuiModeOptions
+                        .syncToggles(io.umbra.gui.GuiModeOptions.defaults(mode));
+                check(synced.equals(io.umbra.gui.GuiPresets.states(mode)),
+                        "mode " + mode + " detailed defaults match the preset switches");
+            }
+            check(io.umbra.gui.GuiModeOptions.allSpecs().size() >= 100,
+                    "mode options catalogue is comprehensive");
+            check(io.umbra.gui.GuiModeOptions.optionKeys().size()
+                            == io.umbra.gui.GuiModeOptions.allSpecs().size()
+                            - io.umbra.gui.GuiModeOptions.uiOnlyIds().size(),
+                    "every non-UI mode option has an engine key");
+            check(!io.umbra.gui.GuiModeOptions.optionKeys().contains("gui.seed"),
+                    "UI-only controls never become engine options");
+            check("true".equals(io.umbra.gui.GuiModeOptions.defaults("Maximum")
+                            .get("typeConfusion.enabled")),
+                    "Maximum mode defaults enable type confusion");
+            check("false".equals(io.umbra.gui.GuiModeOptions.defaults("Nocturne")
+                            .get("stringEncryption.enabled")),
+                    "Nocturne mode defaults disable string encryption");
+            check("preserve".equals(io.umbra.gui.GuiModeOptions.toOptionMap(
+                            io.umbra.gui.GuiModeOptions.defaults("Balanced"))
+                            .get("layout.multiRelease")),
+                    "mode option map carries the multi-release layout mode");
+
+            Map<String, String> detailed =
+                    io.umbra.gui.GuiModeOptions.toOptionMap(
+                            io.umbra.gui.GuiModeOptions.defaults("Maximum"));
+            detailed.put("renamer.renameClasses", "false");
+            detailed.put("renamer.renameMethods", "false");
+            detailed.put("renamer.renameFields", "true");
+            detailed.put("renamer.prefix", "p_");
+            detailed.put("renamer.minimumNameLength", "4");
+            detailed.put("antiLlm.decoyMethodsPerClass", "6");
+            detailed.put("antiLlm.wrapperLayers", "3");
+            UmbraConfig detailedConfig = GuiConfig.build(input,
+                    dir.resolve("mode.jar"), 99L, detailed, dir);
+            check(!detailedConfig.renamer().renameClasses(),
+                    "renamer.renameClasses comes from the detailed option");
+            check(!detailedConfig.renamer().renameMethods(),
+                    "renamer.renameMethods comes from the detailed option");
+            check(detailedConfig.renamer().renameFields(),
+                    "renamer.renameFields stays enabled");
+            check("p_".equals(detailedConfig.renamer().prefix()),
+                    "renamer.prefix comes from the detailed option");
+            check(detailedConfig.renamer().minimumNameLength() == 4,
+                    "renamer.minimumNameLength comes from the detailed option");
+            check(detailedConfig.antiLlm().decoyMethodsPerClass() == 6,
+                    "antiLlm.decoyMethodsPerClass comes from the detailed option");
+            check(detailedConfig.antiLlm().wrapperLayers() == 3,
+                    "antiLlm.wrapperLayers comes from the detailed option");
+            Map<String, String> described = GuiConfig.describe(detailedConfig);
+            check("p_".equals(described.get("renamer.prefix")),
+                    "describe() exposes the detailed renamer prefix for the dialog");
+            check("6".equals(described.get("antiLlm.decoyMethodsPerClass")),
+                    "describe() exposes the detailed anti-LLM counts");
+
+            String detailedYaml = GuiConfig.toYaml(detailedConfig);
+            Path detailedYamlFile = dir.resolve("mode-options.yml");
+            Files.write(detailedYamlFile, detailedYaml.getBytes(StandardCharsets.UTF_8));
+            UmbraConfig detailedLoaded = ConfigLoader.load(detailedYamlFile);
+            Map<String, String> detailedReloaded =
+                    io.umbra.gui.GuiModeOptions.fromEffective(
+                            GuiConfig.describe(detailedLoaded));
+            check("p_".equals(detailedReloaded.get("renamer.prefix")),
+                    "YAML round trip keeps the detailed rename prefix");
+            check("4".equals(detailedReloaded.get("renamer.minimumNameLength")),
+                    "YAML round trip keeps the detailed minimum name length");
+            check("false".equals(detailedReloaded.get("renamer.renameClasses")),
+                    "YAML round trip keeps the detailed rename-classes flag");
+            check("6".equals(detailedReloaded.get("antiLlm.decoyMethodsPerClass")),
+                    "YAML round trip keeps the detailed anti-LLM decoy count");
+            check("true".equals(detailedReloaded.get("typeConfusion.enabled")),
+                    "YAML round trip keeps the type-confusion mode default");
         } finally {
             delete(dir);
         }
