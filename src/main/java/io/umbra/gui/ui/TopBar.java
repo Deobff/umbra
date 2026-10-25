@@ -1,5 +1,6 @@
 package io.umbra.gui.ui;
 
+import io.umbra.gui.GuiConfig;
 import io.umbra.gui.theme.Tokens;
 
 import javax.swing.JTextField;
@@ -109,7 +110,7 @@ public class TopBar extends GlassPanel {
             FontMetrics versionMetrics = g.getFontMetrics(versionFont);
             float capsBaseline = (h - versionMetrics.getHeight()) / 2f
                     + versionMetrics.getAscent() + 2f;
-            Tokens.drawText(g, "3.0", versionFont, Tokens.FG3,
+            Tokens.drawText(g, GuiConfig.VERSION, versionFont, Tokens.FG3,
                     x + brandWidth + 10f, capsBaseline, 0.14f);
 
             if (seedVisible && !compact) {
