@@ -16,7 +16,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 8
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: zulu
           java-version: "8"
@@ -25,9 +25,15 @@ jobs:
         shell: pwsh
         run: .\build.cmd -Task dist
 
-      - name: Build package
+      - name: Package release zip
         shell: pwsh
-        run: .\build.cmd -Task package
+        run: |
+          Compress-Archive -Path dist\umbra.jar, README.md, umbra.example.yml, Umbra.cmd, umbra-cli.cmd `
+            -DestinationPath dist\umbra-3.2.1.zip -Force
+          $jarHash = (Get-FileHash dist\umbra.jar -Algorithm SHA256).Hash.ToLowerInvariant()
+          $zipHash = (Get-FileHash dist\umbra-3.2.1.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          @("$jarHash  umbra.jar", "$zipHash  umbra-3.2.1.zip") |
+            Set-Content -Path dist\SHA256SUMS -Encoding ASCII
 
       - name: Publish release
         shell: pwsh
