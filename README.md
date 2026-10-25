@@ -1,6 +1,6 @@
 # Umbra
 
-Umbra is a commercial-grade Java bytecode protection suite. It is written in
+Umbra is a Java bytecode protection suite. It is written in
 Java 8, depends only on ASM, and ships as a single executable JAR with a
 desktop GUI, a scriptable CLI, YAML configuration, and Gradle/Maven build
 integration.
@@ -77,18 +77,3 @@ integration.
   methods/wrapper layers.
 - Nocturne polymorphic method shadows with keyed arguments and runtime-selected
   equivalent bodies.
-
-### Build and tooling
-- Deterministic seeds, presets (`light`, `balanced`, `aggressive`, `maximum`,
-  `nocturne`, framework presets), keep rules and incremental builds.
-- Desktop GUI with per-mode detailed option sheets (names, data, flow,
-  virtualization, native, archive encryption, anti-debug, type confusion,
-  compatibility, output) and animated sliders for every numeric option.
-- Smooth 60 fps UI animations (switches, chips, group expand/collapse, buttons,
-  status/console fades) with a deterministic off switch for screenshots.
-- CLI, YAML configuration, mapping diff/trace, HTML/JSON audit reports and JVM
-  verification.
-- Gradle plugin (`io.umbra`) and Maven plugin (`umbra:protect`).
-- Automatic Minecraft mod-container adaptation: Fabric/Quilt, Forge
-  legacy/modern, NeoForge, mixins, access wideners/transformers and coremod
-  manifests.
