@@ -77,6 +77,27 @@ function Write-Step([string]$Message) {
 }
 
 <#
+    SHA-256 through .NET rather than Get-FileHash. The cmdlet ships in a module
+    that is not auto-loadable on every build host (it is missing on the CI
+    runners), and these checksums are a release artifact, so the hashing must not
+    depend on module autoloading.
+#>
+function Get-Sha256Hex([string]$Path) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        try {
+            $digest = $sha.ComputeHash($stream)
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $sha.Dispose()
+    }
+    return ([System.BitConverter]::ToString($digest) -replace '-', '').ToLowerInvariant()
+}
+
+<#
     Runs a native tool without letting PowerShell turn its stderr output into a
     terminating NativeCommandError. javac prints deprecation notes on stderr on
     every JDK, so the exit code is the only signal we trust.
@@ -277,7 +298,7 @@ function Build-Package {
     $sums = Join-Path $Dist 'SHA256SUMS'
     $lines = New-Object System.Collections.Generic.List[string]
     foreach ($artifact in @($distJar, $zip)) {
-        $hash = (Get-FileHash $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
+        $hash = Get-Sha256Hex $artifact
         $lines.Add($hash + '  ' + (Split-Path $artifact -Leaf))
     }
     [System.IO.File]::WriteAllLines($sums, $lines, (New-Object System.Text.UTF8Encoding($false)))
