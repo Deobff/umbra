@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="640" viewBox="0 0 1400 640" role="img" aria-labelledby="title desc">
+  <title id="title">Umbra protection pipeline</title>
+  <desc id="desc">Input artifact card, seven numbered protection layers, and a verified output artifact card.</desc>
+
+  <defs>
+    <linearGradient id="panel" x1="0" y1="0" x2="0.7" y2="1">
+      <stop offset="0" stop-color="#0a0f18"/>
+      <stop offset="0.6" stop-color="#080c13"/>
+      <stop offset="1" stop-color="#060910"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="0.5" cy="0.05" r="0.7">
+      <stop offset="0" stop-color="#2563eb" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#2563eb" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="edge" cx="0.9" cy="0.1" r="0.5">
+      <stop offset="0" stop-color="#3b82f6" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#3b82f6" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="1399" height="639" rx="22" fill="url(#panel)" stroke="#151f2e"/>
+  <rect x="0.5" y="0.5" width="1399" height="639" rx="22" fill="url(#halo)"/>
+  <rect x="0.5" y="0.5" width="1399" height="639" rx="22" fill="url(#edge)"/>
+
+  <g font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif">
+    <text x="56" y="58" font-size="13" font-weight="600" fill="#5f8ff0" letter-spacing="3.4">PROTECTION PIPELINE</text>
+    <text x="56" y="102" font-size="28" font-weight="600" fill="#e9f0fa" letter-spacing="-0.5">Seven layers, one deterministic pass</text>
+    <text x="56" y="132" font-size="15" fill="#7c8ba3">The artifact is analyzed once; every layer rewrites the same class pool, and the verifier has the last word.</text>
+  </g>
+
+  <!-- input artifact -->
+  <g font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif">
+    <rect x="56" y="238" width="196" height="260" rx="14" fill="#090e16" stroke="#131d2b"/>
+    <text x="76" y="272" font-size="11.5" font-weight="600" fill="#5f8ff0" letter-spacing="3">INPUT</text>
+    <text x="76" y="306" font-size="21" font-weight="600" fill="#e6eefb" letter-spacing="-0.3">app.jar</text>
+    <rect x="76" y="322" width="156" height="1" fill="#16202e"/>
+    <g font-size="13.5" fill="#6f8098">
+      <text x="76" y="350">Spring Boot fat JAR</text>
+      <text x="76" y="374">WAR / JPMS</text>
+      <text x="76" y="398">Multi-release</text>
+      <text x="76" y="422">Agent / OSGi</text>
+      <text x="76" y="446">Minecraft mods</text>
+    </g>
+    <text x="76" y="478" font-size="12" fill="#4e5f77">any build tool</text>
+  </g>
+
+  <!-- seven layers -->
+  <g font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif">
+    <rect x="330" y="166" width="680" height="50" rx="10" fill="#0a1017" stroke="#131c29"/>
+    <rect x="330" y="225" width="680" height="50" rx="10" fill="#0a1017" stroke="#131c29"/>
+    <rect x="330" y="284" width="680" height="50" rx="10" fill="#0a1017" stroke="#131c29"/>
+    <rect x="330" y="343" width="680" height="50" rx="10" fill="#0a1017" stroke="#131c29"/>
+    <rect x="330" y="402" width="680" height="50" rx="10" fill="#0a1017" stroke="#131c29"/>
+    <rect x="330" y="461" width="680" height="50" rx="10" fill="#0a1017" stroke="#131c29"/>
+    <rect x="330" y="520" width="680" height="50" rx="10" fill="#0a1017" stroke="#131c29"/>
+
+    <g font-family="ui-monospace, 'Cascadia Mono', Consolas, monospace" font-size="13.5" fill="#41618e" letter-spacing="1">
+      <text x="354" y="197">01</text>
+      <text x="354" y="256">02</text>
+      <text x="354" y="315">03</text>
+      <text x="354" y="374">04</text>
+      <text x="354" y="433">05</text>
+      <text x="354" y="492">06</text>
+      <text x="354" y="551">07</text>
+    </g>
+
+    <g font-size="18" font-weight="600" fill="#dbe6f5">
+      <text x="396" y="197">Rename &amp; metadata</text>
+      <text x="396" y="256">Data &amp; constants</text>
+      <text x="396" y="315">Control flow</text>
+      <text x="396" y="374">Virtualization</text>
+      <text x="396" y="433">Archive encryption</text>
+      <text x="396" y="492">Native</text>
+      <text x="396" y="551">Runtime</text>
+    </g>
+
+    <g font-size="14.5" fill="#6f8098" letter-spacing="0.5" text-anchor="end">
+      <text x="988" y="197">hierarchy-correct</text>
+      <text x="988" y="256">five engines</text>
+      <text x="988" y="315">state-machine flattening</text>
+      <text x="988" y="374">VM2 · Cantrip</text>
+      <text x="988" y="433">index v3 · HMAC</text>
+      <text x="988" y="492">JNI + guard</text>
+      <text x="988" y="551">anti-debug · anti-dump</text>
+    </g>
+  </g>
+
+  <!-- output artifact -->
+  <g font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif">
+    <rect x="1120" y="238" width="224" height="260" rx="14" fill="#090e16" stroke="#131d2b"/>
+    <text x="1140" y="272" font-size="11.5" font-weight="600" fill="#5f8ff0" letter-spacing="3">OUTPUT</text>
+    <text x="1140" y="306" font-size="21" font-weight="600" fill="#e6eefb" letter-spacing="-0.3">app-obf.jar</text>
+    <rect x="1140" y="322" width="184" height="1" fill="#16202e"/>
+    <g font-size="13.5" fill="#89a89a">
+      <text x="1140" y="350">verifier passed</text>
+      <text x="1140" y="374">seed reproduced</text>
+      <text x="1140" y="398">mapping kept</text>
+    </g>
+    <text x="1140" y="478" font-size="12" fill="#4e5f77">runs on JDK 8+</text>
+  </g>
+
+  <!-- flow -->
+  <g stroke="#22344b" stroke-width="1.4" fill="none">
+    <path d="M256 368 H310"/>
+    <path d="M1014 368 H1112"/>
+  </g>
+  <path d="M310 362.5 L317 368 L310 373.5" fill="none" stroke="#2f4a68" stroke-width="1.4"/>
+  <path d="M1112 362.5 L1119 368 L1112 373.5" fill="none" stroke="#2f4a68" stroke-width="1.4"/>
+
+  <g font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif">
+    <rect x="56" y="600" width="1288" height="1" fill="#131d2b"/>
+    <text x="56" y="624" font-size="12.5" fill="#56667e">Deterministic per seed · reproducible for a fixed toolchain · GUI, CLI, YAML and build plugins drive the same engine</text>
+  </g>
+</svg>

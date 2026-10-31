@@ -1,71 +1,106 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="500" viewBox="0 0 1600 500" role="img" aria-labelledby="title desc">
   <title id="title">Umbra — Java bytecode protection suite</title>
-  <desc id="desc">Umbra wordmark with tagline and capability chips on a dark gradient banner.</desc>
+  <desc id="desc">Dark banner: the Umbra wordmark and tagline on the left, and on the right a seven-ring mark whose rings stand for the seven protection layers, closing on a solid umbra core.</desc>
+
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#070b14"/>
-      <stop offset="0.55" stop-color="#0d1526"/>
-      <stop offset="1" stop-color="#050810"/>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#080b12"/>
+      <stop offset="0.52" stop-color="#0a0f17"/>
+      <stop offset="1" stop-color="#04060a"/>
     </linearGradient>
-    <radialGradient id="glowA" cx="0.18" cy="0.1" r="0.75">
-      <stop offset="0" stop-color="#3b82f6" stop-opacity="0.30"/>
+    <radialGradient id="glowL" cx="0.08" cy="0.02" r="0.85">
+      <stop offset="0" stop-color="#2563eb" stop-opacity="0.26"/>
+      <stop offset="0.5" stop-color="#2563eb" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#2563eb" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowR" cx="0.78" cy="0.5" r="0.34">
+      <stop offset="0" stop-color="#3b82f6" stop-opacity="0.18"/>
       <stop offset="1" stop-color="#3b82f6" stop-opacity="0"/>
     </radialGradient>
-    <radialGradient id="glowB" cx="0.92" cy="0.95" r="0.7">
-      <stop offset="0" stop-color="#8b5cf6" stop-opacity="0.24"/>
-      <stop offset="1" stop-color="#8b5cf6" stop-opacity="0"/>
+    <radialGradient id="core" cx="0.38" cy="0.3" r="0.8">
+      <stop offset="0" stop-color="#0e1a2c"/>
+      <stop offset="0.7" stop-color="#070c15"/>
+      <stop offset="1" stop-color="#020407"/>
     </radialGradient>
-    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#60a5fa"/>
-      <stop offset="1" stop-color="#a78bfa"/>
+    <linearGradient id="arc" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#a8e0ff"/>
+      <stop offset="0.4" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#4f46e5" stop-opacity="0.08"/>
     </linearGradient>
-    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
-      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#94a3b8" stroke-opacity="0.06" stroke-width="1"/>
+    <linearGradient id="rim" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#9cd4ff" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#3b82f6" stop-opacity="0.05"/>
+    </linearGradient>
+    <linearGradient id="rule" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#3b82f6" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="fadeGrad" x1="1" y1="0" x2="0.1" y2="1">
+      <stop offset="0.1" stop-color="#ffffff" stop-opacity="1"/>
+      <stop offset="0.55" stop-color="#ffffff" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.12"/>
+    </linearGradient>
+    <mask id="ringFade" maskUnits="userSpaceOnUse" x="0" y="0" width="1600" height="500">
+      <rect width="1600" height="500" fill="url(#fadeGrad)"/>
+    </mask>
+    <pattern id="grid" width="52" height="52" patternUnits="userSpaceOnUse">
+      <path d="M52 0H0V52" fill="none" stroke="#8ea4c4" stroke-opacity="0.045" stroke-width="1"/>
     </pattern>
+    <radialGradient id="vign" cx="0.5" cy="0.5" r="0.72">
+      <stop offset="0.45" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.5"/>
+    </radialGradient>
   </defs>
 
-  <rect width="1280" height="360" fill="url(#bg)"/>
-  <rect width="1280" height="360" fill="url(#grid)"/>
-  <rect width="1280" height="360" fill="url(#glowA)"/>
-  <rect width="1280" height="360" fill="url(#glowB)"/>
-  <circle cx="1178" cy="54" r="1.6" fill="#93c5fd" opacity="0.75"/>
-  <circle cx="1216" cy="88" r="1.2" fill="#a78bfa" opacity="0.65"/>
-  <circle cx="1090" cy="120" r="1" fill="#e2e8f0" opacity="0.45"/>
+  <rect width="1600" height="500" fill="url(#bg)"/>
+  <rect width="1600" height="500" fill="url(#grid)"/>
+  <rect width="1600" height="500" fill="url(#glowL)"/>
+  <rect width="1600" height="500" fill="url(#glowR)"/>
+  <rect width="1600" height="500" fill="url(#vign)"/>
 
-  <g transform="translate(78 94)">
-    <text x="0" y="0" font-family="Georgia, 'Times New Roman', serif" font-size="86" font-weight="700" fill="#f8fafc" letter-spacing="-2">Umbra</text>
-    <text x="302" y="-14" font-family="'Segoe UI', Arial, sans-serif" font-size="15" font-weight="600" fill="#93c5fd" letter-spacing="3">3.2.1</text>
-    <rect x="0" y="30" width="150" height="3" rx="1.5" fill="url(#accent)"/>
-    <text x="0" y="82" font-family="'Segoe UI', Arial, sans-serif" font-size="24" fill="#cbd5e1">Java bytecode protection, without compromise.</text>
-    <text x="0" y="119" font-family="'Segoe UI', Arial, sans-serif" font-size="16" fill="#7f8ea3">Layout-aware · Multi-engine encryption · VM2 · Native guards · Anti-debug · GUI + CLI</text>
-  </g>
+  <!-- seven layers: seven concentric rings dissolving into the lower left, closing on a solid umbra core -->
+  <g mask="url(#ringFade)">
+    <g transform="translate(1248 250)">
+      <circle r="196" fill="none" stroke="#3b82f6" stroke-opacity="0.05" stroke-width="12"/>
+      <circle r="196" fill="none" stroke="#3b82f6" stroke-opacity="0.32" stroke-width="1"/>
+      <circle r="168" fill="none" stroke="#3b82f6" stroke-opacity="0.27" stroke-width="1"/>
+      <circle r="140" fill="none" stroke="#3b82f6" stroke-opacity="0.23" stroke-width="1"/>
+      <circle r="112" fill="none" stroke="#3b82f6" stroke-opacity="0.19" stroke-width="1"/>
+      <circle r="84" fill="none" stroke="#3b82f6" stroke-opacity="0.16" stroke-width="1"/>
+      <circle r="56" fill="none" stroke="#3b82f6" stroke-opacity="0.13" stroke-width="1"/>
+      <circle r="28" fill="none" stroke="#3b82f6" stroke-opacity="0.10" stroke-width="1"/>
 
-  <g font-family="'Segoe UI', Arial, sans-serif" font-size="14" fill="#dbeafe">
-    <g transform="translate(80 276)">
-      <rect width="132" height="32" rx="16" fill="#0f1b2d" stroke="#1e3a5f"/>
-      <text x="16" y="21">JDK 8+</text>
-    </g>
-    <g transform="translate(224 276)">
-      <rect width="162" height="32" rx="16" fill="#0f1b2d" stroke="#1e3a5f"/>
-      <text x="16" y="21">Spring Boot / WAR</text>
-    </g>
-    <g transform="translate(398 276)">
-      <rect width="150" height="32" rx="16" fill="#0f1b2d" stroke="#1e3a5f"/>
-      <text x="16" y="21">VM2 + Native</text>
-    </g>
-    <g transform="translate(560 276)">
-      <rect width="156" height="32" rx="16" fill="#0f1b2d" stroke="#1e3a5f"/>
-      <text x="16" y="21">GUI / CLI / YAML</text>
-    </g>
-    <g transform="translate(728 276)">
-      <rect width="142" height="32" rx="16" fill="#0f1b2d" stroke="#1e3a5f"/>
-      <text x="16" y="21">Minecraft</text>
+      <circle r="196" fill="none" stroke="url(#arc)" stroke-width="2.2"
+              stroke-dasharray="300 940" stroke-linecap="round" transform="rotate(-150)"/>
+      <circle cx="-169.7" cy="-98" r="3" fill="#dcf1ff" opacity="0.92"/>
     </g>
   </g>
 
-  <g transform="translate(1010 258)">
-    <path d="M0 0 L56 0 L56 56 L0 56 Z" fill="none" stroke="#334155" stroke-width="1"/>
-    <path d="M8 28 L28 12 L48 28 L48 44 L8 44 Z" fill="#111c30" stroke="#60a5fa" stroke-width="1.2"/>
-    <path d="M20 44 L20 32 L28 24 L36 32 L36 44" fill="none" stroke="#a78bfa" stroke-width="1.2"/>
+  <g transform="translate(1248 250)">
+    <circle r="28" fill="url(#core)"/>
+    <circle r="28" fill="none" stroke="url(#rim)" stroke-width="1.4"
+            stroke-dasharray="46 130" stroke-linecap="round" transform="rotate(-140)"/>
+  </g>
+
+  <g font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif">
+    <text x="112" y="174" font-size="15" font-weight="600" fill="#6f9bff" letter-spacing="4.6">JAVA BYTECODE PROTECTION SUITE</text>
+
+    <text x="110" y="306" font-size="136" font-weight="600" fill="#f3f7fd" letter-spacing="-4.8">Umbra</text>
+
+    <rect x="112" y="334" width="188" height="2.5" rx="1.25" fill="url(#rule)"/>
+
+    <text x="112" y="386" font-size="29" fill="#cfdbec">Java bytecode protection, without compromise.</text>
+
+    <text x="112" y="422" font-size="16.5" fill="#7d8da6" letter-spacing="0.3">Renaming · Encryption · Control flow · VM2 · Native guards · Anti-debug · Verification</text>
+
+    <rect x="112" y="450" width="876" height="1" fill="#17212f"/>
+
+    <g font-size="14.5" fill="#6b7c95" letter-spacing="1.1">
+      <text x="112" y="484">JDK 8+</text>
+      <text x="220" y="484">ASM 9.11</text>
+      <text x="340" y="484">GUI · CLI · YAML</text>
+      <text x="520" y="484">Spring Boot · WAR · JPMS</text>
+      <text x="774" y="484">Minecraft mods</text>
+    </g>
   </g>
 </svg>

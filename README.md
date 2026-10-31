@@ -6,12 +6,11 @@
 
 **Java bytecode protection, without compromise.**
 
-[![Release](https://img.shields.io/github/v/release/Deobff/umbra?style=flat-square&color=2563eb)](https://github.com/Deobff/umbra/releases)
 [![Java](https://img.shields.io/badge/Java-8%2B-0ea5e9?style=flat-square)](#requirements)
 [![ASM](https://img.shields.io/badge/ASM-9.11-8b5cf6?style=flat-square)](#requirements)
 [![License](https://img.shields.io/badge/License-MIT-64748b?style=flat-square)](LICENSE)
 [![GUI](https://img.shields.io/badge/GUI-JavaFX-10b981?style=flat-square)](#desktop-gui)
-[![Version](https://img.shields.io/badge/version-3.2.2-dc2626?style=flat-square)](#)
+[![Release](https://img.shields.io/github/actions/workflow/status/Deobff/umbra/release.yml?style=flat-square&label=release&color=22c55e)](https://github.com/Deobff/umbra/actions/workflows/release.yml)
 
 Umbra is a layout-aware Java bytecode protection suite: renaming, multi-engine
 string encryption, control-flow hardening, VM virtualization, native code
@@ -34,16 +33,12 @@ multi-release JAR, JPMS module, signed JAR, Java agent, OSGi bundle, Minecraft
 mod), so protection layers that depend on a working class loader and manifest
 do not break the application.
 
-```text
-JAR/WAR ──▶ layout analysis ──▶ hierarchy-aware rename ──▶ data/flow/VM/native passes
-        ──▶ class & resource encryption + runtime guard ──▶ verifier ──▶ protected artifact
-```
+Mod containers, `module-info`, nested libraries and manifest entry points are all
+part of that analysis, so the result still loads. Everything is deterministic per
+seed, reproducible for a fixed toolchain, and can be driven from the GUI, CLI,
+YAML or a build plugin.
 
-Everything is deterministic per seed, reproducible for a fixed seed and
-toolchain, and can be driven from the GUI, CLI, YAML or a build plugin.
-
-**Current release: 3.2.2** — one-time program state, and `--set` now reaches
-every typed section.
+<img src="assets/layers.svg" alt="Umbra protection pipeline: input artifact, seven protection layers, verified output artifact" width="100%">
 
 ---
 
@@ -52,11 +47,11 @@ every typed section.
 <div align="center">
 <table>
 <tr>
-<td width="64%"><img src="assets/gui-main.png" alt="Umbra 3.2.2 JavaFX protection console" width="100%"></td>
+<td width="64%"><img src="assets/gui-main.png" alt="Umbra JavaFX protection console" width="100%"></td>
 <td width="36%"><img src="assets/gui-about.png" alt="Umbra about window" width="100%"></td>
 </tr>
 <tr>
-<td align="center"><sub>3.2.2 console — configuration rail, Options/Command/Output views, live targets band</sub></td>
+<td align="center"><sub>Protection console — configuration rail, Options / Command / Output views, live targets band</sub></td>
 <td align="center"><sub>Protection layers and the exact engine/jar paths in use</sub></td>
 </tr>
 </table>
@@ -173,7 +168,7 @@ java -jar dist\umbra.jar --gui
 The engine jar stays JavaFX-free: `java -jar umbra.jar` looks for
 `umbra-gui-fx.jar` next to itself and starts the console as a child process,
 printing the command-line help when either the console jar or a JavaFX-capable
-JVM is missing. The 3.2.2 console draws its own window chrome and groups every
+JVM is missing. The console draws its own window chrome and groups every
 switch and value the engine accepts into 13 sections (109 controls) behind
 Options / Command / Output views, with a targets band, a preset selector that
 loads the engine's effective values, live log, progress, cancel and an About
@@ -375,12 +370,12 @@ demo-obf.jar                   example protected demo
 .github/workflows/             release automation (tag v*)
 ```
 
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) describes the pass pipeline and
-core APIs; [docs/REFERENCE-MATRIX.md](docs/REFERENCE-MATRIX.md) records the
-capability analysis of the tools studied for 3.0; [docs/REPORT-3.2.1.md](docs/REPORT-3.2.1.md)
-covers the 3.2.1 hardening release, [docs/REPORT-3.2.md](docs/REPORT-3.2.md)
-the 3.2 feature release, [docs/REPORT-3.1.md](docs/REPORT-3.1.md) +
-[docs/AUDIT-3.1.md](docs/AUDIT-3.1.md) the 3.1 bug-hunt release.
+Deep dives: [architecture](docs/ARCHITECTURE.md) for the pass pipeline and core
+APIs, [hardening](docs/HARDENING.md) for the runtime guard, the
+[latest hardening report](docs/REPORT-3.2.1.md), [feature report](docs/REPORT-3.2.md),
+[earlier release report](docs/REPORT-3.1.md) with its
+[audit table](docs/AUDIT-3.1.md), and the
+[capability matrix](docs/REFERENCE-MATRIX.md) behind the engine.
 
 ---
 
@@ -390,7 +385,7 @@ Umbra 是一套面向 Java 字节码的混淆/加固工具：兼容 Spring Boot 
 多版本 JAR、JPMS、签名 JAR、agent、OSGi 与 Minecraft 模组；提供重命名、
 多引擎字符串加密、控制流混淆、VM2 虚拟化、原生 JNI、整包类加密、运行时反调试
 与反 dump，并附带 JavaFX 桌面控制台、CLI、YAML、Gradle/Maven 插件。
-3.2.2 起每个模式都集中在 13 个分组、109 个控件里细调，数值项使用带缓动的滑块，
+每个模式都集中在 13 个分组、109 个控件里细调，数值项使用带缓动的滑块，
 预设会直接读取引擎的真实生效值。发布包见
 [Releases](https://github.com/Deobff/umbra/releases)。
 
