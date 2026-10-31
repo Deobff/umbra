@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without the leading v (for example 3.2.2)"
+        required: true
 
 permissions:
   contents: write
@@ -21,40 +26,77 @@ jobs:
           distribution: zulu
           java-version: "8"
 
-      - name: Build distribution
-        shell: pwsh
-        run: .\build.cmd -Task dist
-
-      - name: Package release zip
+      - name: Resolve version from tag or input
+        id: v
         shell: pwsh
         run: |
-          Compress-Archive -Path dist\umbra.jar, README.md, umbra.example.yml, Umbra.cmd, umbra-cli.cmd `
-            -DestinationPath dist\umbra-3.2.1.zip -Force
-          $jarHash = (Get-FileHash dist\umbra.jar -Algorithm SHA256).Hash.ToLowerInvariant()
-          $zipHash = (Get-FileHash dist\umbra-3.2.1.zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          @("$jarHash  umbra.jar", "$zipHash  umbra-3.2.1.zip") |
-            Set-Content -Path dist\SHA256SUMS -Encoding ASCII
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $version = "${{ inputs.version }}".Trim().TrimStart("v")
+          } else {
+            $version = "${{ github.ref_name }}".Trim().TrimStart("v")
+          }
+          if (-not $version) { throw "could not resolve a release version" }
+          Write-Host "release version: $version"
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+
+      - name: Build distribution
+        shell: pwsh
+        run: .\build.cmd -Task package
+
+      - name: Check packaged artifacts
+        shell: pwsh
+        run: |
+          $version = "${{ steps.v.outputs.version }}"
+          $required = @(
+            "dist\umbra.jar",
+            "dist\umbra-gui-fx.jar",
+            "dist\umbra-$version.zip",
+            "dist\SHA256SUMS"
+          )
+          foreach ($file in $required) {
+            if (-not (Test-Path $file)) { throw "missing artifact: $file" }
+            Write-Host ("{0,-30} {1,10:N0} bytes" -f $file, (Get-Item $file).Length)
+          }
+          Get-Content "dist\SHA256SUMS" | Write-Host
 
       - name: Publish release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          @'
-          Umbra 3.2.1 — security-hardened Java bytecode protection suite.
+          $version = "${{ steps.v.outputs.version }}"
+          $tag = "${{ steps.v.outputs.tag }}"
+          $notes = @(
+            "Umbra $version - security-hardened Java bytecode protection suite."
+            ""
+            "Highlights"
+            "- JavaFX protection console (umbra-gui-fx.jar): 13 groups / 109 controls, Options / Command / Output views"
+            "- One-time program state; --set reaches every typed section"
+            "- Hardened VM2 engine, unified Java runtime guard and native guard"
+            "- Whole-archive encryption (index v3) with a sample-bound master key and per-entry nonce KDF"
+            "- Minecraft mod-container adaptation: Fabric/Quilt, Forge legacy/modern, NeoForge, mixins"
+            ""
+            "Assets"
+            "- umbra.jar - engine only, JDK 8+, no JavaFX required"
+            "- umbra-$version.zip - engine + JavaFX console + launchers + example config + docs"
+            "- SHA256SUMS - checksums for both user-facing artifacts"
+            ""
+            "Use the zip if you want the desktop console; the bare jar is enough for CLI, YAML and build-plugin use."
+            "Archives protected by an earlier 3.x line must be rebuilt with $version."
+          )
+          $notes | Set-Content -Path release-notes.md -Encoding UTF8
 
-          - Sample-bound archive master key + per-entry nonce KDF
-          - HMAC-keyed class/resource/loader digests
-          - Integrity level >= 2 with sampled watchdog and heartbeat
-          - Silent refusals and stripped runtime debug info
-          - String hardening: random site ids, per-artifact salt, plaintext cache off by default
-          - Native guard random path/export/PE hygiene
-          - GUI: per-mode detailed options with animated sliders and 60 fps animations
-
-          Encrypted archives use index v3; rebuild archives protected by 3.1-pre.
-          '@ | Set-Content -Path release-notes.md -Encoding UTF8
-
-          gh release create $env:GITHUB_REF_NAME `
-            --title "Umbra 3.2.1" `
-            --notes-file release-notes.md `
-            dist\umbra.jar dist\umbra-3.2.1.zip dist\SHA256SUMS
+          $ghArgs = @(
+            $tag,
+            "--title", "Umbra $version",
+            "--notes-file", "release-notes.md",
+            "dist\umbra.jar",
+            "dist\umbra-$version.zip",
+            "dist\SHA256SUMS"
+          )
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $ghArgs += @("--target", $env:GITHUB_SHA)
+          }
+          gh release create @ghArgs
+          gh release view $tag --json url,tagName,name,assets | Write-Host
