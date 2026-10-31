@@ -72,6 +72,19 @@ public final class UmbraNativeLoader {
     /** Keyed backfill challenge implemented by the generated native library. */
     private static native long verifyChallenge(int nonce);
 
+    /**
+     * Binds the native methods of one owning class.
+     *
+     * <p>Called from that class's own {@code <clinit>} with its build-time id and
+     * its {@code Class} literal. Registering from the owning class keeps the
+     * initialization order unchanged: {@code JNI_OnLoad} never {@code FindClass}es
+     * a business class.</p>
+     *
+     * @param classId build-time id the library uses to look up the binding table
+     * @param owner   the class declaring the native methods
+     * @return {@code 0} on success, a negative JNI error code otherwise
+     */
+    public static native int register(int classId, Class<?> owner);
     private UmbraNativeLoader() {
     }
 

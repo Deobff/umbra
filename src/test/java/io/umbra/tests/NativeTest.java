@@ -205,19 +205,22 @@ public final class NativeTest {
         generator.addMethod(generated);
         String source = generator.finish();
         check(source.contains("JNI_OnLoad"), "JNI_OnLoad emitted");
-        check(!source.contains("RegisterNatives"), "binding relies on JNI symbol lookup, not RegisterNatives");
-        check(source.contains("Java_synthetic_Probe_add"), "short JNI export emitted");
-        check(source.contains("Java_synthetic_Probe_add__II"), "long JNI export emitted");
+        check(source.contains("RegisterNatives"), "bindings are registered, not symbol-looked-up");
+        check(!source.contains("JNIEXPORT jint JNICALL Java_"), "no plaintext Java_* JNI export");
+        check(source.contains("static int umbra_bind_0("), "per-owner registrar emitted");
+        check(source.contains("m[0].fnPtr = (void*)(&umbra_native_"), "wrapper address registered");
+        check(source.contains("RegisterNatives(env, cls, m, 1)"), "registrar binds one method");
         check(source.contains("static jclass umbra_classes["), "class cache table emitted");
         check(source.contains("static UMBRA_ID umbra_ids["), "id cache table emitted");
     }
 
     private static void testOverloadExports() throws Exception {
-        // Two native methods with the same name but different descriptors make the
-        // short JNI name ambiguous. Only the descriptor-mangled long names may be
-        // exported then; exporting the short name would bind every overload to the
-        // first function the VM finds (this regressed demo.Checks.eq overloads when
-        // renaming was disabled).
+        // Two native methods with the same name but different descriptors used to be
+        // ambiguous under JNI name mangling: only the descriptor-mangled long names
+        // could be exported, or the VM would bind every overload to the first
+        // function it found (this regressed demo.Checks.eq overloads when renaming
+        // was disabled). Registration passes (name, descriptor) pairs, so both
+        // overloads are listed unambiguously in one table.
         ClassNode owner = syntheticClass();
         MethodNode intOverload = syntheticMethod("eq", "(II)V",
                 Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, 0, 2);
@@ -229,14 +232,19 @@ public final class NativeTest {
         generator.addMethod(new NativeMethodTranslator(owner.name, intOverload, generator).translate());
         generator.addMethod(new NativeMethodTranslator(owner.name, longOverload, generator).translate());
         String source = generator.finish();
-        check(!source.contains("JNICALL Java_synthetic_Probe_eq(JNIEnv"),
-                "no short export for an overloaded native method name");
-        check(source.contains("JNICALL Java_synthetic_Probe_eq__II(JNIEnv"),
-                "long export emitted for the (II)V overload");
-        check(source.contains("JNICALL Java_synthetic_Probe_eq__JJ(JNIEnv"),
-                "long export emitted for the (JJ)V overload");
+        check(!source.contains("Java_synthetic_Probe_eq"),
+                "no mangled Java_* symbol for an overloaded native method name");
+        check(source.contains("JNINativeMethod m[2]"), "overload table holds both entries");
+        check(source.contains("RegisterNatives(env, cls, m, 2)"), "both overloads registered");
+        check(source.contains("m[0].signature = umbra_r0_sigs[0]")
+                        && source.contains("m[1].signature = umbra_r0_sigs[1]"),
+                "each overload carries its own decoded descriptor");
+        check(source.contains("m[0].fnPtr = (void*)(&umbra_native_0)")
+                        && source.contains("m[1].fnPtr = (void*)(&umbra_native_1)"),
+                "each overload binds a distinct wrapper");
 
-        // A unique native name still gets the short export (the VM looks it up first).
+        // A class with one native method still registers exactly one entry and
+        // exports nothing.
         ClassNode owner2 = syntheticClass();
         MethodNode unique = syntheticMethod("only", "()V",
                 Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, 0, 0);
@@ -244,10 +252,9 @@ public final class NativeTest {
         CGenerator generator2 = new CGenerator();
         generator2.addMethod(new NativeMethodTranslator(owner2.name, unique, generator2).translate());
         String source2 = generator2.finish();
-        check(source2.contains("JNICALL Java_synthetic_Probe_only(JNIEnv"),
-                "short export kept for a unique native method name");
-        check(source2.contains("JNICALL Java_synthetic_Probe_only__(JNIEnv"),
-                "long export also emitted for a unique native method name");
+        check(!source2.contains("Java_synthetic_Probe_only"), "unique name is not exported either");
+        check(source2.contains("JNINativeMethod m[1]"), "single-entry table for a unique name");
+        check(source2.contains("RegisterNatives(env, cls, m, 1)"), "unique name registered once");
     }
 
     private static void testTranslatorControlFlow() throws Exception {

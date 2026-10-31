@@ -1,0 +1,62 @@
+﻿[INFO] layout: flat
+[INFO] layout: wrote flat archive (2 classes, 0 multi-release variants, 0 module-info kept, 0 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] layout: spring-boot (classes=BOOT-INF/classes/, nested libs=1)
+[INFO] layout: wrote spring-boot archive (4 classes, 0 multi-release variants, 0 module-info kept, 1 manifest attributes rewritten, 1 services/framework resources, 0 duplicates resolved)
+[WARN] layout: WEB-INF/classes detected (WAR layout)
+[WARN] layout: WAR nested libraries are preserved byte-identically
+[INFO] layout: war (classes=WEB-INF/classes/, nested libs=1)
+[INFO] layout: wrote war archive (2 classes, 0 multi-release variants, 0 module-info kept, 1 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] layout: multi-release multi-release up to version 9
+[INFO] multi-release input: preserving META-INF/versions with consistent remapping (layout.multiRelease=flatten flattens the input)
+[INFO] layout: wrote multi-release archive (1 classes, 1 multi-release variants, 0 module-info kept, 1 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] layout: multi-release multi-release up to version 9
+[WARN] multi-release input: flattened 1 versioned entries (0 versioned-only classes kept, base classes preferred); the protected JAR is a plain JAR
+[INFO] layout: wrote multi-release archive (1 classes, 0 multi-release variants, 0 module-info kept, 0 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] layout: flat module-info
+[INFO] layout: wrote flat archive (3 classes, 0 multi-release variants, 1 module-info kept, 0 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] layout: flat module-info
+[WARN] layout: dropped module-info.class: layout.moduleInfo=drop
+[INFO] layout: wrote flat archive (3 classes, 0 multi-release variants, 0 module-info kept, 0 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] layout: flat module-info
+[WARN] layout: dropped module-info.class: exported package app/pkg has an inconsistent class mapping
+[INFO] layout: wrote flat archive (3 classes, 0 multi-release variants, 0 module-info kept, 0 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] layout: flat module-info
+[INFO] layout: wrote flat archive (3 classes, 0 multi-release variants, 1 module-info kept, 0 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] layout: flat
+[INFO] layout: wrote flat archive (7 classes, 0 multi-release variants, 0 module-info kept, 10 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] layout: flat
+[INFO] layout: wrote flat archive (2 classes, 0 multi-release variants, 0 module-info kept, 0 manifest attributes rewritten, 4 services/framework resources, 0 duplicates resolved)
+[INFO] layout: flat
+[WARN] duplicate class entry dup2/Foo.class for internal name dup/Foo with different bytes; keeping the first occurrence (deterministic resolution)
+[INFO] layout: flat
+[WARN] duplicate class entry dup2/Foo.class for internal name dup/Foo with different bytes; keeping the first occurrence (deterministic resolution)
+[INFO] layout: wrote flat archive (2 classes, 0 multi-release variants, 0 module-info kept, 0 manifest attributes rewritten, 0 services/framework resources, 1 duplicates resolved)
+[INFO] layout: flat
+[INFO] layout: wrote flat archive (1 classes, 0 multi-release variants, 0 module-info kept, 0 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] layout: flat
+[INFO] layout: wrote flat archive (1 classes, 0 multi-release variants, 0 module-info kept, 0 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] layout: flat
+[WARN] signed input: removed JAR signature entries/attributes; the protected JAR is unsigned and must be re-signed by the publisher
+[INFO] layout: wrote flat archive (1 classes, 0 multi-release variants, 0 module-info kept, 0 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] layout: spring-boot (classes=BOOT-INF/classes/, nested libs=1)
+[INFO] layout: wrote spring-boot archive (2 classes, 0 multi-release variants, 0 module-info kept, 1 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] layout: spring-boot (classes=BOOT-INF/classes/, nested libs=1)
+[INFO] layout: wrote spring-boot archive (2 classes, 0 multi-release variants, 0 module-info kept, 1 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] layout: flat
+[WARN] layout: manifest: malformed manifest lines removed while keeping the archive valid
+[INFO] layout: wrote flat archive (1 classes, 0 multi-release variants, 0 module-info kept, 0 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] layout: flat
+[INFO] layout: wrote flat archive (1 classes, 0 multi-release variants, 0 module-info kept, 0 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] layout: flat module-info
+[WARN] layout: dropped module-info.class: unparseable module descriptor (Unsupported class file version 25452.24864)
+[INFO] layout: wrote flat archive (1 classes, 0 multi-release variants, 0 module-info kept, 0 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] layout: multi-release multi-release up to version 11
+[INFO] multi-release input: preserving META-INF/versions with consistent remapping (layout.multiRelease=flatten flattens the input)
+[INFO] layout: wrote multi-release archive (0 classes, 1 multi-release variants, 0 module-info kept, 0 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] layout: spring-boot (classes=BOOT-INF/classes/, nested libs=1)
+[INFO] layout: wrote spring-boot archive (1 classes, 0 multi-release variants, 0 module-info kept, 0 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] layout: flat
+[INFO] layout: wrote flat archive (1 classes, 0 multi-release variants, 0 module-info kept, 0 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] layout: flat
+[INFO] layout: wrote flat archive (2 classes, 0 multi-release variants, 0 module-info kept, 0 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+CompatTest: 215 checks passed

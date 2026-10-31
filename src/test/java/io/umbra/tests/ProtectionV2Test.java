@@ -60,6 +60,7 @@ import java.util.jar.JarOutputStream;
 import java.util.jar.Manifest;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
+import io.umbra.core.util.RuntimeNames;
 
 /**
  * Plain-main acceptance tests for the Umbra 3.0 obfuscation-strength passes
@@ -513,7 +514,7 @@ public final class ProtectionV2Test {
         List<String> names = entryNames(first.jar);
         boolean hasRuntimeHelper = false;
         for (String name : names) {
-            if (name.startsWith("umbra/runtime/") && name.endsWith(".class")) {
+            if (RuntimeNames.isRuntime(name) && name.endsWith(".class")) {
                 hasRuntimeHelper = true;
             }
         }

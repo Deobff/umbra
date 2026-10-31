@@ -1,0 +1,18 @@
+# command: "C:\Users\Administrator\.gradle\wrapper\dists\gradle-8.14-bin\38aieal9i53h9rfe7vjup95b9\gradle-8.14\bin\gradle.bat" --version
+# cwd: E:\MC\Umbra\plugins
+
+------------------------------------------------------------
+Gradle 8.14
+------------------------------------------------------------
+
+Build time:    2025-04-25 09:29:08 UTC
+Revision:      34c560e3be961658a6fbcd7170ec2443a228b109
+
+Kotlin:        2.0.21
+Groovy:        3.0.24
+Ant:           Apache Ant(TM) version 1.10.15 compiled on August 25 2024
+Launcher JVM:  1.8.0_502 (Azul Systems, Inc. 25.502-b07)
+Daemon JVM:    C:\Program Files\Zulu\zulu-8 (no JDK specified, using current Java home)
+OS:            Windows 10 10.0 amd64
+
+

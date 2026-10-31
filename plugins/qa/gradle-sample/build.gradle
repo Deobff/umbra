@@ -1,0 +1,25 @@
+plugins {
+    id 'java'
+    id 'application'
+    id 'io.umbra' version '3.0.0'
+}
+
+group = 'com.example'
+version = '1.0.0'
+
+application {
+    mainClass = 'com.example.Main'
+}
+
+umbra {
+    // QA wires the in-repo tool jar explicitly; in a real project point this
+    // at your Umbra install (or set the UMBRA_JAR environment variable).
+    toolJar = file("${rootDir}/../../../dist/umbra.jar")
+    preset = providers.gradleProperty('umbraPreset').orElse('balanced').get()
+    seed = 23303L
+    verify = true
+    keep = ['com.example.Main']
+    options = ['mba.enabled=true']
+    mapping = file("${layout.buildDirectory.get().asFile}/umbra/mapping.txt")
+    logFile = file("${layout.buildDirectory.get().asFile}/umbra/protect.log")
+}

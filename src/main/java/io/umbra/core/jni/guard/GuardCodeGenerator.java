@@ -81,6 +81,25 @@ public final class GuardCodeGenerator {
      */
     public static String generate(String guardClassInternalName, long secret,
                                   GuardFeatures features, PeImage.CodeSample[] codeSamples) {
+        return generate(guardClassInternalName, secret, features, codeSamples, null);
+    }
+
+    /**
+     * Generates the guard translation unit and, when {@code otpClass} is not
+     * {@code null}, also binds a native one-time-state advance
+     * ({@code nativeNext(J)J}) to the injected OTP class.
+     *
+     * <p>The advance runs in native code, so the state transition is not a plain
+     * Java xorshift a patcher can reimplement. The binding is a second
+     * {@code RegisterNatives} call in {@code JNI_OnLoad}, and the OTP class name
+     * is encoded exactly like the guard class name (no plaintext symbol). The
+     * extra entry point is deliberately kept out of the magic-located function
+     * table: that table drives the prologue hashes, so growing it would change
+     * every existing guard's expected prologues.</p>
+     */
+    public static String generate(String guardClassInternalName, long secret,
+                                  GuardFeatures features, PeImage.CodeSample[] codeSamples,
+                                  String otpClass) {
         GuardFeatures active = features == null ? GuardFeatures.legacy(true, true) : features;
         String initSymbol = "umbra_native_init";
         String checkSymbol = "umbra_native_check";
@@ -125,6 +144,8 @@ public final class GuardCodeGenerator {
         out.append("#define UMBRA_DETECT_HANDLE_DUMP ").append(GuardOptions.DETECT_HANDLE_DUMP).append("\n");
         out.append("#define UMBRA_DETECT_CODE_SAMPLE ").append(GuardOptions.DETECT_CODE_SAMPLE).append("\n");
         out.append("#define UMBRA_DETECT_LINUX ").append(GuardOptions.DETECT_LINUX).append("\n");
+        out.append("#define UMBRA_DETECT_CODE_CRC ").append(GuardOptions.DETECT_CODE_CRC).append("\n");
+        out.append("#define UMBRA_DETECT_PAGE_GUARD ").append(GuardOptions.DETECT_PAGE_GUARD).append("\n");
         out.append("\n");
         out.append("static JavaVM* g_vm;\n");
         out.append("static jclass g_guard_class;\n");
@@ -180,13 +201,11 @@ public final class GuardCodeGenerator {
         out.append("    }\n");
         out.append("    return length;\n");
         out.append("}\n\n");
-        out.append("static int umbra_lower_contains(const char* text, const char* needle) {\n");
+        out.append("static int umbra_lower_contains_n(const char* text, const char* needle, size_t needle_length) {\n");
         out.append("    size_t i;\n");
         out.append("    size_t length = 0;\n");
-        out.append("    size_t needle_length = 0;\n");
         out.append("    if (text == 0 || needle == 0) return 0;\n");
         out.append("    length = strlen(text);\n");
-        out.append("    needle_length = strlen(needle);\n");
         out.append("    if (needle_length == 0 || length < needle_length) return 0;\n");
         out.append("    for (i = 0; i + needle_length <= length; i++) {\n");
         out.append("        size_t j;\n");
@@ -202,29 +221,44 @@ public final class GuardCodeGenerator {
         out.append("    }\n");
         out.append("    return 0;\n");
         out.append("}\n\n");
+        out.append("static int umbra_lower_contains(const char* text, const char* needle) {\n");
+        out.append("    if (needle == 0) return 0;\n");
+        out.append("    return umbra_lower_contains_n(text, needle, strlen(needle));\n");
+        out.append("}\n\n");
         out.append("static void umbra_notify(int mask) {\n");
         out.append("    JNIEnv* env = NULL;\n");
         out.append("    if (g_vm == NULL || g_guard_class == NULL || g_on_detect == NULL) return;\n");
         out.append("    if ((*g_vm)->GetEnv(g_vm, (void**)&env, JNI_VERSION_1_6) != JNI_OK || env == NULL) return;\n");
         out.append("    (*env)->CallStaticVoidMethod(env, g_guard_class, g_on_detect, (jint)mask);\n");
         out.append("}\n\n");
-        GuardDynamicCode.emitCommon(out, active);
-        GuardDynamicCode.emitCodeSamples(out, CODE_SAMPLE_COUNT, CODE_SAMPLE_WINDOW,
+        // The body is rendered first: the sealed-literal pool only emits the
+        // literals the body actually references, and it has to precede them.
+        GuardLiterals literals = new GuardLiterals(secret, active.execWhitelist);
+        GuardImports imports = new GuardImports(literals);
+        StringBuilder body = new StringBuilder(1 << 14);
+        GuardDynamicCode.emitCommon(body, active);
+        GuardDynamicCode.emitCodeSamples(body, CODE_SAMPLE_COUNT, CODE_SAMPLE_WINDOW,
                 sampleMagic(secret));
-        out.append("#ifdef _WIN32\n");
-        appendWindowsChecks(out);
-        GuardDynamicCode.windows(out, active);
-        out.append("#elif defined(__linux__)\n");
-        GuardDynamicCode.linux(out, active);
-        out.append("#else\n");
-        GuardDynamicCode.portable(out);
-        out.append("#endif\n\n");
-        appendNativeDeclarations(out);
-        appendIntegrity(out, checkSymbol, tokenSymbol);
-        appendNativeMethods(out, initSymbol, checkSymbol, selfTestSymbol, tokenSymbol, active);
-        appendFunctionTable(out, secret, initSymbol, checkSymbol, selfTestSymbol, tokenSymbol);
-        appendOnLoad(out, guardClassInternalName, secret, active, initSymbol, checkSymbol,
-                selfTestSymbol, tokenSymbol);
+        body.append("#ifdef _WIN32\n");
+        imports.emit(body);
+        appendWindowsChecks(body, literals, imports);
+        GuardDynamicCode.windows(body, active, literals, imports);
+        body.append("#elif defined(__linux__)\n");
+        GuardDynamicCode.linux(body, active, literals);
+        body.append("#else\n");
+        GuardDynamicCode.portable(body);
+        body.append("#endif\n\n");
+        appendNativeDeclarations(body);
+        appendIntegrity(body, checkSymbol, tokenSymbol);
+        appendNativeMethods(body, initSymbol, checkSymbol, selfTestSymbol, tokenSymbol, active);
+        appendFunctionTable(body, secret, initSymbol, checkSymbol, selfTestSymbol, tokenSymbol);
+        if (otpClass != null) {
+            appendOtpNative(body);
+        }
+        appendOnLoad(body, guardClassInternalName, secret, active, initSymbol, checkSymbol,
+                selfTestSymbol, tokenSymbol, otpClass);
+        literals.emit(out);
+        out.append('\n').append(body);
         return out.toString();
     }
 
@@ -232,13 +266,21 @@ public final class GuardCodeGenerator {
     // Windows detection code
     // ------------------------------------------------------------------
 
-    private static void appendWindowsChecks(StringBuilder out) {
+    private static void appendWindowsChecks(StringBuilder out, GuardLiterals literals,
+                                            GuardImports imports) {
         out.append("static int umbra_is_debugger_present(void) {\n");
         out.append("    return IsDebuggerPresent() ? 1 : 0;\n");
         out.append("}\n\n");
+        out.append("typedef BOOL (__stdcall *umbra_check_remote_debugger)(HANDLE, BOOL*);\n");
         out.append("static int umbra_remote_debugger(void) {\n");
+        out.append("    static umbra_check_remote_debugger check;\n");
         out.append("    BOOL present = FALSE;\n");
-        out.append("    if (CheckRemoteDebuggerPresent(GetCurrentProcess(), &present) && present) return 1;\n");
+        out.append("    if (check == NULL) {\n");
+        out.append("        check = (umbra_check_remote_debugger)")
+                .append(imports.ref("CheckRemoteDebuggerPresent")).append(";\n");
+        out.append("    }\n");
+        out.append("    if (check == NULL) return 0;\n");
+        out.append("    if (check(GetCurrentProcess(), &present) && present) return 1;\n");
         out.append("    return 0;\n");
         out.append("}\n\n");
         out.append("static unsigned char* umbra_peb(void) {\n");
@@ -273,11 +315,8 @@ public final class GuardCodeGenerator {
         out.append("static umbra_nt_query_process umbra_nt_query_process_ptr;\n\n");
         out.append("static umbra_nt_query_process umbra_nt_query_process_get(void) {\n");
         out.append("    if (umbra_nt_query_process_ptr == NULL) {\n");
-        out.append("        HMODULE ntdll = GetModuleHandleA(\"ntdll.dll\");\n");
-        out.append("        if (ntdll != NULL) {\n");
-        out.append("            umbra_nt_query_process_ptr = (umbra_nt_query_process)\n");
-        out.append("                GetProcAddress(ntdll, \"NtQueryInformationProcess\");\n");
-        out.append("        }\n");
+        out.append("        umbra_nt_query_process_ptr = (umbra_nt_query_process)\n");
+        out.append("            ").append(imports.ref("NtQueryInformationProcess")).append(";\n");
         out.append("    }\n");
         out.append("    return umbra_nt_query_process_ptr;\n");
         out.append("}\n\n");
@@ -313,6 +352,18 @@ public final class GuardCodeGenerator {
         out.append("    if ((context->Dr7 & 0x000000FFUL) != 0) return 1;\n");
         out.append("    return 0;\n");
         out.append("}\n\n");
+        out.append("typedef HANDLE (__stdcall *umbra_create_snapshot)(unsigned long, unsigned long);\n");
+        out.append("/* Hash-resolved import: a failed resolution degrades to no snapshot,\n");
+        out.append("   which every caller already treats as 'cannot verify, never flag'. */\n");
+        out.append("static HANDLE umbra_snapshot(unsigned long flags, unsigned long process) {\n");
+        out.append("    static umbra_create_snapshot fn;\n");
+        out.append("    if (fn == NULL) {\n");
+        out.append("        fn = (umbra_create_snapshot)")
+                .append(imports.ref("CreateToolhelp32Snapshot")).append(";\n");
+        out.append("    }\n");
+        out.append("    if (fn == NULL) return INVALID_HANDLE_VALUE;\n");
+        out.append("    return fn(flags, process);\n");
+        out.append("}\n\n");
         out.append("static int umbra_hardware_breakpoints(void) {\n");
         out.append("    CONTEXT context;\n");
         out.append("    HANDLE snapshot;\n");
@@ -322,7 +373,7 @@ public final class GuardCodeGenerator {
         out.append("    if (GetThreadContext(GetCurrentThread(), &context) && umbra_context_has_breakpoints(&context)) {\n");
         out.append("        return 1;\n");
         out.append("    }\n");
-        out.append("    snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);\n");
+        out.append("    snapshot = umbra_snapshot(TH32CS_SNAPTHREAD, 0);\n");
         out.append("    if (snapshot == INVALID_HANDLE_VALUE) return 0;\n");
         out.append("    memset(&entry, 0, sizeof(entry));\n");
         out.append("    entry.dwSize = sizeof(entry);\n");
@@ -346,7 +397,7 @@ public final class GuardCodeGenerator {
         out.append("    return 0;\n");
         out.append("}\n\n");
         out.append("static int umbra_frida_module(void) {\n");
-        out.append("    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());\n");
+        out.append("    HANDLE snapshot = umbra_snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());\n");
         out.append("    MODULEENTRY32 entry;\n");
         out.append("    int found = 0;\n");
         out.append("    if (snapshot == INVALID_HANDLE_VALUE) return 0;\n");
@@ -354,15 +405,15 @@ public final class GuardCodeGenerator {
         out.append("    entry.dwSize = sizeof(entry);\n");
         out.append("    if (Module32First(snapshot, &entry)) {\n");
         out.append("        do {\n");
-        out.append("            if (umbra_lower_contains(entry.szModule, \"frida\")\n");
-        out.append("                    || umbra_lower_contains(entry.szModule, \"gum-\")) { found = 1; break; }\n");
+        out.append("            if (umbra_lower_contains(entry.szModule, ").append(literals.ref("frida")).append(")\n");
+        out.append("                    || umbra_lower_contains(entry.szModule, ").append(literals.ref("gum-")).append(")) { found = 1; break; }\n");
         out.append("        } while (Module32Next(snapshot, &entry));\n");
         out.append("    }\n");
         out.append("    CloseHandle(snapshot);\n");
         out.append("    return found;\n");
         out.append("}\n\n");
         out.append("static int umbra_jdwp_module(void) {\n");
-        out.append("    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());\n");
+        out.append("    HANDLE snapshot = umbra_snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());\n");
         out.append("    MODULEENTRY32 entry;\n");
         out.append("    int found = 0;\n");
         out.append("    if (snapshot == INVALID_HANDLE_VALUE) return 0;\n");
@@ -370,14 +421,14 @@ public final class GuardCodeGenerator {
         out.append("    entry.dwSize = sizeof(entry);\n");
         out.append("    if (Module32First(snapshot, &entry)) {\n");
         out.append("        do {\n");
-        out.append("            if (umbra_lower_contains(entry.szModule, \"jdwp\")\n");
-        out.append("                    || umbra_lower_contains(entry.szModule, \"dt_socket\")\n");
-        out.append("                    || umbra_lower_contains(entry.szModule, \"dt_shmem\")\n");
+        out.append("            if (umbra_lower_contains(entry.szModule, ").append(literals.ref("jdwp")).append(")\n");
+        out.append("                    || umbra_lower_contains(entry.szModule, ").append(literals.ref("dt_socket")).append(")\n");
+        out.append("                    || umbra_lower_contains(entry.szModule, ").append(literals.ref("dt_shmem")).append(")\n");
         // Dynamic JDK attach (VirtualMachine.attach + loadAgent) loads attach.dll
         // into the target; an in-process -javaagent loads instrument.dll. Neither
         // module is present in a normal application JVM.
-        out.append("                    || umbra_lower_contains(entry.szModule, \"attach.dll\")\n");
-        out.append("                    || umbra_lower_contains(entry.szModule, \"instrument.dll\")) { found = 1; break; }\n");
+        out.append("                    || umbra_lower_contains(entry.szModule, ").append(literals.ref("attach.dll")).append(")\n");
+        out.append("                    || umbra_lower_contains(entry.szModule, ").append(literals.ref("instrument.dll")).append(")) { found = 1; break; }\n");
         out.append("        } while (Module32Next(snapshot, &entry));\n");
         out.append("    }\n");
         out.append("    CloseHandle(snapshot);\n");
@@ -385,12 +436,12 @@ public final class GuardCodeGenerator {
         out.append("}\n\n");
         out.append("static int umbra_frida_pipe(void) {\n");
         out.append("    WIN32_FIND_DATAA data;\n");
-        out.append("    HANDLE handle = FindFirstFileA(\"\\\\\\\\.\\\\pipe\\\\*\", &data);\n");
+        out.append("    HANDLE handle = FindFirstFileA(").append(literals.ref("\\\\.\\pipe\\*")).append(", &data);\n");
         out.append("    int found = 0;\n");
         out.append("    if (handle == INVALID_HANDLE_VALUE) return 0;\n");
         out.append("    do {\n");
-        out.append("        if (umbra_lower_contains(data.cFileName, \"frida-\")\n");
-        out.append("                || umbra_lower_contains(data.cFileName, \"gum-\")) { found = 1; break; }\n");
+        out.append("        if (umbra_lower_contains(data.cFileName, ").append(literals.ref("frida-")).append(")\n");
+        out.append("                || umbra_lower_contains(data.cFileName, ").append(literals.ref("gum-")).append(")) { found = 1; break; }\n");
         out.append("    } while (FindNextFileA(handle, &data));\n");
         out.append("    FindClose(handle);\n");
         out.append("    return found;\n");
@@ -401,11 +452,11 @@ public final class GuardCodeGenerator {
         out.append("    HANDLE snapshot;\n");
         out.append("    THREADENTRY32 entry;\n");
         out.append("    if (get_description == NULL) {\n");
-        out.append("        get_description = (umbra_get_thread_description)GetProcAddress(\n");
-        out.append("                GetModuleHandleA(\"kernel32.dll\"), \"GetThreadDescription\");\n");
+        out.append("        get_description = (umbra_get_thread_description)")
+                .append(imports.ref("GetThreadDescription")).append(";\n");
         out.append("    }\n");
         out.append("    if (get_description == NULL) return 0;\n");
-        out.append("    snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);\n");
+        out.append("    snapshot = umbra_snapshot(TH32CS_SNAPTHREAD, 0);\n");
         out.append("    if (snapshot == INVALID_HANDLE_VALUE) return 0;\n");
         out.append("    memset(&entry, 0, sizeof(entry));\n");
         out.append("    entry.dwSize = sizeof(entry);\n");
@@ -424,10 +475,10 @@ public final class GuardCodeGenerator {
         out.append("                    buffer[i] = (c >= 32 && c < 127) ? (char)c : '?';\n");
         out.append("                }\n");
         out.append("                buffer[i] = 0;\n");
-        out.append("                if (umbra_lower_contains(buffer, \"gum-js-loop\")\n");
-        out.append("                        || umbra_lower_contains(buffer, \"gmain\")\n");
-        out.append("                        || umbra_lower_contains(buffer, \"gdbus\")\n");
-        out.append("                        || umbra_lower_contains(buffer, \"frida\")) {\n");
+        out.append("                if (umbra_lower_contains(buffer, ").append(literals.ref("gum-js-loop")).append(")\n");
+        out.append("                        || umbra_lower_contains(buffer, ").append(literals.ref("gmain")).append(")\n");
+        out.append("                        || umbra_lower_contains(buffer, ").append(literals.ref("gdbus")).append(")\n");
+        out.append("                        || umbra_lower_contains(buffer, ").append(literals.ref("frida")).append(")) {\n");
         out.append("                    LocalFree(description);\n");
         out.append("                    CloseHandle(thread);\n");
         out.append("                    CloseHandle(snapshot);\n");
@@ -458,13 +509,13 @@ public final class GuardCodeGenerator {
         out.append("            if (name_length >= sizeof(name)) name_length = sizeof(name) - 1;\n");
         out.append("            memcpy(name, entry, name_length);\n");
         out.append("            name[name_length] = 0;\n");
-        out.append("            if (umbra_lower_contains(name, \"frida\")\n");
-        out.append("                    || umbra_lower_contains(name, \"gadget\")) { found = 1; break; }\n");
-        out.append("            if ((umbra_lower_contains(name, \"ld_preload\")\n");
-        out.append("                    || umbra_lower_contains(name, \"dyld_insert_libraries\")\n");
-        out.append("                    || umbra_lower_contains(name, \"java_tool_options\")\n");
-        out.append("                    || umbra_lower_contains(name, \"_java_options\"))\n");
-        out.append("                    && umbra_lower_contains(equals + 1, \"frida\")) { found = 1; break; }\n");
+        out.append("            if (umbra_lower_contains(name, ").append(literals.ref("frida")).append(")\n");
+        out.append("                    || umbra_lower_contains(name, ").append(literals.ref("gadget")).append(")) { found = 1; break; }\n");
+        out.append("            if ((umbra_lower_contains(name, ").append(literals.ref("ld_preload")).append(")\n");
+        out.append("                    || umbra_lower_contains(name, ").append(literals.ref("dyld_insert_libraries")).append(")\n");
+        out.append("                    || umbra_lower_contains(name, ").append(literals.ref("java_tool_options")).append(")\n");
+        out.append("                    || umbra_lower_contains(name, ").append(literals.ref("_java_options")).append("))\n");
+        out.append("                    && umbra_lower_contains(equals + 1, ").append(literals.ref("frida")).append(")) { found = 1; break; }\n");
         out.append("        }\n");
         out.append("        entry += strlen(entry) + 1;\n");
         out.append("    }\n");
@@ -485,12 +536,12 @@ public final class GuardCodeGenerator {
         out.append("            if (name_length >= sizeof(name)) name_length = sizeof(name) - 1;\n");
         out.append("            memcpy(name, entry, name_length);\n");
         out.append("            name[name_length] = 0;\n");
-        out.append("            if (umbra_lower_contains(name, \"java_tool_options\")\n");
-        out.append("                    || umbra_lower_contains(name, \"_java_options\")\n");
-        out.append("                    || umbra_lower_contains(name, \"jdk_java_options\")) {\n");
-        out.append("                if (umbra_lower_contains(equals + 1, \"jdwp\")\n");
-        out.append("                        || umbra_lower_contains(equals + 1, \"dt_socket\")\n");
-        out.append("                        || umbra_lower_contains(equals + 1, \"dt_shmem\")) { found = 1; break; }\n");
+        out.append("            if (umbra_lower_contains(name, ").append(literals.ref("java_tool_options")).append(")\n");
+        out.append("                    || umbra_lower_contains(name, ").append(literals.ref("_java_options")).append(")\n");
+        out.append("                    || umbra_lower_contains(name, ").append(literals.ref("jdk_java_options")).append(")) {\n");
+        out.append("                if (umbra_lower_contains(equals + 1, ").append(literals.ref("jdwp")).append(")\n");
+        out.append("                        || umbra_lower_contains(equals + 1, ").append(literals.ref("dt_socket")).append(")\n");
+        out.append("                        || umbra_lower_contains(equals + 1, ").append(literals.ref("dt_shmem")).append(")) { found = 1; break; }\n");
         out.append("            }\n");
         out.append("        }\n");
         out.append("        entry += strlen(entry) + 1;\n");
@@ -751,13 +802,35 @@ public final class GuardCodeGenerator {
     }
 
     /**
+     * Emits the native one-time-state advance consumed by the injected OTP class.
+     *
+     * <p>The mix mirrors the Java fallback (xorshift64) but folds in the
+     * per-build secret, so the native state sequence is specific to this artifact
+     * and cannot be replayed from a sample build. A zero result is remapped to a
+     * fixed non-zero value, because zero is a xorshift fixed point.</p>
+     */
+    private static void appendOtpNative(StringBuilder out) {
+        out.append("static jlong JNICALL umbra_native_otp(JNIEnv* env, jclass cls, jlong state) {\n");
+        out.append("    unsigned long long value = (unsigned long long)state;\n");
+        out.append("    (void)env;\n");
+        out.append("    (void)cls;\n");
+        out.append("    value ^= value << 13;\n");
+        out.append("    value ^= value >> 7;\n");
+        out.append("    value ^= value << 17;\n");
+        out.append("    value ^= g_secret;\n");
+        out.append("    if (value == 0ULL) value = 0x2545F4914F6CDD1DULL;\n");
+        out.append("    return (jlong)value;\n");
+        out.append("}\n\n");
+    }
+
+    /**
      * Emits {@code JNI_OnLoad}: the only JNI export. The four guard methods (and
      * the test hooks when enabled) are bound with {@code RegisterNatives}, so the
      * PE export table exposes no plaintext {@code Java_*} symbols.
      */
     private static void appendOnLoad(StringBuilder out, String guardClassInternalName, long secret,
                                      GuardFeatures features, String initSymbol, String checkSymbol,
-                                     String selfTestSymbol, String tokenSymbol) {
+                                     String selfTestSymbol, String tokenSymbol, String otpClass) {
         int key = classNameKey(secret);
         appendClassNameLookup(out, "umbra_find_guard", guardClassInternalName, key);
         out.append("static int umbra_register_natives(JNIEnv* env) {\n");
@@ -786,6 +859,22 @@ public final class GuardCodeGenerator {
         if (features.testHooks && features.testHookClass != null) {
             appendHookRegistration(out, features.testHookClass, key);
         }
+        if (otpClass != null) {
+            appendClassNameLookup(out, "umbra_find_otp", otpClass, key);
+            out.append("static int umbra_register_otp(JNIEnv* env) {\n");
+            out.append("    jclass cls;\n");
+            out.append("    JNINativeMethod method[1];\n");
+            out.append("    if (umbra_find_otp(env, &cls) != 0) return -1;\n");
+            out.append("    method[0].name = (char*)\"nativeNext\";\n");
+            out.append("    method[0].signature = (char*)\"(J)J\";\n");
+            out.append("    method[0].fnPtr = (void*)&umbra_native_otp;\n");
+            out.append("    if ((*env)->RegisterNatives(env, cls, method, 1) != 0) {\n");
+            out.append("        (*env)->ExceptionClear(env);\n");
+            out.append("        return -1;\n");
+            out.append("    }\n");
+            out.append("    return 0;\n");
+            out.append("}\n\n");
+        }
         out.append("JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {\n");
         out.append("    JNIEnv* env = NULL;\n");
         out.append("    (void)reserved;\n");
@@ -795,6 +884,9 @@ public final class GuardCodeGenerator {
         out.append("    if ((*vm)->GetEnv(vm, (void**)&env, JNI_VERSION_1_6) != JNI_OK\n");
         out.append("            || env == NULL) return JNI_VERSION_1_6;\n");
         out.append("    umbra_register_natives(env);\n");
+        if (otpClass != null) {
+            out.append("    umbra_register_otp(env);\n");
+        }
         if (features.testHooks && features.testHookClass != null) {
             out.append("    umbra_register_hooks(env);\n");
         }
@@ -808,9 +900,10 @@ public final class GuardCodeGenerator {
         appendClassNameLookup(out, "umbra_find_hooks", hookClassInternalName, key);
         String[] names = {"testAllocExec", "testRemoteThread", "testPatchSample", "testAgeTiming",
                 "testSampleMismatch", "testSampleCount", "testReadByte", "testQuick", "testDeep",
-                "testExecScan", "testRemoteScan"};
+                "testExecScan", "testRemoteScan", "testPatchCode", "testCodeCrc", "testTamperPage",
+                "testPageRotation", "testSealAligned"};
         String[] signatures = {"()J", "()I", "()I", "(J)I", "()I", "()I", "(I)I", "()I", "()I",
-                "()I", "()I"};
+                "()I", "()I", "()I", "()I", "()I", "()I", "()I"};
         out.append("static int umbra_register_hooks(JNIEnv* env) {\n");
         out.append("    jclass cls;\n");
         out.append("    JNINativeMethod methods[").append(names.length).append("];\n");
@@ -872,3 +965,4 @@ public final class GuardCodeGenerator {
         return out.toString();
     }
 }
+

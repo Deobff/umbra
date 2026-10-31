@@ -1,0 +1,11 @@
+﻿ProtectionV2Test: string engine v2
+ProtectionV2Test: string auto engines, wipe, hide, encryptAll
+ProtectionV2Test: type confusion
+ProtectionV2Test: flow v2
+ProtectionV2Test: reflection gate
+ProtectionV2Test: decompiler noise level 4
+ProtectionV2Test: CFR baseline=21 level3=0 level4=0
+ProtectionV2Test: combined determinism
+ProtectionV2Test: near-64KB method guard
+ProtectionV2Test: modern class-file shapes
+ProtectionV2Test: 144 checks passed

@@ -113,7 +113,8 @@ public final class SecurityHardeningTest {
         Path input = buildProgram(dir, "SHAPE-OK", true);
         Path encrypted = encrypt(dir, input, "shape-enc.jar", null);
         ArchiveView view = ArchiveView.read(encrypted);
-        check(view.version == 3, "archive index is version 3");
+        // Version 4 adds the constant-pool flag; version 3 archives are still readable.
+        check(view.version == 4, "archive index is version 4");
         check(view.binding == 0, "default master binding is sample-bound");
         check(view.level >= 2, "default integrity level is at least 2");
         check(view.plaintextClasses.contains("module-info") == false,

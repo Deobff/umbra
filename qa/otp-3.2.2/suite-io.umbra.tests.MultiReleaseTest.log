@@ -1,0 +1,10 @@
+﻿[INFO] layout: multi-release multi-release up to version 11
+[INFO] multi-release input: preserving META-INF/versions with consistent remapping (layout.multiRelease=flatten flattens the input)
+[INFO] layout: wrote multi-release archive (1 classes, 3 multi-release variants, 0 module-info kept, 0 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] layout: multi-release multi-release up to version 11
+[WARN] multi-release input: flattened 4 versioned entries (1 versioned-only classes kept, base classes preferred); the protected JAR is a plain JAR
+[INFO] layout: wrote multi-release archive (2 classes, 0 multi-release variants, 0 module-info kept, 0 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] layout: multi-release multi-release up to version 11
+[INFO] multi-release input: preserving META-INF/versions with consistent remapping (layout.multiRelease=flatten flattens the input)
+[INFO] layout: wrote multi-release archive (1 classes, 3 multi-release variants, 0 module-info kept, 1 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+MultiReleaseTest: 37 checks passed

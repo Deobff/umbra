@@ -5,6 +5,7 @@ import io.umbra.core.config.UmbraConfig;
 import io.umbra.core.engine.EngineResult;
 import io.umbra.core.engine.UmbraEngine;
 import io.umbra.core.engine.UmbraVerifier;
+import io.umbra.core.pass.impl.StringEncryptionPass;
 import io.umbra.core.util.Log;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
@@ -17,6 +18,7 @@ import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TypeInsnNode;
 
 import java.io.ByteArrayOutputStream;
 import java.io.FileInputStream;
@@ -82,6 +84,7 @@ public final class StringHardeningTest {
             testCacheDefaultAndOptIn(demo);
             testWipeAndHideFlags(demo);
             testMultiEngineAutoAndUnsupported(demo);
+            testOtpEngineSlots(demo);
             testPlaintextAndDemoRuns(demo);
         } finally {
             cleanup();
@@ -263,9 +266,280 @@ public final class StringHardeningTest {
     }
 
     // ------------------------------------------------------------------
-    // 6. Plaintext leaks and demo runs on JDK 8 / 21
+    // 5b. Dual-engine slots chosen by the one-time state (P0-2-c)
     // ------------------------------------------------------------------
 
+    private static void testOtpEngineSlots(Path demo) throws Exception {
+        // Per-site calling convention: the dual descriptor carries the 64-bit seed.
+        Run dual = protect(demo, SEED, options("string.strength", "3", "string.engine", "auto",
+                "otp.enabled", "true", "string.otpEngines", "true", "string.perClassKey", "false",
+                "string.indy", "false"));
+        long sites = stat(dual, "string.otp.sites");
+        check("otp-slots: dual-ciphertext sites are emitted (" + sites + ")", sites > 0);
+        check("otp-slots: distinct engine pairs are recorded (" + stat(dual, "string.otp.engines")
+                + ")", stat(dual, "string.otp.engines") >= 1);
+        // A site emitted into dead code would not survive into the archive (the
+        // former FieldInitializationPass appended moved constants after <clinit>'s
+        // RETURN and ASM replaced that tail with NOPs), so the archive count is
+        // checked against the emitted count instead of just being positive.
+        int dualSites = dualCallSites(dual);
+        check("otp-slots: every emitted dual slot survives in the archive (" + dualSites + " of "
+                + sites + ")", dualSites == (int) sites);
+        check("otp-slots: every archive dual site passes the state carrier as selector",
+                dualSitesWithCarrier(dual) == dualSites);
+        check("otp-slots: consecutive calls at one site switch engine", engineSwitches(dual));
+        verify(dual, "otp-slots");
+        check("otp-slots: dual demo runs", runsOk(dual.jar));
+
+        // Per-class key convention: the other dual descriptor, same runtime path.
+        Run perClass = protect(demo, SEED, options("string.strength", "3", "string.engine", "auto",
+                "otp.enabled", "true", "string.otpEngines", "true", "string.perClassKey", "true",
+                "string.indy", "false"));
+        long perClassSites = stat(perClass, "string.otp.sites");
+        check("otp-slots: per-class dual sites are emitted", perClassSites > 0);
+        check("otp-slots: per-class dual sites use the keyed overload",
+                dualCallSites(perClass) == (int) perClassSites);
+        check("otp-slots: per-class dual demo runs", runsOk(perClass.jar));
+
+        // OTP off: the selector has no source, so the old call shape must come back.
+        Run otpOff = protect(demo, SEED, options("string.strength", "3", "string.engine", "auto",
+                "otp.enabled", "false", "string.otpEngines", "true", "string.indy", "false"));
+        check("otp-slots: OTP off falls back to single-engine sites",
+                stat(otpOff, "string.otp.sites") == 0 && dualCallSites(otpOff) == 0);
+        check("otp-slots: OTP-off fallback demo runs", runsOk(otpOff.jar));
+
+        // Option off: no doubled payload at all.
+        Run disabled = protect(demo, SEED, options("string.strength", "3", "string.engine", "auto",
+                "otp.enabled", "true", "string.otpEngines", "false", "string.indy", "false"));
+        check("otp-slots: string.otpEngines=false disables dual sites",
+                stat(disabled, "string.otp.sites") == 0 && dualCallSites(disabled) == 0);
+        verify(disabled, "otp-slots off");
+        check("otp-slots: option-off demo runs", runsOk(disabled.jar));
+
+        // invokedynamic sites keep the packed single-engine payload.
+        Run indy = protect(demo, SEED, options("string.strength", "3", "string.engine", "auto",
+                "otp.enabled", "true", "string.otpEngines", "true", "string.indy", "true"));
+        check("otp-slots: indy sites stay single-engine",
+                stat(indy, "string.otp.sites") == 0 && dualCallSites(indy) == 0);
+        verify(indy, "otp-slots indy");
+        check("otp-slots: indy demo runs", runsOk(indy.jar));
+    }
+
+    /** One dual call site lifted out of the produced bytecode. */
+    private static final class DualSite {
+        String[] parts;
+        long seed;
+        int siteId;
+        int engineA;
+        int engineB;
+        String otpClass;
+    }
+
+    private static List<MethodInsnNode> dualCallSiteNodes(Run run) {
+        List<MethodInsnNode> found = new ArrayList<MethodInsnNode>();
+        for (ClassNode node : run.classes.values()) {
+            for (MethodNode method : node.methods) {
+                if (method.instructions == null) {
+                    continue;
+                }
+                for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null;
+                     insn = insn.getNext()) {
+                    if (!(insn instanceof MethodInsnNode)) {
+                        continue;
+                    }
+                    MethodInsnNode call = (MethodInsnNode) insn;
+                    if (call.getOpcode() != Opcodes.INVOKESTATIC
+                            || !run.decryptorName.equals(call.owner)) {
+                        continue;
+                    }
+                    if (StringEncryptionPass.DUAL_PER_SITE_DESC.equals(call.desc)
+                            || StringEncryptionPass.DUAL_PER_CLASS_DESC.equals(call.desc)) {
+                        found.add(call);
+                    }
+                }
+            }
+        }
+        return found;
+    }
+
+    private static int dualCallSites(Run run) {
+        return dualCallSiteNodes(run).size();
+    }
+
+    /** Counts dual sites whose selector argument is {@code invokestatic <otp>.carrier()I}. */
+    private static int dualSitesWithCarrier(Run run) {
+        String otpClass = otpClassOf(run);
+        int count = 0;
+        for (MethodInsnNode call : dualCallSiteNodes(run)) {
+            if (hasCarrierSelector(call, otpClass)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * True when the site's selector comes from the injected one-time state. The
+     * carrier call is emitted right before the decrypt call; the flow pass may
+     * insert a stack-neutral junk block in between, so the scan looks through a
+     * small window of real instructions instead of demanding adjacency.
+     */
+    private static boolean hasCarrierSelector(AbstractInsnNode call, String otpClass) {
+        AbstractInsnNode cursor = previousReal(call);
+        for (int window = 0; cursor != null && window < 12; window++) {
+            if (cursor instanceof MethodInsnNode) {
+                MethodInsnNode method = (MethodInsnNode) cursor;
+                if (method.getOpcode() == Opcodes.INVOKESTATIC && "carrier".equals(method.name)
+                        && "()I".equals(method.desc) && method.owner.equals(otpClass)) {
+                    return true;
+                }
+            }
+            cursor = previousReal(cursor);
+        }
+        return false;
+    }
+
+    /**
+     * Previous real instruction: later passes insert labels (exception-table
+     * boundaries, line numbers) between the selector call and the decrypt call,
+     * and those nodes carry no opcode.
+     */
+    private static AbstractInsnNode previousReal(AbstractInsnNode insn) {
+        AbstractInsnNode cursor = insn.getPrevious();
+        while (cursor != null && cursor.getOpcode() < 0) {
+            cursor = cursor.getPrevious();
+        }
+        return cursor;
+    }
+
+    /** The injected one-time state class: static {@code long next()} plus {@code int carrier()}. */
+    private static String otpClassOf(Run run) {
+        for (ClassNode node : run.classes.values()) {
+            boolean next = false;
+            boolean carrier = false;
+            for (MethodNode method : node.methods) {
+                if ((method.access & Opcodes.ACC_STATIC) == 0) {
+                    continue;
+                }
+                if ("next".equals(method.name) && "()J".equals(method.desc)) {
+                    next = true;
+                } else if ("carrier".equals(method.name) && "()I".equals(method.desc)) {
+                    carrier = true;
+                }
+            }
+            if (next && carrier) {
+                return node.name;
+            }
+        }
+        return "";
+    }
+
+    /**
+     * Lifts the first per-site dual call site: parts array, seed, site id, engine
+     * pair and the state class whose {@code carrier()} supplies the selector.
+     */
+    private static DualSite firstDualSite(Run run) {
+        for (MethodInsnNode call : dualCallSiteNodes(run)) {
+            if (!StringEncryptionPass.DUAL_PER_SITE_DESC.equals(call.desc)) {
+                continue;
+            }
+            AbstractInsnNode selectorInsn = previousReal(call);
+            if (!(selectorInsn instanceof MethodInsnNode)) {
+                continue;
+            }
+            MethodInsnNode carrier = (MethodInsnNode) selectorInsn;
+            if (!"carrier".equals(carrier.name) || !"()I".equals(carrier.desc)) {
+                continue;
+            }
+            AbstractInsnNode engineBInsn = previousReal(carrier);
+            AbstractInsnNode engineAInsn = engineBInsn == null ? null : previousReal(engineBInsn);
+            AbstractInsnNode siteIdInsn = engineAInsn == null ? null : previousReal(engineAInsn);
+            AbstractInsnNode seedInsn = siteIdInsn == null ? null : previousReal(siteIdInsn);
+            Integer engineB = intConstant(engineBInsn);
+            Integer engineA = intConstant(engineAInsn);
+            Integer siteId = intConstant(siteIdInsn);
+            if (engineA == null || engineB == null || siteId == null
+                    || !(seedInsn instanceof LdcInsnNode)
+                    || !(((LdcInsnNode) seedInsn).cst instanceof Long)) {
+                continue;
+            }
+            List<String> parts = new ArrayList<String>();
+            boolean arrayStart = false;
+            for (AbstractInsnNode cursor = seedInsn.getPrevious(); cursor != null;
+                 cursor = cursor.getPrevious()) {
+                if (cursor instanceof TypeInsnNode && cursor.getOpcode() == Opcodes.ANEWARRAY) {
+                    arrayStart = true;
+                    break;
+                }
+                if (cursor instanceof LdcInsnNode && ((LdcInsnNode) cursor).cst instanceof String) {
+                    parts.add(0, (String) ((LdcInsnNode) cursor).cst);
+                }
+            }
+            if (!arrayStart || parts.isEmpty()) {
+                continue;
+            }
+            DualSite site = new DualSite();
+            site.parts = parts.toArray(new String[0]);
+            site.seed = ((Long) ((LdcInsnNode) seedInsn).cst).longValue();
+            site.siteId = siteId.intValue();
+            site.engineA = engineA.intValue();
+            site.engineB = engineB.intValue();
+            site.otpClass = carrier.owner;
+            return site;
+        }
+        return null;
+    }
+
+    /**
+     * Calls one dual site twice with the selectors the injected state hands out
+     * (its low bit strictly alternates) and checks that the decryptor used a
+     * different engine on the second call while returning the same value.
+     */
+    private static boolean engineSwitches(Run run) throws Exception {
+        DualSite site = firstDualSite(run);
+        if (site == null) {
+            System.out.println("StringHardeningTest: no per-site dual call site found");
+            return false;
+        }
+        URLClassLoader loader = new URLClassLoader(new URL[] { run.jar.toUri().toURL() },
+                StringHardeningTest.class.getClassLoader());
+        try {
+            Class<?> cipher = Class.forName(run.decryptorName.replace('/', '.'), true, loader);
+            Class<?> otp = Class.forName(site.otpClass.replace('/', '.'), true, loader);
+            Method carrier = otp.getMethod("carrier");
+            Method lastEngine = cipher.getMethod("lastEngine");
+            Method decrypt = cipher.getMethod("d", String[].class, long.class, int.class, int.class,
+                    int.class, int.class);
+            int firstSelector = ((Integer) carrier.invoke(null)).intValue();
+            String first = (String) decrypt.invoke(null, site.parts, Long.valueOf(site.seed),
+                    Integer.valueOf(site.siteId), Integer.valueOf(site.engineA),
+                    Integer.valueOf(site.engineB), Integer.valueOf(firstSelector));
+            int firstEngine = ((Integer) lastEngine.invoke(null)).intValue();
+            int secondSelector = ((Integer) carrier.invoke(null)).intValue();
+            String second = (String) decrypt.invoke(null, site.parts, Long.valueOf(site.seed),
+                    Integer.valueOf(site.siteId), Integer.valueOf(site.engineA),
+                    Integer.valueOf(site.engineB), Integer.valueOf(secondSelector));
+            int secondEngine = ((Integer) lastEngine.invoke(null)).intValue();
+
+            boolean alternates = (firstSelector & 1) != (secondSelector & 1);
+            boolean switched = firstEngine != secondEngine;
+            boolean declaredPair = (firstEngine == site.engineA || firstEngine == site.engineB)
+                    && (secondEngine == site.engineA || secondEngine == site.engineB);
+            boolean sameValue = first != null && first.equals(second) && first.length() > 0;
+            if (!(alternates && switched && declaredPair && sameValue)) {
+                System.out.println("StringHardeningTest: selector " + (firstSelector & 1) + "->"
+                        + (secondSelector & 1) + ", engine " + firstEngine + "->" + secondEngine
+                        + ", pair=" + site.engineA + "/" + site.engineB + ", sameValue=" + sameValue);
+            }
+            return alternates && switched && declaredPair && sameValue;
+        } finally {
+            loader.close();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 6. Plaintext leaks and demo runs on JDK 8 / 21
+    // ------------------------------------------------------------------
     private static void testPlaintextAndDemoRuns(Path demo) throws Exception {
         Run hardened = protect(demo, SEED,
                 options("string.strength", "3", "string.engine", "auto",
@@ -414,21 +688,32 @@ public final class StringHardeningTest {
                             && run.decryptorName.equals(call.owner)
                             && ("d".equals(call.name) || "e".equals(call.name))
                             && call.desc.endsWith(")Ljava/lang/String;")) {
-                        // Exact call shape: parts..., (GETSTATIC key | LDC seed), siteId, engine.
-                        AbstractInsnNode engineInsn = insn.getPrevious();
-                        Integer engine = engineInsn == null ? null : intConstant(engineInsn);
-                        AbstractInsnNode siteInsn = engineInsn == null ? null : engineInsn.getPrevious();
-                        Integer id = siteInsn == null ? null : intConstant(siteInsn);
-                        AbstractInsnNode anchor = siteInsn == null ? null : siteInsn.getPrevious();
-                        boolean perSite = call.desc.contains(";JII)");
-                        boolean anchorOk = anchor != null
-                                && (perSite
-                                        ? anchor instanceof LdcInsnNode
-                                                && ((LdcInsnNode) anchor).cst instanceof Long
-                                        : anchor instanceof org.objectweb.asm.tree.FieldInsnNode
-                                                && anchor.getOpcode() == Opcodes.GETSTATIC);
-                        if (engine != null && id != null && anchorOk) {
-                            ids.add(id);
+                        if (StringEncryptionPass.DUAL_PER_SITE_DESC.equals(call.desc)
+                                || StringEncryptionPass.DUAL_PER_CLASS_DESC.equals(call.desc)) {
+                            // Dual shape: parts..., (GETSTATIC key | LDC seed), siteId,
+                            // engineA, engineB, selector; the selector is a call, so the
+                            // nearest three int constants are engineB, engineA, siteId.
+                            List<Integer> ints = precedingIntConstants(insn, 3);
+                            if (ints.size() == 3) {
+                                ids.add(ints.get(2));
+                            }
+                        } else {
+                            // Exact call shape: parts..., (GETSTATIC key | LDC seed), siteId, engine.
+                            AbstractInsnNode engineInsn = insn.getPrevious();
+                            Integer engine = engineInsn == null ? null : intConstant(engineInsn);
+                            AbstractInsnNode siteInsn = engineInsn == null ? null : engineInsn.getPrevious();
+                            Integer id = siteInsn == null ? null : intConstant(siteInsn);
+                            AbstractInsnNode anchor = siteInsn == null ? null : siteInsn.getPrevious();
+                            boolean perSite = call.desc.contains(";JII)");
+                            boolean anchorOk = anchor != null
+                                    && (perSite
+                                            ? anchor instanceof LdcInsnNode
+                                                    && ((LdcInsnNode) anchor).cst instanceof Long
+                                            : anchor instanceof org.objectweb.asm.tree.FieldInsnNode
+                                                    && anchor.getOpcode() == Opcodes.GETSTATIC);
+                            if (engine != null && id != null && anchorOk) {
+                                ids.add(id);
+                            }
                         }
                     }
                 } else if (insn instanceof InvokeDynamicInsnNode && run.indyName != null) {

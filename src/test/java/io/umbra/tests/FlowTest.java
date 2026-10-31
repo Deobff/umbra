@@ -90,6 +90,8 @@ public final class FlowTest {
         if (all || only.contains("flow")) {
             System.out.println("FlowTest: flow obfuscation");
             testFlowObfuscation();
+            System.out.println("FlowTest: flow reordering");
+            testFlowReordering();
         }
         if (all || only.contains("flatten")) {
             System.out.println("FlowTest: flattening");
@@ -199,6 +201,21 @@ public final class FlowTest {
         check(stats.snapshot().get("flow.predicates").longValue() > 0, "flow inserted predicates");
         check(stats.snapshot().get("flow.branches.inverted").longValue() > 0, "flow inverted branches");
         check(stats.snapshot().get("flow.junkBlocks").longValue() > 0, "flow inserted junk");
+    }
+
+    private static void testFlowReordering() throws Exception {
+        ClassNode node = target();
+        byte[] original = serialize(node);
+        PassContext context = context(original, node, 505L, false, true);
+        new FlowObfuscationPass().run(context);
+        Class<?> type = verifyAndLoad(serialize(node, context.hierarchy()), "reorder");
+        // The full behavioural matrix runs against the rescheduled bytecode: block
+        // scheduling must not change a single result.
+        assertAll(type);
+        Long moved = context.stats().snapshot().get("flow.reordered.blocks");
+        check(moved != null && moved.longValue() > 0, "flow rescheduled basic blocks");
+        check(context.stats().snapshot().get("flow.skipped").longValue() == 0,
+                "every rescheduled method still verified");
     }
 
     // ------------------------------------------------------------ flattening
@@ -948,6 +965,11 @@ public final class FlowTest {
     // ------------------------------------------------------------ infrastructure
 
     private static PassContext context(byte[] originalBytes, ClassNode node, long seed, boolean flattening) {
+        return context(originalBytes, node, seed, flattening, false);
+    }
+
+    private static PassContext context(byte[] originalBytes, ClassNode node, long seed,
+                                       boolean flattening, boolean reorder) {
         try {
             UmbraConfig config = new UmbraConfig.Builder()
                     .input(Paths.get("in.jar"))
@@ -960,6 +982,7 @@ public final class FlowTest {
                     .option("mba.maxPerMethod", "400")
                     .option("exception.level", "3")
                     .option("flow.maxBlocks", "512")
+                    .option("flow.reorder", String.valueOf(reorder))
                     .build();
             ClassPool pool = new ClassPool();
             pool.putClass(node.name + ".class", originalBytes, node);

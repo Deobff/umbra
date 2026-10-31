@@ -1,0 +1,120 @@
+# command: "E:\MC\Umbra\plugins\.cache\maven\apache-maven-3.9.9\bin\mvn.cmd" -B -ntp -o package -Dumbra.preset=does-not-exist
+# cwd: E:\MC\Umbra\plugins\qa\maven-sample
+[INFO] Scanning for projects...
+[INFO] 
+[INFO] -------------------< com.example:umbra-maven-sample >-------------------
+[INFO] Building Umbra Maven sample 1.0.0
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- resources:3.3.1:resources (default-resources) @ umbra-maven-sample ---
+[INFO] skip non existing resourceDirectory E:\MC\Umbra\plugins\qa\maven-sample\src\main\resources
+[INFO] 
+[INFO] --- compiler:3.13.0:compile (default-compile) @ umbra-maven-sample ---
+[INFO] Nothing to compile - all classes are up to date.
+[INFO] 
+[INFO] --- resources:3.3.1:testResources (default-testResources) @ umbra-maven-sample ---
+[INFO] skip non existing resourceDirectory E:\MC\Umbra\plugins\qa\maven-sample\src\test\resources
+[INFO] 
+[INFO] --- compiler:3.13.0:testCompile (default-testCompile) @ umbra-maven-sample ---
+[INFO] No sources to compile
+[INFO] 
+[INFO] --- surefire:3.2.5:test (default-test) @ umbra-maven-sample ---
+[INFO] No tests to run.
+[INFO] 
+[INFO] --- jar:3.4.1:jar (default-jar) @ umbra-maven-sample ---
+[INFO] 
+[INFO] --- umbra:3.0.0:protect (umbra-protect) @ umbra-maven-sample ---
+[INFO] $ "C:\Program Files\Zulu\zulu-8\jre\bin\java.exe" -jar E:\MC\Umbra\plugins\qa\maven-sample\..\..\..\dist\umbra.jar -i E:\MC\Umbra\plugins\qa\maven-sample\target\umbra-maven-sample-1.0.0.jar -o E:\MC\Umbra\plugins\qa\maven-sample\target\umbra-maven-sample-1.0.0-obf.jar --preset does-not-exist --seed 23303 --keep com.example.Main --set mba.enabled=true --verify
+[INFO] Configuration error: Unknown preset: does-not-exist (expected library, spring-boot, jackson, service-loader, micronaut, aggressive, light, balanced, maximum or nocturne)
+[INFO] Umbra 3.2.0 - Java bytecode obfuscator
+[INFO] 
+[INFO] Usage:
+[INFO]   java -jar umbra-all.jar -c <config.yml>
+[INFO]   java -jar umbra-all.jar -i <input.jar> -o <output.jar> [options]
+[INFO] 
+[INFO] Options:
+[INFO]   -c, --config <file>    YAML configuration
+[INFO]   -i, --input <jar>      input JAR
+[INFO]   -o, --output <jar>     output JAR
+[INFO]   --lib <path>           library JAR or directory (repeatable)
+[INFO]   --keep <pattern>       keep glob or @annotation (repeatable/comma-separated)
+[INFO]   --preset <name>        library|spring-boot|jackson|service-loader|micronaut|aggressive|light|balanced|maximum|nocturne
+[INFO]   --keep-public-api      keep public/protected classes completely
+[INFO]   --soft-keep-public-api keep public/protected names only (other transforms still run)
+[INFO]   --reflection-off       disable automatic reflection keep analysis
+[INFO]   --trim                 remove unused private members
+[INFO]   --parameter-obfuscation add unused parameters to private methods
+[INFO]   --rewrite-resources    rewrite class names in text resources
+[INFO]   --reference-obfuscation hide static calls behind invokedynamic
+[INFO]   --reference-virtual    hide virtual/interface calls behind invokedynamic
+[INFO]   --reference-fields     hide field access behind invokedynamic
+[INFO]   --reference-constructors hide new/constructor sequences behind factory methods
+[INFO]   --exception-obfuscation add synthetic catch-all exception handlers
+[INFO]   --virtualize           virtualize eligible method bodies (custom VM)
+[INFO]   --virtualize-max-instructions <n>  skip methods larger than n instructions
+[INFO]   --virtualize-max-methods <n>       cap virtualized methods per class (0 = unlimited)
+[INFO]   --anti-llm             enable anti-LLM countermeasures (decoys + wrapper walls)
+[INFO]   --anti-llm-decoys <n>  decoy methods injected per class
+[INFO]   --anti-llm-layers <n>  nested forwarding layers per wrapped method (0-4)
+[INFO]   --incremental <prev.jar> reuse unchanged classes from a previous output
+[INFO]   --incremental-metadata <file> incremental metadata path
+[INFO]   --anti-debug           add a startup debug-agent guard
+[INFO]   --auth-gate            inject the server-backed authorization gate
+[INFO]   --auth-server <url>    authorization server base URL (e.g. http://127.0.0.1:8090)
+[INFO]   --auth-software <id>   software id registered on the authorization server
+[INFO]   --auth-title <t>       authorization window title
+[INFO]   --auth-no-register     hide account registration in the gate window
+[INFO]   --auth-cache <file>    token cache file (default ~/.umbra-auth/<software>.token)
+[INFO]   --auth-timeout <ms>    HTTP connect/read timeout for the gate (default 5000)
+[INFO]   --auth-entry <class#method>  extra verification entry point (repeatable/comma-separated)
+[INFO]   --dictionary <chars>   identifier character dictionary
+[INFO]   --min-name-length <n>  minimum generated name length
+[INFO]   --input-mapping <file> reuse a previous mapping for stable builds
+[INFO]   --mapping <file>       write the name mapping to this file
+[INFO]   --report <html>        write an HTML audit report
+[INFO]   --report-json <json>   write a JSON audit report
+[INFO]   --inspect              inspect the input archive layout/compatibility and exit
+[INFO]   --inspect-json <file>  write the inspection report as JSON and exit
+[INFO]   --compat-report <json> write layout + run statistics JSON after the run
+[INFO]   --diff-mapping <old> <new>  print a mapping difference and exit
+[INFO]   --trace-watermark <jar>     print embedded Umbra watermark(s) and exit
+[INFO]   --license <file>       signed enterprise license
+[INFO]   --license-key <pem>    RSA public key for license verification
+[INFO]   --license-server <url> online license server for revocation/feature checks
+[INFO]   --require-license      exit with code 3 when the license is missing/invalid
+[INFO]   --require-feature <f>  require a license feature (repeatable): audit, policy, ...
+[INFO]   --seed <value>         deterministic seed
+[INFO]   --set, -D key=value    advanced option (repeatable); see docs/OPTIONS.md
+[INFO]   --dry-run              analyze only, do not write output
+[INFO]   --verify               load output classes to force JVM verification
+[INFO]   --fixed-time           write a fixed ZIP timestamp (reproducible builds)
+[INFO]   --allow-in-place       allow output to overwrite the input JAR (destructive; default rejects)
+[INFO]   --no-rename            disable renaming
+[INFO]   --no-string            disable string encryption
+[INFO]   --no-integer           disable integer constant encryption
+[INFO]   --flatten              enable state-machine control-flow flattening
+[INFO]   --no-flow              disable control-flow obfuscation
+[INFO]   --no-shuffle           disable member shuffling
+[INFO]   --no-junk              disable junk members
+[INFO]   --no-watermark         disable watermark
+[INFO]   -v, --verbose          verbose logging
+[INFO]   -q, --quiet            only warnings and errors
+[INFO]   -h, --help             show this help
+[INFO]   --version              print version
+[INFO] 
+[INFO] Run without arguments (or with --gui) to start the graphical interface.
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD FAILURE
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  5.314 s
+[INFO] Finished at: 2026-10-25T11:39:51+08:00
+[INFO] ------------------------------------------------------------------------
+[ERROR] Failed to execute goal io.umbra:umbra-maven-plugin:3.0.0:protect (umbra-protect) on project umbra-maven-sample: Umbra failed with exit code 1 (configuration or transform failure). Full log: E:\MC\Umbra\plugins\qa\maven-sample\target\umbra\protect.log Last output:   --no-integer           disable integer constant encryption |   --flatten              enable state-machine control-flow flattening |   --no-flow              disable control-flow obfuscation |   --no-shuffle           disable member shuffling |   --no-junk              disable junk members |   --no-watermark         disable watermark |   -v, --verbose          verbose logging |   -q, --quiet            only warnings and errors |   -h, --help             show this help |   --version              print version |  | Run without arguments (or with --gui) to start the graphical interface. -> [Help 1]
+[ERROR] 
+[ERROR] To see the full stack trace of the errors, re-run Maven with the -e switch.
+[ERROR] Re-run Maven using the -X switch to enable full debug logging.
+[ERROR] 
+[ERROR] For more information about the errors and possible solutions, please read the following articles:
+[ERROR] [Help 1] http://cwiki.apache.org/confluence/display/MAVEN/MojoFailureException
+

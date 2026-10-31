@@ -2,6 +2,7 @@ package io.umbra.core.runtime.crypto;
 
 import io.umbra.core.model.ClassPool;
 import io.umbra.core.runtime.TemplateInjector;
+import io.umbra.core.util.DomainTags;
 import io.umbra.core.util.NameGenerator;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.commons.ClassRemapper;
@@ -15,6 +16,7 @@ import org.objectweb.asm.tree.MethodNode;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Random;
+import io.umbra.core.util.RuntimeNames;
 
 /**
  * Pass-side helper that injects the shared crypto template and the templates
@@ -42,7 +44,7 @@ public final class CryptoSupport {
         Random random = new Random(seed ^ 0x5EEDC0DEL);
         NameGenerator names = new NameGenerator(random, "u");
         for (int attempt = 0; attempt < 1000; attempt++) {
-            String candidate = "umbra/runtime/" + names.random(12);
+            String candidate = RuntimeNames.prefix() + names.random(12);
             if (pool.getClass(candidate) != null) {
                 if (pool.isGenerated(candidate)) {
                     return candidate;
@@ -92,7 +94,16 @@ public final class CryptoSupport {
         remapped.name = targetName;
         remapped.access |= Opcodes.ACC_SYNTHETIC;
         remapped.version = Math.min(remapped.version, Opcodes.V1_8);
-        replaceConstants(remapped, replacements);
+        // Per-build domain separators must reach every injected template, or the
+        // runtime would derive keys from the literal labels while the build side uses
+        // the randomized ones (see DomainTags).
+        Map<String, String> constants = DomainTags.replacements();
+        if (replacements != null) {
+            constants.putAll(replacements);
+        }
+        if (!constants.isEmpty()) {
+            replaceConstants(remapped, constants);
+        }
         TemplateInjector.stripDebugInfo(remapped);
         pool.addGenerated(remapped);
     }

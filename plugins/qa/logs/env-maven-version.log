@@ -1,0 +1,8 @@
+# command: "E:\MC\Umbra\plugins\.cache\maven\apache-maven-3.9.9\bin\mvn.cmd" -version
+# cwd: E:\MC\Umbra\plugins
+Apache Maven 3.9.9 (8e8579a9e76f7d015ee5ec7bfcdc97d260186937)
+Maven home: E:\MC\Umbra\plugins\.cache\maven\apache-maven-3.9.9
+Java version: 1.8.0_502, vendor: Azul Systems, Inc., runtime: C:\Program Files\Zulu\zulu-8\jre
+Default locale: zh_CN, platform encoding: GBK
+OS name: "windows 10", version: "10.0", arch: "amd64", family: "windows"
+

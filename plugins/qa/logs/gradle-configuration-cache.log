@@ -1,0 +1,118 @@
+# command: "C:\Users\Administrator\.gradle\wrapper\dists\gradle-8.14-bin\38aieal9i53h9rfe7vjup95b9\gradle-8.14\bin\gradle.bat" --no-daemon --offline umbraProtect --configuration-cache --rerun-tasks
+# cwd: E:\MC\Umbra\plugins\qa\gradle-sample
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.14/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+Calculating task graph as configuration cache cannot be reused because file '..\..\..\..\..\..\C:\Users\Administrator\.m2\repository\io\umbra\umbra-gradle-plugin\3.0.0\umbra-gradle-plugin-3.0.0.module' has changed.
+> Task :processResources NO-SOURCE
+> Task :compileJava
+> Task :classes
+> Task :jar
+
+> Task :umbraProtect
+[umbra] $ "C:\Program Files\Zulu\zulu-8\jre\bin\java.exe" -jar E:\MC\Umbra\dist\umbra.jar -i E:\MC\Umbra\plugins\qa\gradle-sample\build\libs\umbra-gradle-sample-1.0.0.jar -o E:\MC\Umbra\plugins\qa\gradle-sample\build\umbra\umbra-gradle-sample-obf.jar --preset balanced --seed 23303 --keep com.example.Main --set mba.enabled=true --verify
+[umbra] [  2%] Loading input E:\MC\Umbra\plugins\qa\gradle-sample\build\libs\umbra-gradle-sample-1.0.0.jar
+[umbra] [INFO] layout: flat
+[umbra] [INFO] Loaded 2 classes and 1 resources from E:\MC\Umbra\plugins\qa\gradle-sample\build\libs\umbra-gradle-sample-1.0.0.jar (flat layout)
+[umbra] [  8%] Building hierarchy
+[umbra] [  9%] Inspecting mod container
+[umbra] [ 10%] Running reflection-analysis
+[umbra] [INFO] Pass reflection-analysis started
+[umbra] [INFO] reflection-analysis: kept 0 classes and kept 0 member names from reflection call sites
+[umbra] [INFO] Pass reflection-analysis finished in 0 ms
+[umbra] [ 15%] Running field-initialization
+[umbra] [INFO] Pass field-initialization started
+[umbra] [INFO] field-initialization: moved 0 static constants into <clinit>
+[umbra] [INFO] Pass field-initialization finished in 0 ms
+[umbra] [ 17%] Running debug-info
+[umbra] [INFO] Pass debug-info started
+[umbra] [INFO] debug-info: cleaned 1 classes
+[umbra] [INFO] Pass debug-info finished in 1 ms
+[umbra] [ 20%] Running decompiler-noise
+[umbra] [INFO] Pass decompiler-noise started
+[umbra] [INFO] decompiler-noise: level=1, 1 classes, 19 attributes, 608 bytes
+[umbra] [INFO] Pass decompiler-noise finished in 8 ms
+[umbra] [ 22%] Running member-shuffle
+[umbra] [INFO] Pass member-shuffle started
+[umbra] [INFO] member-shuffle: shuffled 1 classes
+[umbra] [INFO] Pass member-shuffle finished in 0 ms
+[umbra] [ 30%] Running rename
+[umbra] [INFO] Pass rename started
+[umbra] [INFO] rename: mapping written to E:\MC\Umbra\plugins\qa\gradle-sample\build\umbra\umbra-mapping.txt
+[umbra] [INFO] rename: 1 classes, 1 methods, 0 fields renamed
+[umbra] [INFO] Pass rename finished in 19 ms
+[umbra] [ 33%] Running anti-llm
+[umbra] [INFO] Pass anti-llm started
+[umbra] [INFO] anti-llm: 2 decoy methods, 1 guarded call sites, 1 wrapper layers across 1 classes
+[umbra] [INFO] Pass anti-llm finished in 1 ms
+[umbra] [ 43%] Running method-virtualization
+[umbra] [INFO] Pass method-virtualization started
+[umbra] [INFO] method-virtualization[vm2]: virtualized 4 methods (262 instructions, 0 handlers, 0 indy bridges, 0 constructor bodies, 4 fused instructions), 0 skipped
+[umbra] [INFO] Pass method-virtualization finished in 82 ms
+[umbra] [ 46%] Running string-encryption
+[umbra] [INFO] Pass string-encryption started
+[umbra] [INFO] string-encryption: encrypted 0 string constants (auto:auto[chacha20,aes-ctr,rc4,speck], split=true, cache=false, perClassKey=0 classes, indy=0 sites, minLength=2, wipe=true, stackTraceHide=true, payload=v3, size-skips=0/0)
+[umbra] [INFO] Pass string-encryption finished in 30 ms
+[umbra] [ 48%] Running integer-encryption
+[umbra] [INFO] Pass integer-encryption started
+[umbra] [INFO] integer-encryption: obfuscated 0 constants
+[umbra] [INFO] Pass integer-encryption finished in 2 ms
+[umbra] [ 51%] Running mba
+[umbra] [INFO] Pass mba started
+[umbra] [INFO] mba[depth=1]: rewrote 0 arithmetic expressions and 2 constants in 2 methods
+[umbra] [INFO] Pass mba finished in 2 ms
+[umbra] [ 53%] Running flow-obfuscation
+[umbra] [INFO] Pass flow-obfuscation started
+[umbra] [INFO] flow-obfuscation[light]: 5 methods across 1 classes, 5 predicates (0 range, 0 hash), 0 branches inverted, 0 dead blocks, 14 junk blocks, 0 transposed blocks, 0 bogus exception ranges (0 verification skips, 0 classes kept conservative)
+[umbra] [INFO] Pass flow-obfuscation finished in 120 ms
+[umbra] [ 56%] Running control-flow-flattening
+[umbra] [INFO] Pass control-flow-flattening started
+[umbra] [INFO] control-flow-flattening: flattened 5 methods (15 blocks, 0 with try/catch, 0 with switches); skipped {}
+[umbra] [INFO] Pass control-flow-flattening finished in 99 ms
+[umbra] [ 59%] Running exception-obfuscation
+[umbra] [INFO] Pass exception-obfuscation started
+[umbra] [INFO] exception-obfuscation[level=2]: wrapped 5 methods, 15 synthetic handlers, 10 dead throw paths, 0 fake handler entries (0 verification skips)
+[umbra] [INFO] Pass exception-obfuscation finished in 22 ms
+[umbra] [ 61%] Running junk-members
+[umbra] [INFO] Pass junk-members started
+[umbra] [INFO] junk-members: added 2 methods and 2 fields
+[umbra] [INFO] Pass junk-members finished in 1 ms
+[umbra] [ 69%] Running watermark
+[umbra] [INFO] Pass watermark started
+[umbra] [INFO] watermark: embedded in com/example/Main.umbra$ee3213 and manifest
+[umbra] [INFO] Pass watermark finished in 1 ms
+[umbra] [ 84%] Running resource-rewrite
+[umbra] [INFO] Pass resource-rewrite started
+[umbra] [INFO] resource-rewrite: updated 0 resource entries
+[umbra] [INFO] Pass resource-rewrite finished in 2 ms
+[umbra] [ 87%] Running class-encryption
+[umbra] [INFO] Pass class-encryption started
+[umbra] [INFO] class-encryption: registered archive post-processor (loader=umbra/runtime/LZmll19Fxjf, alg=chacha20, integrity=true/2, antiDump=true, resources=true, resourceIntegrity=true, minResourceSize=0, manifestMinimal=true, entry=com/example/Main#main, runtimeGuard=-, masterBinding=sample, index=v3)
+[umbra] [INFO] class-encryption: note: --verify links only the plaintext loader/helpers; encrypted classes and resources are verified by the loader at runtime
+[umbra] [INFO] Pass class-encryption finished in 379 ms
+[umbra] [ 92%] Writing E:\MC\Umbra\plugins\qa\gradle-sample\build\umbra\umbra-gradle-sample-obf.jar
+[umbra] [INFO] layout: wrote flat archive (25 classes, 0 multi-release variants, 0 module-info kept, 1 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[umbra] [ 98%] Post-processing class-encryption
+[umbra] [INFO] Post-processor class-encryption started
+[umbra] [INFO] class-encryption: encrypted 21 classes and 0 resources (0 bytes), 0 plaintext resources kept, loader=umbra/runtime/LZmll19Fxjf, index=RXk753idLTqr1ElFg9, entries=27, masterBinding=sample(zip-comment+entry-count), level=2
+[umbra] [INFO] Post-processor class-encryption finished in 123 ms
+[umbra] [100%] Done
+[umbra] [INFO] Output written to E:\MC\Umbra\plugins\qa\gradle-sample\build\umbra\umbra-gradle-sample-obf.jar (25 classes, 1 resources, 1335 ms)
+[umbra] Umbra finished: 25 classes, 1 resources in 1335 ms
+[umbra] Verification: OK
+[umbra] protected jar: E:\MC\Umbra\plugins\qa\gradle-sample\build\umbra\umbra-gradle-sample-obf.jar (78495 bytes)
+[umbra] mapping: E:\MC\Umbra\plugins\qa\gradle-sample\build\umbra\umbra-mapping.txt -> E:\MC\Umbra\plugins\qa\gradle-sample\build\umbra\mapping.txt
+[umbra] mapping: E:\MC\Umbra\plugins\qa\gradle-sample\build\umbra\mapping.txt
+[umbra] log: E:\MC\Umbra\plugins\qa\gradle-sample\build\umbra\protect.log
+
+[Incubating] Problems report is available at: file:///E:/MC/Umbra/plugins/qa/gradle-sample/build/reports/problems/problems-report.html
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 9.0.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/8.14/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD SUCCESSFUL in 34s
+3 actionable tasks: 3 executed
+Configuration cache entry stored.
+

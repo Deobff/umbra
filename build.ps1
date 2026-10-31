@@ -182,6 +182,32 @@ function Build-Test {
     }
 }
 
+function Copy-GuiArtifacts {
+    # The desktop front end lives in its own jar because it needs JavaFX, which the
+    # build JDK does not have to ship. Refresh it next to the engine jar on every
+    # dist/package run, otherwise dist\ keeps launching the previous console.
+    $guiJar = Join-Path $Root 'gui-fx\umbra-gui-fx.jar'
+    if (-not (Test-Path $guiJar)) {
+        $buildFx = Join-Path $Root 'gui-fx\build-fx.cmd'
+        if (Test-Path $buildFx) {
+            Write-Host "  gui-fx\umbra-gui-fx.jar is missing; building it (needs a JDK 8 with JavaFX)" -ForegroundColor Yellow
+            & cmd.exe /c "`"$buildFx`"" 2>&1 | ForEach-Object { Write-Host ("  " + $_) }
+        }
+    }
+    New-Item -ItemType Directory -Force -Path $Dist | Out-Null
+    if (Test-Path $guiJar) {
+        Copy-Item $guiJar (Join-Path $Dist 'umbra-gui-fx.jar') -Force
+        Copy-Item (Join-Path $Root 'umbra-fx.cmd') $Dist -Force
+        $size = [math]::Round((Get-Item $guiJar).Length / 1KB, 1)
+        Write-Host ("  {0} ({1} KB)" -f (Join-Path $Dist 'umbra-gui-fx.jar'), $size)
+    } else {
+        Write-Host "  WARNING: no JavaFX front end available; the package ships the classic console only" -ForegroundColor Yellow
+    }
+    Copy-Item (Join-Path $Root 'Umbra.cmd') $Dist -Force
+    Copy-Item (Join-Path $Root 'umbra-cli.cmd') $Dist -Force
+    Copy-Item (Join-Path $Root 'umbra.example.yml') $Dist -Force
+}
+
 function Build-Dist {
     Write-Step 'dist'
     if (-not (Test-Path $Classes)) { Build-Compile }
@@ -201,7 +227,7 @@ function Build-Dist {
         'Manifest-Version: 1.0',
         'Main-Class: io.umbra.cli.Main',
         'Implementation-Title: Umbra',
-        'Implementation-Version: 3.2.1',
+        'Implementation-Version: 3.2.2',
         'Created-By: Umbra build.ps1'
     )
     [System.IO.File]::WriteAllText($manifest, ($lines -join "`r`n") + "`r`n", (New-Object System.Text.UTF8Encoding($false)))
@@ -211,13 +237,18 @@ function Build-Dist {
     Invoke-Native $Jar @('cfm', $target, $manifest, '-C', $Fat, '.') 'jar'
     $size = [math]::Round((Get-Item $target).Length / 1MB, 2)
     Write-Host ("  {0} ({1} MB)" -f $target, $size)
+    Copy-GuiArtifacts
 }
 
 function Build-Package {
     $distJar = Join-Path $Dist 'umbra.jar'
     if (-not (Test-Path $distJar)) { Build-Dist }
     Write-Step 'package'
-    $version = '3.2.1'
+    $version = '3.2.2'
+    # Refreshes dist\umbra-gui-fx.jar, the launchers and the example config next to
+    # the engine jar, and builds the GUI when it is missing.
+    Copy-GuiArtifacts
+    $guiJar = Join-Path $Root 'gui-fx\umbra-gui-fx.jar'
     $stage = Join-Path $Build 'package'
     if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
@@ -226,8 +257,10 @@ function Build-Package {
     Copy-Item (Join-Path $Root 'umbra.example.yml') $stage
     Copy-Item (Join-Path $Root 'Umbra.cmd') $stage
     Copy-Item (Join-Path $Root 'umbra-cli.cmd') $stage
+    Copy-Item (Join-Path $Root 'umbra-fx.cmd') $stage
+    if (Test-Path $guiJar) { Copy-Item $guiJar $stage }
     Copy-Item (Join-Path $Root 'demo\demo.jar') $stage
-    if (Test-Path (Join-Path $Root 'docs')) { Copy-Item (Join-Path $Root 'docs') $stage -Recurse }
+    Copy-Item (Join-Path $Root 'docs') $stage -Recurse
     $pluginDist = Join-Path $Root 'plugins\dist'
     if (Test-Path $pluginDist) {
         $pluginStage = Join-Path $stage 'plugins'
@@ -269,8 +302,15 @@ switch ($Task) {
         return
     }
     'gui' {
-        Build-Compile
-        Invoke-Native $Java @('-cp', "$Classes;$LibCp", 'io.umbra.gui.GuiMain') 'gui'
+        # The console is a JavaFX jar of its own (the engine jar stays JavaFX-free),
+        # so refresh it next to the engine jar and start it from there.
+        if (-not (Test-Path (Join-Path $Dist 'umbra.jar'))) {
+            Build-Compile
+            Build-Dist
+        }
+        Copy-GuiArtifacts
+        Invoke-Native $Java @('-cp', (Join-Path $Dist 'umbra-gui-fx.jar'),
+            'io.umbra.guifx.FxGui', '--jar', (Join-Path $Dist 'umbra.jar')) 'gui'
         return
     }
     'all' {

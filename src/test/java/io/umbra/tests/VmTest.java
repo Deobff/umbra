@@ -21,6 +21,7 @@ import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TypeInsnNode;
 
 import javax.tools.Diagnostic;
 import javax.tools.DiagnosticCollector;
@@ -50,6 +51,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import io.umbra.core.util.RuntimeNames;
 
 /**
  * Plain-main test harness for the method-virtualization engines.
@@ -324,6 +326,7 @@ public final class VmTest {
         testEligibility(compiled);
         testHardening(compiled);
         testGuards(compiled);
+        testDispatchIndirection(compiled);
         testInterpreterTemplate();
 
         if (failures > 0) {
@@ -344,7 +347,7 @@ public final class VmTest {
         check(stat(transform.stats, "virtualization.vm2.indyBridges") > 0,
                 "default vm2 run creates indy bridges");
         MethodNode lambda = findMethod(transform, "fixture/VmFixture", "lambdaOnly");
-        check(lambda != null && callsInterpreter(lambda) && !containsInvokeDynamic(lambda),
+        check(lambda != null && callsInterpreter(lambda) && !containsForeignInvokeDynamic(lambda),
                 "lambda-only method is virtualized through a bridge");
         int bridges = 0;
         ClassNode node = transform.pool.getClass("fixture/VmFixture");
@@ -444,7 +447,7 @@ public final class VmTest {
         int checked = 0;
         for (ClassNode node : transform.pool.classes().values()) {
             if (!transform.pool.isGenerated(node.name) || isInterpreter(node)
-                    || node.name.startsWith("umbra/runtime/M")) {
+                    || node.name.startsWith(RuntimeNames.path("M"))) {
                 continue;
             }
             Class<?> holder = loadHolder(loader, node.name);
@@ -526,7 +529,7 @@ public final class VmTest {
                 "vm2 virtualizes a method with try/catch and an interface call (news=" + news + ")");
         MethodNode lambdaMethod = findMethod(transform, "fixture/VmFixture", "lambdaInsideTry");
         check(lambdaMethod != null && callsInterpreter(lambdaMethod)
-                        && !containsInvokeDynamic(lambdaMethod),
+                        && !containsForeignInvokeDynamic(lambdaMethod),
                 "vm2 virtualizes a try/catch method containing invokedynamic through a bridge");
         check(stat(transform.stats, "virtualization.vm2.indyBridges") > 0,
                 "vm2 emitted indy bridge methods");
@@ -591,14 +594,14 @@ public final class VmTest {
         checkThrows("classic", original, changed, "rethrowFromCatch", new Object[] { 0 });
     }
 
-    /** True when the method body was replaced by a call to the VM2 interpreter. */
+    /** True when the method body was replaced by a VM2 dispatch call site. */
     private static boolean callsInterpreter(MethodNode method) {
-        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
-            if (insn instanceof MethodInsnNode) {
-                MethodInsnNode call = (MethodInsnNode) insn;
-                if ("([I[I[[I[Ljava/lang/Object;)Ljava/lang/Object;".equals(call.desc)) {
-                    return true;
-                }
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null;
+             insn = insn.getNext()) {
+            if (insn instanceof InvokeDynamicInsnNode
+                    && "([Ljava/lang/Object;)Ljava/lang/Object;"
+                            .equals(((InvokeDynamicInsnNode) insn).desc)) {
+                return true;
             }
         }
         return false;
@@ -607,6 +610,19 @@ public final class VmTest {
     private static boolean containsInvokeDynamic(MethodNode method) {
         for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
             if (insn instanceof InvokeDynamicInsnNode) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** True when the body still contains an invokedynamic that is not the VM2 dispatch. */
+    private static boolean containsForeignInvokeDynamic(MethodNode method) {
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null;
+             insn = insn.getNext()) {
+            if (insn instanceof InvokeDynamicInsnNode
+                    && !"([Ljava/lang/Object;)Ljava/lang/Object;"
+                            .equals(((InvokeDynamicInsnNode) insn).desc)) {
                 return true;
             }
         }
@@ -843,7 +859,8 @@ public final class VmTest {
             for (FieldNode field : node.fields) {
                 if ("[I".equals(field.desc)) {
                     int[] values = (int[]) readStatic(holder, field);
-                    if (values != null && values.length == 8 && values[0] == 0x564D3202) {
+                    if (values != null && values.length == Vm2Format.META_LEN
+                            && values[0] == Vm2Format.magicFor(values)) {
                         holders++;
                     } else if (values != null) {
                         chunks++;
@@ -863,11 +880,15 @@ public final class VmTest {
                 "holder statistics match emitted classes");
     }
 
-    /** True for the injected interpreter (the only generated class with run(int[],int[][],Object[])). */
+    /**
+     * True for the injected interpreter (the only generated class with a static
+     * {@code run(int[],int[][],Object[])}). The method name is randomized by the
+     * pass, so it is matched by descriptor.
+     */
     private static boolean isInterpreter(ClassNode node) {
         for (MethodNode method : node.methods) {
-            if ("run".equals(method.name)
-                    && "([I[I[[I[Ljava/lang/Object;)Ljava/lang/Object;".equals(method.desc)) {
+            if ("([I[I[[I[Ljava/lang/Object;)Ljava/lang/Object;".equals(method.desc)
+                    && (method.access & Opcodes.ACC_STATIC) != 0) {
                 return true;
             }
         }
@@ -912,6 +933,53 @@ public final class VmTest {
         }
     }
 
+    /**
+     * Rebuilds the block array of a payload from its holder entry. The entry is
+     * what the interpreter dispatcher calls: it reads the private meta field and
+     * assembles the blocks through the per-block accessors, which are the only
+     * way to reach them from outside.
+     */
+    private static int[][] payloadBlocks(ClassLoader loader, ClassNode holder) {
+        MethodNode entry = null;
+        for (MethodNode method : holder.methods) {
+            if ("([Ljava/lang/Object;)Ljava/lang/Object;".equals(method.desc)) {
+                entry = method;
+            }
+        }
+        if (entry == null) {
+            return null;
+        }
+        boolean assembly = false;
+        List<int[]> blocks = new ArrayList<int[]>();
+        for (AbstractInsnNode insn = entry.instructions.getFirst(); insn != null;
+             insn = insn.getNext()) {
+            if (insn instanceof TypeInsnNode && insn.getOpcode() == Opcodes.ANEWARRAY
+                    && "[I".equals(((TypeInsnNode) insn).desc)) {
+                assembly = true;
+            } else if (assembly && insn instanceof MethodInsnNode
+                    && insn.getOpcode() == Opcodes.INVOKESTATIC
+                    && "()[I".equals(((MethodInsnNode) insn).desc)) {
+                int[] values = readAccessor(loader, (MethodInsnNode) insn);
+                if (values == null) {
+                    return null;
+                }
+                blocks.add(values);
+            }
+        }
+        return blocks.isEmpty() ? null : blocks.toArray(new int[0][]);
+    }
+
+    private static int[] readAccessor(ClassLoader loader, MethodInsnNode call) {
+        try {
+            Class<?> owner = Class.forName(call.owner.replace('/', '.'), true, loader);
+            Method accessor = owner.getDeclaredMethod(call.name);
+            accessor.setAccessible(true);
+            return (int[]) accessor.invoke(null);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
     // ------------------------------------------------------------------
     // Tamper guards
     // ------------------------------------------------------------------
@@ -929,18 +997,18 @@ public final class VmTest {
                 continue;
             }
             for (MethodNode method : node.methods) {
-                if ("run".equals(method.name)
-                        && "([I[I[[I[Ljava/lang/Object;)Ljava/lang/Object;".equals(method.desc)) {
+                if ("([I[I[[I[Ljava/lang/Object;)Ljava/lang/Object;".equals(method.desc)
+                        && (method.access & Opcodes.ACC_STATIC) != 0) {
                     Class<?> type = loadHolder(holderLoader, node.name);
                     if (type == null) {
                         continue;
                     }
-                    run = type.getDeclaredMethod("run", int[].class, int[].class, int[][].class,
-                            Object[].class);
+                    run = type.getDeclaredMethod(method.name, int[].class, int[].class,
+                            int[][].class, Object[].class);
                     run.setAccessible(true);
                 }
             }
-            if (node.name.startsWith("umbra/runtime/M")) {
+            if (node.name.startsWith(RuntimeNames.path("M"))) {
                 Class<?> mapHolder = loadHolder(holderLoader, node.name);
                 if (mapHolder != null) {
                     for (FieldNode field : node.fields) {
@@ -959,27 +1027,34 @@ public final class VmTest {
 
         int tested = 0;
         int guarded = 0;
+        int skipped = 0;
         for (ClassNode node : transform.pool.classes().values()) {
-            if (!transform.pool.isGenerated(node.name) || tested >= 5) {
+            if (tested >= 5) {
+                break;
+            }
+            if (!transform.pool.isGenerated(node.name) || isInterpreter(node)) {
                 continue;
             }
-            int[] meta = null;
-            int[][] blocks = null;
             Class<?> holder = loadHolder(holderLoader, node.name);
             if (holder == null) {
                 continue;
             }
+            int[] meta = null;
             for (FieldNode field : node.fields) {
                 if ("[I".equals(field.desc)) {
                     int[] values = (int[]) readStatic(holder, field);
-                    if (values != null && values.length == 8 && values[0] == 0x564D3202) {
+                    if (values != null && values.length == Vm2Format.META_LEN
+                            && values[0] == Vm2Format.magicFor(values)) {
                         meta = values;
                     }
-                } else if ("[[I".equals(field.desc)) {
-                    blocks = (int[][]) readStatic(holder, field);
                 }
             }
-            if (meta == null || blocks == null || blocks.length == 0) {
+            if (meta == null) {
+                continue;
+            }
+            int[][] blocks = payloadBlocks(holderLoader, node);
+            if (blocks == null || blocks.length == 0) {
+                skipped++;
                 continue;
             }
             try {
@@ -996,13 +1071,18 @@ public final class VmTest {
                 // probe with null arguments is allowed to fail.
                 continue;
             }
+            // The probe above cached the decoded state under the payload's meta
+            // array; the tampered probe uses a fresh meta identity so the
+            // modified blocks are decoded (and rejected) instead of being
+            // served from that cache.
+            int[] tamperedMeta = meta.clone();
             int[][] tampered = new int[blocks.length][];
             for (int i = 0; i < blocks.length; i++) {
                 tampered[i] = blocks[i].clone();
             }
             tampered[0][tampered[0].length - 1] ^= 0x5A5A5A5A;
             try {
-                run.invoke(null, meta, opcodeMap, tampered, new Object[64]);
+                run.invoke(null, tamperedMeta, opcodeMap, tampered, new Object[64]);
                 check(false, "tampered payload " + node.name + " was accepted");
             } catch (InvocationTargetException e) {
                 String message = String.valueOf(e.getCause());
@@ -1020,6 +1100,43 @@ public final class VmTest {
         }
         check(tested > 0, "at least one payload executes through the interpreter");
         check(guarded > 0, "tampered payloads are rejected by the integrity guard");
+        check(skipped == 0, "every payload holder exposes its blocks through accessors");
+    }
+
+    /**
+     * A business class must not call the injected runtime directly: every
+     * virtualized method carries exactly one {@code invokedynamic} whose target
+     * the JVM resolves through the bootstrap, so the call sites reveal neither
+     * the interpreter nor the holders.
+     */
+    private static void testDispatchIndirection(Map<String, byte[]> compiled) throws Exception {
+        Map<String, String> options = new LinkedHashMap<String, String>();
+        options.put("vm2.enabled", "true");
+        Transform transform = transform(compiled, 9001L, options);
+        int direct = 0;
+        int callSites = 0;
+        for (ClassNode node : transform.pool.classes().values()) {
+            if (transform.pool.isGenerated(node.name)) {
+                continue;
+            }
+            for (MethodNode method : node.methods) {
+                for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null;
+                     insn = insn.getNext()) {
+                    if (insn instanceof MethodInsnNode) {
+                        if (RuntimeNames.isRuntime(((MethodInsnNode) insn).owner)) {
+                            direct++;
+                        }
+                    } else if (insn instanceof InvokeDynamicInsnNode
+                            && "([Ljava/lang/Object;)Ljava/lang/Object;"
+                                    .equals(((InvokeDynamicInsnNode) insn).desc)) {
+                        callSites++;
+                    }
+                }
+            }
+        }
+        check(direct == 0, "business classes contain no direct call into the injected runtime");
+        check(callSites == (int) stat(transform.stats, "virtualization.methods"),
+                "every virtualized method carries exactly one dispatch call site");
     }
 
     // ------------------------------------------------------------------    // Pass invocation

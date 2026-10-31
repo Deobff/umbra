@@ -199,22 +199,54 @@ public final class UmbraCrypto {
     // Key derivation (mirrors io.umbra.core.util.Cipher)
     // ------------------------------------------------------------------
 
+    /**
+     * Literal domain separators. Template injection rewrites the constants (they
+     * are {@code ConstantValue} attributes) so the injected copy starts from the
+     * per-build values; the build side sets the {@code TAG_*} fields through
+     * {@link #applyDomainTags(java.util.Map)}.
+     */
+    private static final String LIT_SITE_KEY = "io.umbra.string.site.key.v1";
+    private static final String LIT_SITE_NONCE = "io.umbra.string.site.nonce.v1";
+    private static final String LIT_CLASS_NONCE = "io.umbra.string.class.nonce.v1";
+    private static final String LIT_AES_IV = "io.umbra.aes.iv.v1";
+
+    private static String TAG_SITE_KEY = LIT_SITE_KEY;
+    private static String TAG_SITE_NONCE = LIT_SITE_NONCE;
+    private static String TAG_CLASS_NONCE = LIT_CLASS_NONCE;
+    private static String TAG_AES_IV = LIT_AES_IV;
+
+    /**
+     * Build-side hook: installs the per-build separators. Never called at runtime
+     * (the injected copy has them baked into its static initializer).
+     */
+    public static void applyDomainTags(java.util.Map<String, String> tags) {
+        TAG_SITE_KEY = pick(tags, LIT_SITE_KEY);
+        TAG_SITE_NONCE = pick(tags, LIT_SITE_NONCE);
+        TAG_CLASS_NONCE = pick(tags, LIT_CLASS_NONCE);
+        TAG_AES_IV = pick(tags, LIT_AES_IV);
+    }
+
+    private static String pick(java.util.Map<String, String> tags, String literal) {
+        String value = tags.get(literal);
+        return value == null ? literal : value;
+    }
+
     public static byte[] siteKey(long siteSeed, int siteId) {
-        return sha256(concat(utf8("io.umbra.string.site.key.v1"), le64(siteSeed), le32(siteId)));
+        return sha256(concat(utf8(TAG_SITE_KEY), le64(siteSeed), le32(siteId)));
     }
 
     public static byte[] siteNonce(long siteSeed, int siteId) {
-        return first(sha256(concat(utf8("io.umbra.string.site.nonce.v1"), le64(siteSeed), le32(siteId))),
+        return first(sha256(concat(utf8(TAG_SITE_NONCE), le64(siteSeed), le32(siteId))),
                 NONCE_BYTES);
     }
 
     public static byte[] classNonce(byte[] classKey, int siteId) {
-        return first(sha256(concat(utf8("io.umbra.string.class.nonce.v1"), classKey, le32(siteId))),
+        return first(sha256(concat(utf8(TAG_CLASS_NONCE), classKey, le32(siteId))),
                 NONCE_BYTES);
     }
 
     public static byte[] aesIv(byte[] key, byte[] nonce) {
-        return first(sha256(concat(utf8("io.umbra.aes.iv.v1"), key, nonce)), AES_IV_BYTES);
+        return first(sha256(concat(utf8(TAG_AES_IV), key, nonce)), AES_IV_BYTES);
     }
 
     /**

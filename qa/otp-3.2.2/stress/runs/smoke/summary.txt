@@ -1,0 +1,13 @@
+label            : smoke
+jar              : E:\MC\Umbra\qa\otp-3.2.2\final-maximum.jar
+javaArgs         : 
+workers x rounds : 2 x 1 = 2
+runs recorded    : 2
+OK               : 2
+FAIL (artifact)  : 0
+FAIL (JVM start) : 0
+failure rate     : 0 %
+wall clock       : 3.2 s
+run time p50/p95 : 2.97 s / 2.97 s
+failures dir     : E:\MC\Umbra\qa\otp-3.2.2\stress\runs\smoke\failures
+csv              : E:\MC\Umbra\qa\otp-3.2.2\stress\runs\smoke\summary.csv

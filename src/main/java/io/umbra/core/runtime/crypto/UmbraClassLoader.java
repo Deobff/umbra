@@ -57,10 +57,15 @@ public final class UmbraClassLoader extends ClassLoader {
     private static final String WATCH_MS_TEXT = "@@WATCHMS@@";
 
     private static final int MAGIC = 0x554D4232;
-    private static final int VERSION = 3;
+    /** Legacy index version (no constant-pool flag); still accepted for reading. */
+    private static final int VERSION_LEGACY = 3;
+    /** Current index version (adds the constant-pool flag). */
+    private static final int VERSION = 4;
     private static final int FLAG_INTEGRITY = 1;
     private static final int FLAG_ANTIDUMP = 2;
     private static final int FLAG_RESOURCE_INTEGRITY = 4;
+    /** Constant-pool payloads are stored with encrypted {@code CONSTANT_Utf8} data. */
+    private static final int FLAG_CONSTANT_POOL = 32;
     private static final int ALG_SHIFT = 3;
     private static final int ALG_MASK = 3;
 
@@ -96,6 +101,7 @@ public final class UmbraClassLoader extends ClassLoader {
     private final boolean integrityEnabled;
     private final boolean resourceIntegrityEnabled;
     private final boolean antiDump;
+    private final boolean constantPoolEncrypted;
     private int bindingUsed;
     private int[] classOrder;
     private int[] resourceOrder;
@@ -123,7 +129,7 @@ public final class UmbraClassLoader extends ClassLoader {
             throw silent("Encrypted archive index is not valid");
         }
         int version = buffer.get() & 0xFF;
-        if (version != VERSION) {
+        if (version != VERSION && version != VERSION_LEGACY) {
             throw silent("Unsupported encrypted archive version");
         }
         byte flags = buffer.get();
@@ -135,6 +141,7 @@ public final class UmbraClassLoader extends ClassLoader {
         this.integrityEnabled = (flags & FLAG_INTEGRITY) != 0;
         this.antiDump = (flags & FLAG_ANTIDUMP) != 0;
         this.resourceIntegrityEnabled = (flags & FLAG_RESOURCE_INTEGRITY) != 0;
+        this.constantPoolEncrypted = (flags & FLAG_CONSTANT_POOL) != 0;
         this.payloadAlgorithm = (flags >>> ALG_SHIFT) & ALG_MASK;
         if (payloadAlgorithm != UmbraCrypto.ALG_CHACHA20
                 && payloadAlgorithm != UmbraCrypto.ALG_AES_CTR) {
@@ -448,9 +455,54 @@ public final class UmbraClassLoader extends ClassLoader {
         byte[] bytes = loadClassPayload(name, entry);
         try {
             definePackageFor(name);
+            if (constantPoolEncrypted) {
+                // Patch the constant pool only on the define path, so the bytes a
+                // reflective attacker can obtain from loadClassPayload stay encrypted.
+                byte[] sealed = null;
+                byte[] key = null;
+                try {
+                    sealed = readEntry(entry);
+                    key = payloadKey("c:" + name, sealed);
+                    if (!cryptConstantPool(bytes, key)) {
+                        fail("Class payload constant pool is invalid");
+                    }
+                } catch (SecurityException e) {
+                    throw e;
+                } catch (Exception e) {
+                    throw new ClassNotFoundException(name);
+                } finally {
+                    UmbraCrypto.wipe(key);
+                    UmbraCrypto.wipe(sealed);
+                }
+            }
             return defineClass(name, bytes, 0, bytes.length, protectionDomain);
         } finally {
             UmbraCrypto.wipe(bytes);
+        }
+    }
+
+    /**
+     * Verifies the class name a payload declares.
+     *
+     * <p>With constant-pool encryption the declared name is unreadable in the
+     * payload itself, so the check runs against a decrypted copy that is wiped
+     * immediately; the payload the caller holds is left untouched.</p>
+     */
+    private void checkPayloadName(String className, byte[] plain, byte[] key) {
+        if (!constantPoolEncrypted) {
+            if (!className.equals(classNameOf(plain))) {
+                fail("Class payload name mismatch");
+            }
+            return;
+        }
+        byte[] probe = new byte[plain.length];
+        System.arraycopy(plain, 0, probe, 0, plain.length);
+        try {
+            if (!cryptConstantPool(probe, key) || !className.equals(classNameOf(probe))) {
+                fail("Class payload name mismatch");
+            }
+        } finally {
+            UmbraCrypto.wipe(probe);
         }
     }
 
@@ -480,6 +532,9 @@ public final class UmbraClassLoader extends ClassLoader {
             byte[] key = payloadKey("c:" + className, sealed);
             try {
                 byte[] plain = UmbraCrypto.unseal(sealed, key, payloadAlgorithm);
+                // The constant pool is still ciphertext here on purpose: whatever this
+                // method hands back is not decompilable. Only the define path patches it
+                // (see findClass), so a reflective caller gets an unusable payload.
                 // Re-check between decryption and define: an attach that happened
                 // while this payload was being processed still refuses the define.
                 if (guardSignal()) {
@@ -496,11 +551,7 @@ public final class UmbraClassLoader extends ClassLoader {
                         fail("Class payload integrity check failed");
                     }
                 }
-                String actualName = classNameOf(plain);
-                if (!className.equals(actualName)) {
-                    UmbraCrypto.wipe(plain);
-                    fail("Class payload name mismatch");
-                }
+                checkPayloadName(className, plain, key);
                 return plain;
             } finally {
                 UmbraCrypto.wipe(key);
@@ -520,6 +571,105 @@ public final class UmbraClassLoader extends ClassLoader {
         } finally {
             UmbraCrypto.wipe(nonce);
         }
+    }
+
+    /**
+     * Encrypts or decrypts the {@code CONSTANT_Utf8} payloads of one class file in
+     * place; the transform is its own inverse.
+     *
+     * <p>Only the bytes of each {@code CONSTANT_Utf8} entry are XORed with a key
+     * stream derived from the per-entry key and the constant-pool index. Every
+     * length field and every constant-pool reference stays untouched, so
+     * {@code StackMapTable} and the other attributes remain valid. A payload
+     * recovered from the loader (or from memory) therefore still has an
+     * unreadable constant pool — no class, method or field name — until it is
+     * patched, which only happens on the define path.</p>
+     *
+     * @param cls class file bytes, modified in place
+     * @param key per-entry payload key
+     * @return {@code true} when the class file was processed
+     */
+    public static boolean cryptConstantPool(byte[] cls, byte[] key) {
+        if (cls == null || key == null || key.length < 8 || cls.length < 10) {
+            return false;
+        }
+        if ((cls[0] & 0xFF) != 0xCA || (cls[1] & 0xFF) != 0xFE
+                || (cls[2] & 0xFF) != 0xBA || (cls[3] & 0xFF) != 0xBE) {
+            return false;
+        }
+        int count = ((cls[8] & 0xFF) << 8) | (cls[9] & 0xFF);
+        if (count <= 0) {
+            return false;
+        }
+        long state = 0L;
+        for (int i = 0; i < 8; i++) {
+            state = (state << 8) | (key[i] & 0xFFL);
+        }
+        state ^= 0x9E3779B97F4A7C15L;
+        int pos = 10;
+        for (int index = 1; index < count; index++) {
+            if (pos >= cls.length) {
+                return false;
+            }
+            int tag = cls[pos++] & 0xFF;
+            switch (tag) {
+                case 1: {
+                    if (pos + 2 > cls.length) {
+                        return false;
+                    }
+                    int length = ((cls[pos] & 0xFF) << 8) | (cls[pos + 1] & 0xFF);
+                    pos += 2;
+                    if (pos + length > cls.length) {
+                        return false;
+                    }
+                    long entry = state ^ (((long) index) * 0x2545F4914F6CDD1DL);
+                    for (int i = 0; i < length; i++) {
+                        entry = entry * 6364136223846793005L + 1442695040888963407L;
+                        cls[pos + i] ^= (byte) (entry >>> 33);
+                    }
+                    pos += length;
+                    break;
+                }
+                case 3:
+                case 4:
+                    pos += 4;
+                    break;
+                case 5:
+                case 6:
+                    // Eight-byte constants occupy two constant-pool slots.
+                    pos += 8;
+                    index++;
+                    break;
+                case 7:
+                case 8:
+                case 16:
+                case 19:
+                case 20:
+                    pos += 2;
+                    break;
+                case 9:
+                case 10:
+                case 11:
+                case 12:
+                case 17:
+                case 18:
+                    pos += 4;
+                    break;
+                case 15:
+                    pos += 3;
+                    break;
+                case 21:
+                case 22:
+                    pos += 2;
+                    break;
+                default:
+                    return false;
+            }
+            if (pos > cls.length) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // ------------------------------------------------------------------
@@ -774,9 +924,7 @@ public final class UmbraClassLoader extends ClassLoader {
                         fail("Class payload integrity check failed");
                     }
                 }
-                if (!name.equals(classNameOf(plain))) {
-                    fail("Class payload name mismatch");
-                }
+                checkPayloadName(name, plain, key);
             } finally {
                 UmbraCrypto.wipe(key);
                 UmbraCrypto.wipe(sealed);

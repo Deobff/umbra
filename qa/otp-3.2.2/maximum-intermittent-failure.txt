@@ -1,0 +1,47 @@
+# Observed intermittent failure — maximum preset (3.2.2 session)
+
+Recorded once, not reproducible afterwards (0 failures in 15 sequential runs,
+4 parallel runs, and 2 `-Xverify:all` runs of the same file). Kept verbatim so the
+next session does not have to rediscover it.
+
+Artifact: `qa/otp-3.2.2/rel-maximum.jar`
+(produced by `dist/umbra.jar -i demo/demo.jar -o rel-maximum.jar --preset maximum`,
+seed = default, 1450 classes, classEncryption on, otp on for 820 methods)
+
+Command: `java -jar qa/otp-3.2.2/rel-maximum.jar`  (plain, no -Xverify)
+
+Output:
+
+```
+FAIL: java.lang.IllegalAccessError: tried to access method j.uEAus(Ljava/lang/String;)Z from class i
+java.lang.IllegalAccessError: tried to access method j.uEAus(Ljava/lang/String;)Z from class i
+	at i.z$wa(Unknown Source)
+	at i.HRpZC(Unknown Source)
+	at i.mTjJR(Unknown Source)
+	at i.run(Unknown Source)
+	at l.z$w6(Unknown Source)
+	at l.OzC4y(Unknown Source)
+	... (reflection invoke frames)
+	at r4muVp1vVGET34c.invoke(Unknown Source)
+	at r4muVp1vVGET34c.qq7xOV(Unknown Source)
+	at r4muV77975f3db5408365.bHQMz(Unknown Source)
+	at r4muVp1vVGET34c.xcEMO0(Unknown Source)
+	at l.u$tKPg7bGA(Unknown Source)
+	... (loader invoke frames, repeated per nesting level)
+	at r4muLVdWnz4wphG.run(Unknown Source)
+	at r4muLVdWnz4wphG.main(Unknown Source)
+```
+
+Notes for the next session:
+
+* `i` is a business class, `j` the class whose method is inaccessible, both in the
+  flattened default package; `r4muVp1vVGET34c` / `r4muLVdWnz4wphG` are the injected
+  class-encryption loader templates.
+* The failing frame is a plain `invokevirtual`-style access to a renamed method
+  (`uEAus`), i.e. an access-flag/mapping mismatch, not a stack or verifier error.
+* Every rerun of the same file printed `OK`, and `java -Xverify:all` printed `OK`.
+* The run happened while two other JVM-heavy jobs (CFR decompilation of 40 classes)
+  were running on the same machine, so a loader/race hypothesis under CPU
+  contention is the leading one — not confirmed.
+* `DynamicGuardTest` also failed once in the same window (sticky-attach assertion)
+  and passed alone afterwards (239 checks), so the machine was contended.

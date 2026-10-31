@@ -1,0 +1,1 @@
+Minimum name length sliderScene=853,440,200,13 readoutScene=1063,439,46,14

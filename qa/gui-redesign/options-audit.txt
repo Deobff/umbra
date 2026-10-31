@@ -1,0 +1,31 @@
+note: toggle 'springBoot' (Compatibility) shares its key layout.springBoot with a spec; the spec control owns it
+note: toggle 'war' (Compatibility) shares its key layout.war with a spec; the spec control owns it
+note: toggle 'multiRelease' (Compatibility) shares its key layout.multiRelease with a spec; the spec control owns it
+note: toggle 'moduleInfo' (Compatibility) shares its key layout.moduleInfo with a spec; the spec control owns it
+note: toggle 'rename' (Names) shares its key renamer.enabled with a spec; the spec control owns it
+note: toggle 'keepPublic' (Names) shares its key keepPublicApi with a spec; the spec control owns it
+note: toggle 'strings' (Data) shares its key stringEncryption.enabled with a spec; the spec control owns it
+note: toggle 'stringHide' (Data) shares its key string.stackTraceHide with a spec; the spec control owns it
+note: toggle 'stringWipe' (Data) shares its key string.wipe with a spec; the spec control owns it
+note: toggle 'integers' (Data) shares its key integerEncryption.enabled with a spec; the spec control owns it
+note: toggle 'flow' (Control flow) shares its key flowObfuscation.enabled with a spec; the spec control owns it
+note: toggle 'flatten' (Control flow) shares its key flowObfuscation.flattening with a spec; the spec control owns it
+note: toggle 'aggressiveFlow' (Control flow) shares its key flow.aggressive with a spec; the spec control owns it
+note: toggle 'exceptions' (Control flow) shares its key exceptionObfuscation.enabled with a spec; the spec control owns it
+note: toggle 'vm2' (Virtualization) shares its key methodVirtualization.enabled with a spec; the spec control owns it
+note: toggle 'fusion' (Virtualization) shares its key vm2.fusion with a spec; the spec control owns it
+note: toggle 'nocturne' (Virtualization) shares its key nocturne.enabled with a spec; the spec control owns it
+note: toggle 'nocturneCompatible' (Virtualization) shares its key nocturne.compatible with a spec; the spec control owns it
+note: toggle 'nativeCode' (Native) shares its key native.enabled with a spec; the spec control owns it
+note: toggle 'antiDump' (Native) shares its key native.antiDump with a spec; the spec control owns it
+note: toggle 'classEnc' (Archive) shares its key classEncryption.enabled with a spec; the spec control owns it
+note: toggle 'encryptResources' (Archive) shares its key classEncryption.resources with a spec; the spec control owns it
+note: toggle 'integrity' (Archive) shares its key integrity.enabled with a spec; the spec control owns it
+note: toggle 'noise' (Anti-analysis) shares its key decompilerNoise.enabled with a spec; the spec control owns it
+note: toggle 'antiLlm' (Anti-analysis) shares its key antiLlm.enabled with a spec; the spec control owns it
+note: toggle 'antiDebug' (Anti-analysis) shares its key antiDebug.level with a spec; the spec control owns it
+note: toggle 'reflectionGate' (Anti-analysis) shares its key reflectionGate.enabled with a spec; the spec control owns it
+note: toggle 'typeConfusion' (Anti-analysis) shares its key typeConfusion.enabled with a spec; the spec control owns it
+note: toggle 'watermark' (Verification) shares its key watermark.enabled with a spec; the spec control owns it
+note: toggle 'minecraft' (Verification) shares its key minecraft.enabled with a spec; the spec control owns it
+audit: CLEAN, 30 note(s)

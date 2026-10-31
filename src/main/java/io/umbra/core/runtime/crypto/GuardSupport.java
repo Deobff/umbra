@@ -2,14 +2,19 @@ package io.umbra.core.runtime.crypto;
 
 import io.umbra.core.model.ClassPool;
 import io.umbra.core.runtime.TemplateInjector;
+import io.umbra.core.runtime.UmbraGuardCall;
 import io.umbra.core.util.NameGenerator;
+import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 
 import java.util.Map;
 import java.util.Random;
+import io.umbra.core.util.RuntimeNames;
 
 /**
  * Shared pass-side helper that wires startup guards into program entry points
@@ -33,7 +38,10 @@ public final class GuardSupport {
     private static final String MAIN_DESC = "([Ljava/lang/String;)V";
 
     /** Internal-name prefix of the unified runtime guard. */
-    private static final String RUNTIME_GUARD_PREFIX = "umbra/runtime/G";
+    /** Resolved per run, because one JVM may protect several archives. */
+    private static String runtimeGuardPrefix() {
+        return RuntimeNames.path("G");
+    }
 
     /** Salt that distinguishes the guard's deterministic name from other helpers. */
     private static final String RUNTIME_GUARD_SALT = "umbra-runtime-guard";
@@ -75,14 +83,85 @@ public final class GuardSupport {
         throw new IllegalStateException("Unable to allocate a name for the unified runtime guard");
     }
 
+    /** Internal-name prefix of the guard call-site dispatcher. */
+    private static String dispatchPrefix() {
+        return RuntimeNames.path("D");
+    }
+
+    /** Bootstrap descriptor of {@link UmbraGuardCall#bootstrap}. */
+    private static final String DISPATCH_DESCRIPTOR =
+            "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;"
+                    + "Ljava/lang/invoke/MethodType;Ljava/lang/String;)"
+                    + "Ljava/lang/invoke/CallSite;";
+
     private static String deterministicName(long seed, String salt) {
         Random random = new Random(seed ^ ((long) salt.hashCode() * 0x9E3779B97F4A7C15L));
         NameGenerator names = new NameGenerator(random, "");
-        return RUNTIME_GUARD_PREFIX + names.random(10);
+        return runtimeGuardPrefix() + names.random(10);
     }
 
     /**
-     * Inserts {@code guard.check()} at the start of every program main method
+     * Ensures the indirect call-site dispatcher exists and returns its internal name.
+     *
+     * <p>The name is derived from the target class, so the independent passes that
+     * emit calls into the same injected helper reuse one copy.</p>
+     *
+     * @param pool   program pool
+     * @param target internal name of the class the call sites target
+     * @return internal name of the injected dispatcher
+     */
+    public static String ensureGuardDispatch(ClassPool pool, String target) {
+        String base = dispatchPrefix() + Integer.toHexString(target.hashCode() & 0x7FFFFFFF);
+        for (int attempt = 0; attempt < 64; attempt++) {
+            String candidate = attempt == 0 ? base : base + "$" + attempt;
+            ClassNode existing = pool.getClass(candidate);
+            if (existing != null) {
+                if (pool.isGenerated(candidate)) {
+                    return candidate;
+                }
+                continue; // A real program class owns this name; try the next one.
+            }
+            CryptoSupport.injectWithCrypto(pool, UmbraGuardCall.class, candidate, null, null);
+            return candidate;
+        }
+        throw new IllegalStateException("Unable to allocate a name for the call dispatcher");
+    }
+
+    /**
+     * Builds an {@code invokedynamic} that replaces a direct {@code invokestatic}
+     * into an injected runtime helper.
+     *
+     * <p>The call site carries no reference to the target in the method body: the
+     * bootstrap resolves the method once while the site links.</p>
+     *
+     * @param dispatch internal name returned by {@link #ensureGuardDispatch}
+     * @param owner    internal name of the target class
+     * @param name     target method name
+     * @param desc     target method descriptor
+     * @return the call-site instruction
+     */
+    public static AbstractInsnNode indirectCall(String dispatch, String owner, String name,
+                                                String desc) {
+        return new InvokeDynamicInsnNode(name, desc,
+                new Handle(Opcodes.H_INVOKESTATIC, dispatch, "bootstrap", DISPATCH_DESCRIPTOR,
+                        false),
+                owner);
+    }
+
+    /**
+     * Builds the {@code invokedynamic} that replaces {@code invokestatic
+     * guard.check()}.
+     *
+     * @param dispatch internal name returned by {@link #ensureGuardDispatch}
+     * @param guard    internal name of the guard class
+     * @return the call-site instruction
+     */
+    public static AbstractInsnNode guardCall(String dispatch, String guard) {
+        return indirectCall(dispatch, guard, "check", "()V");
+    }
+
+    /**
+     * Inserts the guard check at the start of every program main method
      * and - when {@code entryOwner}/{@code entryMethod} are given - at that
      * entry point (used by the encrypted-archive loader).
      *
@@ -91,6 +170,7 @@ public final class GuardSupport {
     public static int instrumentEntryPoints(ClassPool pool, String guard, String entryOwner,
                                             String entryMethod) {
         int instrumented = 0;
+        String dispatch = ensureGuardDispatch(pool, guard);
         for (ClassNode node : pool.classes().values()) {
             if (pool.isGenerated(node.name) || pool.isFrozen(node.name)) {
                 continue;
@@ -113,8 +193,7 @@ public final class GuardSupport {
                 if (alreadyGuarded(method, guard)) {
                     continue;
                 }
-                method.instructions.insert(new MethodInsnNode(Opcodes.INVOKESTATIC,
-                        guard, "check", "()V", false));
+                method.instructions.insert(guardCall(dispatch, guard));
                 instrumented++;
                 if (entry) {
                     explicitDone = true;
@@ -156,13 +235,21 @@ public final class GuardSupport {
     }
 
     private static boolean alreadyGuarded(MethodNode method, String guard) {
-        org.objectweb.asm.tree.AbstractInsnNode first = method.instructions.getFirst();
+        AbstractInsnNode first = method.instructions.getFirst();
         while (first != null && first.getOpcode() < 0) {
             first = first.getNext();
+        }
+        if (first instanceof InvokeDynamicInsnNode) {
+            // Current form: invokedynamic check()V with the guard as bootstrap argument.
+            InvokeDynamicInsnNode indy = (InvokeDynamicInsnNode) first;
+            return "check".equals(indy.name) && "()V".equals(indy.desc)
+                    && indy.bsmArgs != null && indy.bsmArgs.length == 1
+                    && guard.equals(indy.bsmArgs[0]);
         }
         if (!(first instanceof MethodInsnNode)) {
             return false;
         }
+        // Legacy form kept for pools instrumented by an older pass run.
         MethodInsnNode call = (MethodInsnNode) first;
         return call.getOpcode() == Opcodes.INVOKESTATIC && guard.equals(call.owner)
                 && "check".equals(call.name) && "()V".equals(call.desc);

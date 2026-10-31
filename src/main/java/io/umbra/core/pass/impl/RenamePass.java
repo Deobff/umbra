@@ -347,8 +347,10 @@ public final class RenamePass implements Pass {
                 String pkg = packageOf(name);
                 if (randomPackages && !pkg.isEmpty()) {
                     pkg = mapPackage(pkg, randomPackageMap, usedPackages, packageNames);
-                } else if (options.repackage()
-                        && !NameGenerator.normalizePackage(options.repackagePackage()).isEmpty()) {
+                } else if (options.repackage()) {
+                    // Empty target means "flatten into the default package", the
+                    // same layout Zelix KlassMaster produces: no package tree is
+                    // left to cluster the original modules by.
                     pkg = NameGenerator.normalizePackage(options.repackagePackage());
                 }
                 newName = uniqueClass(context.hierarchy(), used, classNames, pkg);

@@ -9,6 +9,7 @@ import io.umbra.core.runtime.crypto.UmbraWatchdog;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import io.umbra.core.util.RuntimeNames;
 
 /**
  * Configurable anti-debug / anti-instrumentation guard.
@@ -74,7 +75,7 @@ public final class AntiDebugPass implements Pass {
         String watchdog = "";
         if (level >= 3 && thread) {
             watchdog = TemplateInjector.inject(context.classes(), UmbraWatchdog.class,
-                    "umbra/runtime/W", config.seed()).replace('/', '.');
+                    RuntimeNames.path("W"), config.seed()).replace('/', '.');
         }
         Map<String, String> replacements = new LinkedHashMap<String, String>();
         replacements.put("@@LEVEL@@", String.valueOf(level));

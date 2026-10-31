@@ -1,0 +1,45 @@
+﻿[INFO] layout: flat
+[INFO] Loaded 26 classes and 2 resources from E:\MC\Umbra\demo\demo.jar (flat layout)
+[INFO] runtime helpers live in n5/y98 (runtime.package=pinned or seed-derived)
+[INFO] Pass reflection-analysis started
+[INFO] reflection-analysis: kept 1 classes and kept 3 member names from reflection call sites
+[INFO] Pass reflection-analysis finished in 1 ms
+[INFO] Pass field-initialization started
+[INFO] field-initialization: moved 16 static constants into <clinit>
+[INFO] Pass field-initialization finished in 1 ms
+[INFO] Pass debug-info started
+[INFO] debug-info: cleaned 25 classes
+[INFO] Pass debug-info finished in 1 ms
+[INFO] Pass decompiler-noise started
+[INFO] decompiler-noise: level=1, 25 classes, 737 attributes, 21565 bytes
+[INFO] Pass decompiler-noise finished in 6 ms
+[INFO] Pass member-shuffle started
+[INFO] member-shuffle: shuffled 25 classes
+[INFO] Pass member-shuffle finished in 0 ms
+[INFO] Pass rename started
+[INFO] rename: mapping written to C:\Users\Administrator\AppData\Local\Temp\umbra-cantrip-test-6269643709224816212\umbra-mapping.txt
+[INFO] rename: 25 classes, 47 methods, 35 fields renamed
+[INFO] Pass rename finished in 58 ms
+[INFO] Pass method-virtualization started
+[INFO] cantrip: enabled (level 1) - VM2 payload chunks are reconstructed by a Cantrip dialect interpreter
+[INFO] method-virtualization[vm2]: virtualized 52 methods (2455 instructions, 1 handlers, 0 indy bridges, 0 constructor bodies, 63 fused instructions), 0 skipped
+[INFO] cantrip: 9012 values reconstructed from 164 chunks by 156 Cantrip dialect programs
+[INFO] Pass method-virtualization finished in 55 ms
+[INFO] Pass string-encryption started
+[INFO] string-encryption: encrypted 325 string constants (auto:chacha20=81, aes-ctr=92, rc4=73, speck=79, split=true, cache=false, perClassKey=13 classes, indy=0 sites, minLength=2, wipe=true, stackTraceHide=true, payload=v3, size-skips=0/0)
+[INFO] Pass string-encryption finished in 224 ms
+[INFO] Pass integer-encryption started
+[INFO] integer-encryption: obfuscated 322 constants
+[INFO] Pass integer-encryption finished in 2 ms
+[INFO] Pass junk-members started
+[INFO] junk-members: added 48 methods and 48 fields
+[INFO] Pass junk-members finished in 1 ms
+[INFO] Pass watermark started
+[INFO] watermark: embedded in a.umbra$d6162b and manifest
+[INFO] Pass watermark finished in 4 ms
+[INFO] Pass resource-rewrite started
+[INFO] resource-rewrite: updated 1 resource entries
+[INFO] Pass resource-rewrite finished in 1 ms
+[INFO] layout: wrote flat archive (239 classes, 0 multi-release variants, 0 module-info kept, 0 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] Output written to C:\Users\Administrator\AppData\Local\Temp\umbra-cantrip-test-6269643709224816212\cantrip.jar (239 classes, 2 resources, 752 ms)
+CantripTest: 9 checks passed

@@ -909,10 +909,13 @@ public final class NativeMethodTranslator implements Opcodes {
                                      FieldInsnNode insn, String branch) {
         line("    if (!umbra_ids[" + id + "].ready) {");
         line("        jclass _c = umbra_class(env, " + classIndex + ");");
+        line("        char _n[UMBRA_LIT_MAX];");
+        line("        char _d[UMBRA_LIT_MAX];");
         line("        if (_c == NULL) " + branch);
+        line("        umbra_lit_copy(" + generator.literalRef(insn.name) + ", _n);");
+        line("        umbra_lit_copy(" + generator.literalRef(insn.desc) + ", _d);");
         line("        umbra_ids[" + id + "].fid = (*env)->Get"
-                + (isStatic ? "Static" : "") + "FieldID(env, _c, "
-                + CGenerator.cString(insn.name) + ", " + CGenerator.cString(insn.desc) + ");");
+                + (isStatic ? "Static" : "") + "FieldID(env, _c, _n, _d);");
         line("        if (umbra_ids[" + id + "].fid == NULL) " + branch);
         line("        umbra_ids[" + id + "].ready = 1;");
         line("    }");
@@ -932,10 +935,13 @@ public final class NativeMethodTranslator implements Opcodes {
         String suffix = jniTypeName(returnType);
         line("    if (!umbra_ids[" + id + "].ready) {");
         line("        jclass _c = umbra_class(env, " + classIndex + ");");
+        line("        char _n[UMBRA_LIT_MAX];");
+        line("        char _d[UMBRA_LIT_MAX];");
         line("        if (_c == NULL) " + branch);
+        line("        umbra_lit_copy(" + generator.literalRef(insn.name) + ", _n);");
+        line("        umbra_lit_copy(" + generator.literalRef(insn.desc) + ", _d);");
         line("        umbra_ids[" + id + "].mid = (*env)->Get"
-                + (isStatic ? "Static" : "") + "MethodID(env, _c, "
-                + CGenerator.cString(insn.name) + ", " + CGenerator.cString(insn.desc) + ");");
+                + (isStatic ? "Static" : "") + "MethodID(env, _c, _n, _d);");
         line("        if (umbra_ids[" + id + "].mid == NULL) " + branch);
         line("        umbra_ids[" + id + "].ready = 1;");
         line("    }");

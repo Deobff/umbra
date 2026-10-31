@@ -22,6 +22,28 @@ import java.util.Base64;
  */
 public final class UmbraStringDecryptor {
 
+    /**
+     * Literal domain separators (rewritten per build by template injection) and
+     * their mutable counterparts, set by the build side through
+     * {@link #applyDomainTags(java.util.Map)}.
+     */
+    private static final String LIT_LEGACY_KEY = "io.umbra.cipher.legacy.key.v2";
+    private static final String LIT_LEGACY_NONCE = "io.umbra.cipher.legacy.nonce.v2";
+
+    private static String TAG_LEGACY_KEY = LIT_LEGACY_KEY;
+    private static String TAG_LEGACY_NONCE = LIT_LEGACY_NONCE;
+
+    /** Build-side hook: installs the per-build separators (never called at runtime). */
+    public static void applyDomainTags(java.util.Map<String, String> tags) {
+        TAG_LEGACY_KEY = pick(tags, LIT_LEGACY_KEY);
+        TAG_LEGACY_NONCE = pick(tags, LIT_LEGACY_NONCE);
+    }
+
+    private static String pick(java.util.Map<String, String> tags, String literal) {
+        String value = tags.get(literal);
+        return value == null ? literal : value;
+    }
+
     private UmbraStringDecryptor() {
     }
 
@@ -40,8 +62,8 @@ public final class UmbraStringDecryptor {
      */
     public static String d(String payload, long key) {
         byte[] data = Base64.getDecoder().decode(payload);
-        byte[] derivedKey = sha256(concat(utf8("io.umbra.cipher.legacy.key.v2"), le64(key)));
-        byte[] nonce = first(sha256(concat(utf8("io.umbra.cipher.legacy.nonce.v2"), le64(key))), 12);
+        byte[] derivedKey = sha256(concat(utf8(TAG_LEGACY_KEY), le64(key)));
+        byte[] nonce = first(sha256(concat(utf8(TAG_LEGACY_NONCE), le64(key))), 12);
         byte[] plain = chacha20(derivedKey, nonce, 1, data);
         try {
             return new String(plain, StandardCharsets.UTF_8).intern();

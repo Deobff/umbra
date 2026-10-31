@@ -24,6 +24,7 @@ import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
+import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
@@ -66,6 +67,7 @@ import java.util.jar.Manifest;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
+import io.umbra.core.util.RuntimeNames;
 
 /**
  * VM2 v3 + native hardening tests.
@@ -98,6 +100,7 @@ public final class Vm3Test {
         testFusion(compiled);
         testDeterminism(compiled);
         testCantripAndNested(compiled);
+        testDispatchSharding();
         testOpcodeCoverage(compiled);
         testLazyClassConstants(compiled);
         testNativeEndToEnd();
@@ -237,12 +240,14 @@ public final class Vm3Test {
     private static Wire wire(Vm2Format.Program program, long marker, int blockCount,
                              boolean legacy) {
         int[] meta = new int[8];
-        meta[0] = Vm2Format.MAGIC;
         meta[1] = (int) marker;
         meta[2] = (int) (marker >>> 32);
         meta[4] = blockCount;
         meta[6] = program.flags | (1 << 16);
         meta[7] = (int) (marker >>> 17);
+        // The magic is derived from the other header words, so it cannot be used
+        // as a build fingerprint; it must be written after they are filled in.
+        meta[0] = Vm2Format.magicFor(meta);
         long stage = Vm2Format.metaKey(meta);
         Vm2Format.Encoded encoded = legacy
                 ? Vm2Format.serializeLegacy(program, stage)
@@ -583,6 +588,88 @@ public final class Vm3Test {
     // Native end-to-end: coverage gains, anti-dump positive/negative
     // ------------------------------------------------------------------
 
+    /**
+     * A single dispatch method grows by roughly thirteen bytes per payload (one
+     * {@code lookupswitch} case plus one {@code invokestatic}), so a wide program
+     * would exceed the 64 KiB JVM method limit around five thousand virtualized
+     * methods. With {@code vm2.dispatchShardSize=128} the payload table has to be
+     * split across generated classes while every payload id stays reachable.
+     */
+    private static void testDispatchSharding() throws Exception {
+        Path directory = Files.createTempDirectory("vm3-shard");
+        StringBuilder source = new StringBuilder("public final class ShardApp {\n");
+        StringBuilder body = new StringBuilder("        int total = 0;\n");
+        for (int i = 0; i < 200; i++) {
+            source.append("    static int m").append(i).append("(int v) { return v * ")
+                    .append(i + 3).append(" + ").append(i).append("; }\n");
+            body.append("        total += m").append(i).append("(3);\n");
+        }
+        source.append("    public static void main(String[] args) {\n")
+                .append(body)
+                .append("        System.out.println(\"SHARD-OK \" + total);\n")
+                .append("    }\n}\n");
+        Path sourceFile = directory.resolve("ShardApp.java");
+        Files.write(sourceFile, source.toString().getBytes(StandardCharsets.UTF_8));
+        Path classes = directory.resolve("classes");
+        Files.createDirectories(classes);
+        JavaCompiler javac = ToolProvider.getSystemJavaCompiler();
+        if (javac == null) {
+            throw new IllegalStateException("Vm3Test sharding fixture requires a JDK compiler");
+        }
+        int exit = javac.run(null, null, null, "-proc:none", "-d", classes.toString(),
+                sourceFile.toString());
+        check(exit == 0, "shard: wide fixture compiles");
+        Path input = directory.resolve("shard-in.jar");
+        Manifest manifest = new Manifest();
+        manifest.getMainAttributes().put(Attributes.Name.MANIFEST_VERSION, "1.0");
+        manifest.getMainAttributes().put(Attributes.Name.MAIN_CLASS, "ShardApp");
+        JarOutputStream jar = new JarOutputStream(Files.newOutputStream(input), manifest);
+        try {
+            Files.walk(classes).filter(Files::isRegularFile).sorted().forEach(path -> {
+                try {
+                    String name = classes.relativize(path).toString().replace('\\', '/');
+                    jar.putNextEntry(new JarEntry(name));
+                    jar.write(Files.readAllBytes(path));
+                    jar.closeEntry();
+                } catch (Exception error) {
+                    throw new IllegalStateException(error);
+                }
+            });
+        } finally {
+            jar.close();
+        }
+
+        Path output = directory.resolve("shard-out.jar");
+        Map<String, String> options = new LinkedHashMap<String, String>();
+        options.put("methodVirtualization.enabled", "true");
+        options.put("vm2.enabled", "true");
+        options.put("vm2.dispatchShardSize", "128");
+        options.put("flowObfuscation.enabled", "false");
+        options.put("exceptionObfuscation.enabled", "false");
+        options.put("antiLlm.enabled", "false");
+        options.put("noise.enabled", "false");
+        UmbraConfig.Builder builder = new UmbraConfig.Builder()
+                .input(input)
+                .output(output)
+                .seed(20240711L)
+                .methodVirtualization(new UmbraConfig.VirtualizationOptions(true, 4000, 0));
+        for (Map.Entry<String, String> entry : options.entrySet()) {
+            builder.option(entry.getKey(), entry.getValue());
+        }
+        EngineResult result = new UmbraEngine(new Log(null, false)).run(builder.build(),
+                ProgressListener.NONE);
+        Map<String, Long> stats = result.stats().snapshot();
+        long methods = stat(stats, "virtualization.methods");
+        long dispatchers = stat(stats, "virtualization.vm2.dispatchers");
+        check(methods > 128, "shard: fixture virtualizes beyond one shard (" + methods + ")");
+        long expected = (methods + 127) / 128;
+        check(dispatchers == expected,
+                "shard: " + methods + " payloads split into " + expected + " dispatchers (was "
+                        + dispatchers + ")");
+        check(dispatchers > 1, "shard: wide program uses more than one generated dispatcher");
+        String runOutput = runJar(output);
+        check(runOutput.contains("SHARD-OK"), "shard: sharded dispatcher runs the program");
+    }
     private static void testNativeEndToEnd() throws Exception {
         String compiler = NativeCompiler.resolve(GCC, new Log(null, false));
         if (compiler == null || !NativeCompiler.hasJniHeaders() || !isWindows()) {
@@ -862,7 +949,7 @@ public final class Vm3Test {
                 byte[] data = readAllBytes(in);
                 if (name.startsWith("umbra/native/") && name.endsWith(".dat")) {
                     data = dll;
-                } else if (name.startsWith("umbra/runtime/N") && name.endsWith(".class")) {
+                } else if (name.startsWith(RuntimeNames.path("N")) && name.endsWith(".class")) {
                     data = patchLoaderFingerprint(data, oldSha, newSha);
                 }
                 out.putNextEntry(new ZipEntry(name));
@@ -1180,6 +1267,17 @@ public final class Vm3Test {
                 if (insn instanceof MethodInsnNode) {
                     MethodInsnNode call = (MethodInsnNode) insn;
                     if ("([I[I[[I[Ljava/lang/Object;)Ljava/lang/Object;".equals(call.desc)) {
+                        return true;
+                    }
+                }
+                // Call sites are invokedynamic now: the bootstrap handle names the
+                // interpreter, which keeps the static call out of the body.
+                if (insn instanceof InvokeDynamicInsnNode) {
+                    InvokeDynamicInsnNode indy = (InvokeDynamicInsnNode) insn;
+                    if ("([Ljava/lang/Object;)Ljava/lang/Object;".equals(indy.desc)) {
+                        return true;
+                    }
+                    if (indy.bsm != null && RuntimeNames.isRuntime(indy.bsm.getOwner())) {
                         return true;
                     }
                 }

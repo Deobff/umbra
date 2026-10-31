@@ -1,0 +1,133 @@
+# command: "E:\MC\Umbra\plugins\.cache\maven\apache-maven-3.9.9\bin\mvn.cmd" -B -ntp -o clean package
+# cwd: E:\MC\Umbra\plugins\qa\maven-sample
+[INFO] Scanning for projects...
+[INFO] 
+[INFO] -------------------< com.example:umbra-maven-sample >-------------------
+[INFO] Building Umbra Maven sample 1.0.0
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- clean:3.2.0:clean (default-clean) @ umbra-maven-sample ---
+[INFO] Deleting E:\MC\Umbra\plugins\qa\maven-sample\target
+[INFO] 
+[INFO] --- resources:3.3.1:resources (default-resources) @ umbra-maven-sample ---
+[INFO] skip non existing resourceDirectory E:\MC\Umbra\plugins\qa\maven-sample\src\main\resources
+[INFO] 
+[INFO] --- compiler:3.13.0:compile (default-compile) @ umbra-maven-sample ---
+[INFO] Recompiling the module because of changed source code.
+[INFO] Compiling 2 source files with javac [debug target 1.8] to target\classes
+[INFO] 
+[INFO] --- resources:3.3.1:testResources (default-testResources) @ umbra-maven-sample ---
+[INFO] skip non existing resourceDirectory E:\MC\Umbra\plugins\qa\maven-sample\src\test\resources
+[INFO] 
+[INFO] --- compiler:3.13.0:testCompile (default-testCompile) @ umbra-maven-sample ---
+[INFO] No sources to compile
+[INFO] 
+[INFO] --- surefire:3.2.5:test (default-test) @ umbra-maven-sample ---
+[INFO] No tests to run.
+[INFO] 
+[INFO] --- jar:3.4.1:jar (default-jar) @ umbra-maven-sample ---
+[INFO] Building jar: E:\MC\Umbra\plugins\qa\maven-sample\target\umbra-maven-sample-1.0.0.jar
+[INFO] 
+[INFO] --- umbra:3.0.0:protect (umbra-protect) @ umbra-maven-sample ---
+[INFO] $ "C:\Program Files\Zulu\zulu-8\jre\bin\java.exe" -jar E:\MC\Umbra\plugins\qa\maven-sample\..\..\..\dist\umbra.jar -i E:\MC\Umbra\plugins\qa\maven-sample\target\umbra-maven-sample-1.0.0.jar -o E:\MC\Umbra\plugins\qa\maven-sample\target\umbra-maven-sample-1.0.0-obf.jar --preset balanced --seed 23303 --keep com.example.Main --set mba.enabled=true --verify
+[INFO] [  2%] Loading input E:\MC\Umbra\plugins\qa\maven-sample\target\umbra-maven-sample-1.0.0.jar
+[INFO] [INFO] layout: flat
+[INFO] [INFO] Loaded 2 classes and 3 resources from E:\MC\Umbra\plugins\qa\maven-sample\target\umbra-maven-sample-1.0.0.jar (flat layout)
+[INFO] [  8%] Building hierarchy
+[INFO] [  9%] Inspecting mod container
+[INFO] [ 10%] Running reflection-analysis
+[INFO] [INFO] Pass reflection-analysis started
+[INFO] [INFO] reflection-analysis: kept 0 classes and kept 0 member names from reflection call sites
+[INFO] [INFO] Pass reflection-analysis finished in 1 ms
+[INFO] [ 15%] Running field-initialization
+[INFO] [INFO] Pass field-initialization started
+[INFO] [INFO] field-initialization: moved 0 static constants into <clinit>
+[INFO] [INFO] Pass field-initialization finished in 0 ms
+[INFO] [ 17%] Running debug-info
+[INFO] [INFO] Pass debug-info started
+[INFO] [INFO] debug-info: cleaned 1 classes
+[INFO] [INFO] Pass debug-info finished in 1 ms
+[INFO] [ 20%] Running decompiler-noise
+[INFO] [INFO] Pass decompiler-noise started
+[INFO] [INFO] decompiler-noise: level=1, 1 classes, 19 attributes, 608 bytes
+[INFO] [INFO] Pass decompiler-noise finished in 6 ms
+[INFO] [ 22%] Running member-shuffle
+[INFO] [INFO] Pass member-shuffle started
+[INFO] [INFO] member-shuffle: shuffled 1 classes
+[INFO] [INFO] Pass member-shuffle finished in 0 ms
+[INFO] [ 30%] Running rename
+[INFO] [INFO] Pass rename started
+[INFO] [INFO] rename: mapping written to E:\MC\Umbra\plugins\qa\maven-sample\target\umbra-mapping.txt
+[INFO] [INFO] rename: 1 classes, 1 methods, 0 fields renamed
+[INFO] [INFO] Pass rename finished in 20 ms
+[INFO] [ 33%] Running anti-llm
+[INFO] [INFO] Pass anti-llm started
+[INFO] [INFO] anti-llm: 2 decoy methods, 1 guarded call sites, 1 wrapper layers across 1 classes
+[INFO] [INFO] Pass anti-llm finished in 2 ms
+[INFO] [ 43%] Running method-virtualization
+[INFO] [INFO] Pass method-virtualization started
+[INFO] [INFO] method-virtualization[vm2]: virtualized 4 methods (262 instructions, 0 handlers, 0 indy bridges, 0 constructor bodies, 4 fused instructions), 0 skipped
+[INFO] [INFO] Pass method-virtualization finished in 65 ms
+[INFO] [ 46%] Running string-encryption
+[INFO] [INFO] Pass string-encryption started
+[INFO] [INFO] string-encryption: encrypted 0 string constants (auto:auto[chacha20,aes-ctr,rc4,speck], split=true, cache=false, perClassKey=0 classes, indy=0 sites, minLength=2, wipe=true, stackTraceHide=true, payload=v3, size-skips=0/0)
+[INFO] [INFO] Pass string-encryption finished in 16 ms
+[INFO] [ 48%] Running integer-encryption
+[INFO] [INFO] Pass integer-encryption started
+[INFO] [INFO] integer-encryption: obfuscated 0 constants
+[INFO] [INFO] Pass integer-encryption finished in 8 ms
+[INFO] [ 51%] Running mba
+[INFO] [INFO] Pass mba started
+[INFO] [INFO] mba[depth=1]: rewrote 0 arithmetic expressions and 2 constants in 2 methods
+[INFO] [INFO] Pass mba finished in 6 ms
+[INFO] [ 53%] Running flow-obfuscation
+[INFO] [INFO] Pass flow-obfuscation started
+[INFO] [INFO] flow-obfuscation[light]: 5 methods across 1 classes, 5 predicates (0 range, 0 hash), 0 branches inverted, 0 dead blocks, 14 junk blocks, 0 transposed blocks, 0 bogus exception ranges (0 verification skips, 0 classes kept conservative)
+[INFO] [INFO] Pass flow-obfuscation finished in 137 ms
+[INFO] [ 56%] Running control-flow-flattening
+[INFO] [INFO] Pass control-flow-flattening started
+[INFO] [INFO] control-flow-flattening: flattened 5 methods (15 blocks, 0 with try/catch, 0 with switches); skipped {}
+[INFO] [INFO] Pass control-flow-flattening finished in 122 ms
+[INFO] [ 59%] Running exception-obfuscation
+[INFO] [INFO] Pass exception-obfuscation started
+[INFO] [INFO] exception-obfuscation[level=2]: wrapped 5 methods, 15 synthetic handlers, 10 dead throw paths, 0 fake handler entries (0 verification skips)
+[INFO] [INFO] Pass exception-obfuscation finished in 27 ms
+[INFO] [ 61%] Running junk-members
+[INFO] [INFO] Pass junk-members started
+[INFO] [INFO] junk-members: added 2 methods and 2 fields
+[INFO] [INFO] Pass junk-members finished in 1 ms
+[INFO] [ 69%] Running watermark
+[INFO] [INFO] Pass watermark started
+[INFO] [INFO] watermark: embedded in com/example/Main.umbra$ee3213 and manifest
+[INFO] [INFO] Pass watermark finished in 2 ms
+[INFO] [ 84%] Running resource-rewrite
+[INFO] [INFO] Pass resource-rewrite started
+[INFO] [INFO] resource-rewrite: updated 0 resource entries
+[INFO] [INFO] Pass resource-rewrite finished in 1 ms
+[INFO] [ 87%] Running class-encryption
+[INFO] [INFO] Pass class-encryption started
+[INFO] [INFO] class-encryption: registered archive post-processor (loader=umbra/runtime/LZmll19Fxjf, alg=chacha20, integrity=true/2, antiDump=true, resources=true, resourceIntegrity=true, minResourceSize=0, manifestMinimal=true, entry=com/example/Main#main, runtimeGuard=-, masterBinding=sample, index=v3)
+[INFO] [INFO] class-encryption: note: --verify links only the plaintext loader/helpers; encrypted classes and resources are verified by the loader at runtime
+[INFO] [INFO] Pass class-encryption finished in 379 ms
+[INFO] [ 92%] Writing E:\MC\Umbra\plugins\qa\maven-sample\target\umbra-maven-sample-1.0.0-obf.jar
+[INFO] [INFO] layout: wrote flat archive (25 classes, 0 multi-release variants, 0 module-info kept, 0 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] [ 98%] Post-processing class-encryption
+[INFO] [INFO] Post-processor class-encryption started
+[INFO] [INFO] class-encryption: encrypted 21 classes and 2 resources (2822 bytes), 0 plaintext resources kept, loader=umbra/runtime/LZmll19Fxjf, index=RXk753idLTqr1ElFg9, entries=29, masterBinding=sample(zip-comment+entry-count), level=2
+[INFO] [INFO] Post-processor class-encryption finished in 136 ms
+[INFO] [100%] Done
+[INFO] [INFO] Output written to E:\MC\Umbra\plugins\qa\maven-sample\target\umbra-maven-sample-1.0.0-obf.jar (25 classes, 3 resources, 1344 ms)
+[INFO] Umbra finished: 25 classes, 3 resources in 1344 ms
+[INFO] Verification: OK
+[INFO] Umbra protected jar: E:\MC\Umbra\plugins\qa\maven-sample\target\umbra-maven-sample-1.0.0-obf.jar (81908 bytes)
+[INFO] mapping: E:\MC\Umbra\plugins\qa\maven-sample\target\umbra-mapping.txt -> E:\MC\Umbra\plugins\qa\maven-sample\target\umbra\mapping.txt
+[INFO] Umbra mapping: E:\MC\Umbra\plugins\qa\maven-sample\target\umbra\mapping.txt
+[INFO] Umbra log: E:\MC\Umbra\plugins\qa\maven-sample\target\umbra\protect.log
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  8.692 s
+[INFO] Finished at: 2026-10-25T11:39:41+08:00
+[INFO] ------------------------------------------------------------------------
+

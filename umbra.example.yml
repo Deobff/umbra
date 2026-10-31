@@ -131,6 +131,9 @@ options:
   flow.aggressive: "true"
   flow.transpose: "true"
   flow.bogusRanges: "true"
+  # One-time program state: the entry carrier of every protected method advances
+  # on each call, so two identical calls do not take the same guard path.
+  otp.enabled: "false"                # on by default for balanced/maximum/aggressive
 
   mba.enabled: "true"
   mba.depth: "2"

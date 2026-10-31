@@ -18,11 +18,15 @@ import java.util.Random;
  *
  * <h3>Payload layout (one virtualized method)</h3>
  *
- * <p>The holder class exposes two static fields: {@code meta} ({@code int[8]})
- * and {@code blocks} ({@code int[][]}). {@code meta} describes the payload:</p>
+ * <p>The payload is spread over one holder class per block: each block holder
+ * keeps its {@code int[]} in a private static field behind a static accessor,
+ * and a separate meta holder exposes the {@code int[8]} header the same way.
+ * No class ever holds the assembled {@code int[][]} - the call site builds it
+ * from the accessors - so a reflective dump of one holder class yields only
+ * 1/N of the payload. {@code meta} describes the payload:</p>
  *
  * <pre>
- * meta[0]  magic (0x564D3202)
+ * meta[0]  magic (per payload, see {@link #magicFor})
  * meta[1]  low  half of the per-method key
  * meta[2]  high half of the per-method key
  * meta[3]  number of payload ints (blocks concatenated)
@@ -85,10 +89,6 @@ public final class Vm2Format {
     private Vm2Format() {
     }
 
-    /** Magic stored in the holder {@code meta} array. */
-    public static final int MAGIC = 0x564D3202;
-    /** Magic stored at the start of the serialized payload. */
-    public static final int PAYLOAD_MAGIC = 0x564D3203;
     /** Legacy format version of the serialized payload (3 = shared opcode map). */
     public static final int FORMAT = 3;
     /**
@@ -222,6 +222,29 @@ public final class Vm2Format {
             key = 0x51ED270B1F2A3C4DL;
         }
         return key;
+    }
+
+    /**
+     * Magic stored in the holder {@code meta} array ({@code meta[0]}). It is
+     * derived from key material the reader already needs, so every payload
+     * carries a different marker and no fixed literal exists in the build or in
+     * the injected interpreter that could serve as a fingerprint. The reader
+     * can recompute it because {@code meta[1]}, {@code meta[2]} and
+     * {@code meta[7]} are read before the check.
+     */
+    public static int magicFor(int[] meta) {
+        return (int) (metaKey(meta) >>> 32) ^ meta[7] ^ 0x2B;
+    }
+
+    /**
+     * Magic stored at the start of the serialized payload ({@code plain[0]}).
+     * Derived from the per-method key instead of a constant; both sides compute
+     * it from the value they already share.
+     */
+    public static int payloadMagic(long key) {
+        long mixed = key ^ (key >>> 32) ^ 0x2B;
+        mixed *= GOLDEN;
+        return (int) (mixed >>> 32) ^ (int) mixed;
     }
 
     /** Position-dependent operand mask applied to the serialized code stream. */
@@ -673,7 +696,7 @@ public final class Vm2Format {
 
     private static Encoded serialize(Program program, long key, int format, int[] opcodePositions) {
         IntList out = new IntList(program.code.length + program.constants.length * 3 + 64);
-        out.add(PAYLOAD_MAGIC);
+        out.add(payloadMagic(key));
         out.add(format);
         out.add(program.flags);
         out.add(program.code.length);

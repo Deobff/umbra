@@ -1,0 +1,8 @@
+﻿FlowTest: mba pass
+FlowTest: flow obfuscation
+FlowTest: flattening
+FlowTest: combined
+FlowTest: demo classes (flow + flatten only)
+FlowTest: determinism
+FlowTest: demo jar
+FlowTest: 260324 checks passed

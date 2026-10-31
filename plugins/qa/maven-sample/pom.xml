@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.example</groupId>
+    <artifactId>umbra-maven-sample</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+
+    <name>Umbra Maven sample</name>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.source>1.8</maven.compiler.source>
+        <maven.compiler.target>1.8</maven.compiler.target>
+        <!-- QA wires the in-repo tool jar; a real project points at its Umbra install. -->
+        <umbra.toolJar>${project.basedir}/../../../dist/umbra.jar</umbra.toolJar>
+        <umbra.preset>balanced</umbra.preset>
+    </properties>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.1</version>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <mainClass>com.example.Main</mainClass>
+                        </manifest>
+                    </archive>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>io.umbra</groupId>
+                <artifactId>umbra-maven-plugin</artifactId>
+                <version>3.0.0</version>
+                <executions>
+                    <execution>
+                        <id>umbra-protect</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>protect</goal>
+                        </goals>
+                        <configuration>
+                            <toolJar>${umbra.toolJar}</toolJar>
+                            <preset>${umbra.preset}</preset>
+                            <seed>23303</seed>
+                            <verify>true</verify>
+                            <keep>
+                                <keep>com.example.Main</keep>
+                            </keep>
+                            <options>
+                                <option>mba.enabled=true</option>
+                            </options>
+                            <mapping>${project.build.directory}/umbra/mapping.txt</mapping>
+                            <logFile>${project.build.directory}/umbra/protect.log</logFile>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

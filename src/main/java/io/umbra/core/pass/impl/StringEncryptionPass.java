@@ -36,6 +36,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import io.umbra.core.util.RuntimeNames;
 
 /**
  * Replaces string constants with encrypted payloads and a call to an injected
@@ -73,6 +74,11 @@ import java.util.Set;
  *       intermediate byte/char buffer.</li>
  *   <li>{@code string.stackTraceHide} replaces a decryption failure with a
  *       sanitized exception that has an empty stack trace.</li>
+ *   <li>{@code string.otpEngines} (with {@code otp.enabled}) stores two
+ *       ciphertexts of the same value under two different engines and lets the
+ *       one-time state's alternating carrier bit pick the decryption path on
+ *       every call; {@code string.otpMaxSites} caps how many sites per class get
+ *       the doubled payload.</li>
  * </ul>
  *
  * <p>Strings that are bootstrap arguments of an existing {@code invokedynamic}
@@ -118,6 +124,34 @@ public final class StringEncryptionPass implements Pass {
 
     /** Payload/key-schedule version produced by this pass (see UmbraStringCipher). */
     static final int PAYLOAD_VERSION = 3;
+
+    /** Descriptor of the dual-engine decryptor entry point (per-site convention). */
+    public static final String DUAL_PER_SITE_DESC = "([Ljava/lang/String;JIIII)Ljava/lang/String;";
+
+    /** Descriptor of the dual-engine decryptor entry point (per-class key convention). */
+    public static final String DUAL_PER_CLASS_DESC =
+            "([Ljava/lang/String;Ljava/lang/String;IIII)Ljava/lang/String;";
+
+    /** Default per-class cap of dual-ciphertext sites ({@code string.otpMaxSites}). */
+    static final int DEFAULT_OTP_MAX_SITES = 16;
+
+    /**
+     * Dual payloads below this length would double more bytes than they hide, so
+     * short literals keep a single ciphertext even when the option is on.
+     */
+    private static final int MIN_DUAL_LENGTH = 8;
+
+    /** Extra code charged per dual site while budgeting a method. */
+    private static final int DUAL_SITE_GROWTH = 24;
+
+    /**
+     * Strong engines tried for the second half when the configuration pins a
+     * single engine: a dual payload needs two different ciphers by definition.
+     */
+    private static final int[] STRONG_ENGINES = {
+            UmbraStringCipher.CHACHA20, UmbraStringCipher.AES_CTR,
+            UmbraStringCipher.RC4, UmbraStringCipher.SPECK
+    };
 
     @Override
     public String name() {
@@ -230,6 +264,10 @@ public final class StringEncryptionPass implements Pass {
         context.stats().add("strings.cache", options.cache ? 1 : 0);
         context.stats().add("strings.encryptAll", options.encryptAll ? 1 : 0);
         context.stats().add("strings.payloadVersion", PAYLOAD_VERSION);
+        // Dual-ciphertext slots (P0-2-c): sites carrying two engines and the number
+        // of distinct engine pairs those sites use.
+        context.stats().add("string.otp.sites", run.otpSites);
+        context.stats().add("string.otp.engines", run.otpPairs.size());
         if (options.unsupportedOptions > 0) {
             context.stats().add("strings.unsupportedOptions", options.unsupportedOptions);
         }
@@ -241,11 +279,17 @@ public final class StringEncryptionPass implements Pass {
         }
         context.log().info("string-encryption: encrypted %d string constants (%s, split=%s, cache=%s, "
                         + "perClassKey=%d classes, indy=%d sites, minLength=%d, wipe=%s, "
-                        + "stackTraceHide=%s, payload=v%d, size-skips=%d/%d)",
+                        + "stackTraceHide=%s, payload=v%d, size-skips=%d/%d, otp-slots=%d/%d)",
                 run.encrypted, run.describeEngines(), Boolean.valueOf(options.split),
                 Boolean.valueOf(options.cache), run.perClassClasses, run.indySites, options.minLength,
                 Boolean.valueOf(options.wipe), Boolean.valueOf(options.stackTraceHide),
-                Integer.valueOf(PAYLOAD_VERSION), run.methodSizeSkips, run.classLimitSkips);
+                Integer.valueOf(PAYLOAD_VERSION), run.methodSizeSkips, run.classLimitSkips,
+                Integer.valueOf(run.otpSites), Integer.valueOf(options.otpMaxSites));
+        if (run.dualLayoutFallbacks > 0) {
+            context.log().debug("string-encryption: %d dual slot(s) kept single-engine because the "
+                    + "two halves split into a different number of parts",
+                    run.dualLayoutFallbacks);
+        }
         if (run.methodSizeSkips > 0 || run.classLimitSkips > 0) {
             context.log().debug("string-encryption: left %d site(s) plaintext in methods close to the "
                     + "64KB code limit and %d site(s) in classes near the constant-pool limit",
@@ -271,14 +315,20 @@ public final class StringEncryptionPass implements Pass {
                             run.classLimitSkips++;
                             break;
                         }
-                        if (projectedBytes + perSiteGrowth > MAX_METHOD_CODE_BYTES) {
+                        // invokedynamic sites keep the packed single-engine
+                        // payload: the bootstrap descriptor is fixed, so the
+                        // selector overload is only emitted for helper calls.
+                        boolean dual = !indyAllowed && run.dualEligible(value);
+                        int growth = dual ? perSiteGrowth + DUAL_SITE_GROWTH : perSiteGrowth;
+                        if (projectedBytes + growth > MAX_METHOD_CODE_BYTES) {
                             run.methodSizeSkips++;
                             break;
                         }
-                        projectedBytes += perSiteGrowth;
+                        projectedBytes += growth;
                         int siteId = run.nextSiteId();
-                        Site site = encryptSite(run, value, node, siteId, perClass, classKey);
+                        Site site = encryptSite(run, value, node, siteId, perClass, classKey, dual);
                         run.countEngine(site.engine);
+                        run.countDual(site);
                         if (site.partCount > 1) {
                             run.splitSites++;
                         }
@@ -377,19 +427,37 @@ public final class StringEncryptionPass implements Pass {
                                        String classKeyField) {
         emitParts(out, site.parts);
         String decryptor = run.decryptor();
+        String entry = run.options.cache ? "e" : "d";
+        if (site.dual) {
+            // Dual payload: the selector is the one-time state's carrier, whose
+            // low bit strictly alternates, so the next call at this very site
+            // takes the other engine. The template never references the state
+            // class itself; the call site supplies the value.
+            if (site.perClass) {
+                out.add(new FieldInsnNode(Opcodes.GETSTATIC, node.name, classKeyField,
+                        CLASS_KEY_FIELD_DESC));
+            } else {
+                out.add(new LdcInsnNode(Long.valueOf(site.siteSeed)));
+            }
+            AsmUtil.pushInt(out, site.siteId);
+            AsmUtil.pushInt(out, site.engine);
+            AsmUtil.pushInt(out, site.engineB);
+            out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, run.otpClass(), "carrier", "()I", false));
+            out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, decryptor, entry,
+                    site.perClass ? DUAL_PER_CLASS_DESC : DUAL_PER_SITE_DESC, false));
+            return;
+        }
         if (site.perClass) {
             out.add(new FieldInsnNode(Opcodes.GETSTATIC, node.name, classKeyField, CLASS_KEY_FIELD_DESC));
             AsmUtil.pushInt(out, site.siteId);
             AsmUtil.pushInt(out, site.engine);
-            out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, decryptor,
-                    run.options.cache ? "e" : "d",
+            out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, decryptor, entry,
                     "([Ljava/lang/String;Ljava/lang/String;II)Ljava/lang/String;", false));
         } else {
             out.add(new LdcInsnNode(Long.valueOf(site.siteSeed)));
             AsmUtil.pushInt(out, site.siteId);
             AsmUtil.pushInt(out, site.engine);
-            out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, decryptor,
-                    run.options.cache ? "e" : "d",
+            out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, decryptor, entry,
                     "([Ljava/lang/String;JII)Ljava/lang/String;", false));
         }
     }
@@ -430,14 +498,17 @@ public final class StringEncryptionPass implements Pass {
                 clinit = findClinit(node);
                 projectedBytes = clinit == null ? 1 : estimateCodeBytes(clinit);
             }
-            if (projectedBytes + HELPER_SITE_GROWTH > MAX_METHOD_CODE_BYTES) {
+            boolean dual = run.dualEligible(value);
+            int growth = dual ? HELPER_SITE_GROWTH + DUAL_SITE_GROWTH : HELPER_SITE_GROWTH;
+            if (projectedBytes + growth > MAX_METHOD_CODE_BYTES) {
                 run.methodSizeSkips++;
                 continue;
             }
-            projectedBytes += HELPER_SITE_GROWTH;
+            projectedBytes += growth;
             int siteId = run.nextSiteId();
-            Site site = encryptSite(run, value, node, siteId, perClass, classKey);
+            Site site = encryptSite(run, value, node, siteId, perClass, classKey, dual);
             run.countEngine(site.engine);
+            run.countDual(site);
             if (site.partCount > 1) {
                 run.splitSites++;
             }
@@ -495,37 +566,82 @@ public final class StringEncryptionPass implements Pass {
         return true;
     }
 
-    /** Encrypts one call site and prepares its constant-pool payload. */
+    /**
+     * Encrypts one call site and prepares its constant-pool payload.
+     *
+     * <p>With {@code dualRequested} the value is encrypted twice under two
+     * different engines and the two part lists are concatenated (first half
+     * {@code engine}, second half {@code engineB}). Both halves are keyed with
+     * their own domain-separated site index ({@link UmbraStringCipher#dualSiteId}),
+     * so the two ciphertexts never share a keystream.</p>
+     */
     private static Site encryptSite(Run run, String value, ClassNode node, int siteId,
-                                    boolean perClass, byte[] classKey) {
+                                    boolean perClass, byte[] classKey, boolean dualRequested) {
         int engine = run.engineFor(node.name, siteId);
+        int second = -1;
+        if (dualRequested) {
+            // The xor engine takes its keystream from the per-site seed alone and
+            // cannot share the per-class calling convention, so a dual payload
+            // always pairs two strong engines.
+            if (engine == UmbraStringCipher.XOR) {
+                engine = run.strongEngine(UmbraStringCipher.XOR);
+            }
+            if (engine >= 0) {
+                second = run.strongEngine(engine);
+            }
+        }
         byte[] plain = value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
         long buildSeed = run.context.config().seed();
         long siteSeed = UmbraStringCipher.siteSeedV2(run.artifactSalt, buildSeed, node.name, siteId);
         byte[] ciphertext;
+        byte[] secondCiphertext = null;
         byte[] key = null;
         boolean temporaryKey = false;
         // The xor engine's keystream is seeded from the per-site seed, which a
         // per-class call site does not carry; those sites always use the
         // per-site calling convention even when per-class keys are enabled.
         boolean usePerClass = perClass && engine != UmbraStringCipher.XOR;
-        if (engine == UmbraStringCipher.XOR) {
-            ciphertext = UmbraStringCipher.transform(engine, plain, null, null, siteSeed);
-        } else if (usePerClass) {
-            byte[] nonce = UmbraStringCipher.classNonceV2(run.artifactSalt, classKey, siteId);
-            ciphertext = UmbraStringCipher.transform(engine, plain, classKey, nonce, siteSeed);
-            Cipher.wipe(nonce);
-        } else {
-            key = UmbraStringCipher.siteKeyV2(run.artifactSalt, siteSeed, siteId);
-            temporaryKey = true;
-            byte[] nonce = UmbraStringCipher.siteNonceV2(run.artifactSalt, siteSeed, siteId);
-            ciphertext = UmbraStringCipher.transform(engine, plain, key, nonce, siteSeed);
-            Cipher.wipe(nonce);
+        try {
+            if (engine == UmbraStringCipher.XOR) {
+                ciphertext = UmbraStringCipher.transform(engine, plain, null, null, siteSeed);
+            } else if (usePerClass) {
+                byte[] nonce = UmbraStringCipher.classNonceV2(run.artifactSalt, classKey, siteId);
+                ciphertext = UmbraStringCipher.transform(engine, plain, classKey, nonce, siteSeed);
+                Cipher.wipe(nonce);
+            } else {
+                key = UmbraStringCipher.siteKeyV2(run.artifactSalt, siteSeed, siteId);
+                temporaryKey = true;
+                byte[] nonce = UmbraStringCipher.siteNonceV2(run.artifactSalt, siteSeed, siteId);
+                ciphertext = UmbraStringCipher.transform(engine, plain, key, nonce, siteSeed);
+                Cipher.wipe(nonce);
+            }
+            if (second >= 0) {
+                secondCiphertext = encryptSecondHalf(run, second, plain, usePerClass, classKey,
+                        siteSeed, UmbraStringCipher.dualSiteId(siteId, 1));
+            }
+        } finally {
+            Arrays.fill(plain, (byte) 0);
         }
-        Arrays.fill(plain, (byte) 0);
         int partCount = run.options.split ? run.options.splitParts : 1;
-        String[] parts = splitParts(ciphertext, partCount);
-        Arrays.fill(ciphertext, (byte) 0);
+        String[] parts;
+        if (secondCiphertext != null) {
+            String[] first = splitParts(ciphertext, partCount);
+            String[] other = splitParts(secondCiphertext, partCount);
+            Arrays.fill(ciphertext, (byte) 0);
+            Arrays.fill(secondCiphertext, (byte) 0);
+            if (first.length == other.length) {
+                parts = concat(first, other);
+            } else {
+                // Uneven halves would make the runtime boundary ambiguous; keep
+                // the site single-engine instead of emitting a guessed layout.
+                run.dualLayoutFallbacks++;
+                parts = first;
+                second = -1;
+            }
+        } else {
+            parts = splitParts(ciphertext, partCount);
+            Arrays.fill(ciphertext, (byte) 0);
+        }
         StringBuilder packed = new StringBuilder();
         for (int i = 0; i < parts.length; i++) {
             if (i > 0) {
@@ -537,6 +653,8 @@ public final class StringEncryptionPass implements Pass {
         site.siteId = siteId;
         site.siteSeed = siteSeed;
         site.engine = engine;
+        site.engineB = second;
+        site.dual = second >= 0;
         site.perClass = usePerClass;
         site.parts = parts;
         site.partCount = parts.length;
@@ -544,6 +662,31 @@ public final class StringEncryptionPass implements Pass {
         site.key = key;
         site.temporaryKey = temporaryKey;
         return site;
+    }
+
+    /** Encrypts the second half of a dual payload with its own site index. */
+    private static byte[] encryptSecondHalf(Run run, int engine, byte[] plain, boolean usePerClass,
+                                            byte[] classKey, long siteSeed, int halfSiteId) {
+        if (usePerClass) {
+            byte[] nonce = UmbraStringCipher.classNonceV2(run.artifactSalt, classKey, halfSiteId);
+            byte[] out = UmbraStringCipher.transform(engine, plain, classKey, nonce, siteSeed);
+            Cipher.wipe(nonce);
+            return out;
+        }
+        byte[] key = UmbraStringCipher.siteKeyV2(run.artifactSalt, siteSeed, halfSiteId);
+        byte[] nonce = UmbraStringCipher.siteNonceV2(run.artifactSalt, siteSeed, halfSiteId);
+        byte[] out = UmbraStringCipher.transform(engine, plain, key, nonce, siteSeed);
+        Cipher.wipe(nonce);
+        Cipher.wipe(key);
+        return out;
+    }
+
+    /** Concatenates two part lists; the dual layout is "all of A, then all of B". */
+    private static String[] concat(String[] first, String[] second) {
+        String[] all = new String[first.length + second.length];
+        System.arraycopy(first, 0, all, 0, first.length);
+        System.arraycopy(second, 0, all, first.length, second.length);
+        return all;
     }
 
     /** Splits ciphertext into {@code count} Base64 parts. */
@@ -624,6 +767,8 @@ public final class StringEncryptionPass implements Pass {
         private boolean wipe;
         private boolean stackTraceHide;
         private boolean encryptAll;
+        private boolean otpEngines;
+        private int otpMaxSites;
         private boolean engineFallback;
         private int engineOrderIgnored;
         private int unsupportedOptions;
@@ -688,6 +833,13 @@ public final class StringEncryptionPass implements Pass {
             if (options.encryptAll) {
                 options.minLength = 1;
             }
+            // Dual-ciphertext slots (P0-2-c). The presets that enable the
+            // one-time state set this option; the pass still needs the OTP class
+            // to supply the selector, so the effective switch also requires
+            // otp.enabled (see Run#dualEnabled).
+            options.otpEngines = context.config().optionBool("string.otpEngines", false);
+            options.otpMaxSites = Math.max(0, Math.min(4096,
+                    context.config().optionInt("string.otpMaxSites", DEFAULT_OTP_MAX_SITES)));
             if (map.containsKey("string.splitParts")) {
                 options.splitParts = Math.max(1, Math.min(4,
                         context.config().optionInt("string.splitParts", options.splitParts)));
@@ -815,6 +967,9 @@ public final class StringEncryptionPass implements Pass {
         private int siteId;
         private long siteSeed;
         private int engine;
+        /** Second engine of a dual payload, {@code -1} for a single-engine site. */
+        private int engineB = -1;
+        private boolean dual;
         private boolean perClass;
         private String[] parts;
         private int partCount;
@@ -840,6 +995,12 @@ public final class StringEncryptionPass implements Pass {
         private int classSites;
         private int methodSizeSkips;
         private int classLimitSkips;
+        private final boolean dualEnabled;
+        private final Set<Long> otpPairs = new LinkedHashSet<Long>();
+        private int otpSites;
+        private int classDualSites;
+        private int dualLayoutFallbacks;
+        private String otpClass;
         private String crypto;
         private String decryptor;
         private String indyHelper;
@@ -848,6 +1009,14 @@ public final class StringEncryptionPass implements Pass {
             this.context = context;
             this.options = options;
             this.artifactSalt = resolveArtifactSalt(context);
+            // Dual payloads need the one-time state for the selector; without it
+            // the call sites keep the byte-compatible single-engine form.
+            this.dualEnabled = options.otpEngines
+                    && context.config().optionBool("otp.enabled", false);
+            if (options.otpEngines && !dualEnabled) {
+                context.log().debug("string-encryption: string.otpEngines needs otp.enabled; "
+                        + "keeping single-engine call sites");
+            }
         }
 
         /**
@@ -873,6 +1042,7 @@ public final class StringEncryptionPass implements Pass {
 
         void beginClass(String className) {
             classSites = 0;
+            classDualSites = 0;
             classSiteIds.clear();
             long seed = context.config().seed();
             long mixed = seed * 0x9E3779B97F4A7C15L
@@ -922,6 +1092,67 @@ public final class StringEncryptionPass implements Pass {
             }
         }
 
+        /**
+         * Whether this site gets the doubled payload: the feature must be on, the
+         * one-time state must be injected, the literal must be long enough for
+         * the doubling to pay off, and the per-class cap must not be exhausted.
+         */
+        boolean dualEligible(String value) {
+            if (!dualEnabled || value.length() < Math.max(options.minLength, MIN_DUAL_LENGTH)) {
+                return false;
+            }
+            return classDualSites < options.otpMaxSites;
+        }
+
+        /** Records a site that really carries two ciphertexts. */
+        void countDual(Site site) {
+            if (!site.dual) {
+                return;
+            }
+            otpSites++;
+            classDualSites++;
+            otpPairs.add(Long.valueOf((((long) site.engine) << 8) | site.engineB));
+        }
+
+        /**
+         * Deterministic second-engine choice for a dual payload. The configured
+         * rotation is preferred; when it pins a single engine (or only engines
+         * already excluded) the default strong order is used, because a dual
+         * payload needs two different ciphers by definition. Never returns
+         * {@link UmbraStringCipher#XOR} and never returns {@code exclude}.
+         */
+        int strongEngine(int exclude) {
+            List<Integer> candidates = new ArrayList<Integer>();
+            for (int i = 0; i < options.rotation.size(); i++) {
+                int candidate = options.rotation.get(i).intValue();
+                if (candidate != exclude && candidate != UmbraStringCipher.XOR) {
+                    candidates.add(Integer.valueOf(candidate));
+                }
+            }
+            if (candidates.isEmpty()) {
+                for (int i = 0; i < STRONG_ENGINES.length; i++) {
+                    if (STRONG_ENGINES[i] != exclude) {
+                        candidates.add(Integer.valueOf(STRONG_ENGINES[i]));
+                    }
+                }
+            }
+            if (candidates.isEmpty()) {
+                return -1;
+            }
+            if (classRandom == null) {
+                throw new IllegalStateException("engine requested before beginClass");
+            }
+            return candidates.get(classRandom.nextInt(candidates.size())).intValue();
+        }
+
+        /** Injected one-time state class, injected on first use and then cached. */
+        String otpClass() {
+            if (otpClass == null) {
+                otpClass = context.runtime().ensureOtp(context.classes(), context.config().seed());
+            }
+            return otpClass;
+        }
+
         int engineKinds() {
             int kinds = 0;
             for (int i = 0; i < engineCounts.length; i++) {
@@ -959,7 +1190,7 @@ public final class StringEncryptionPass implements Pass {
             if (decryptor == null) {
                 crypto = CryptoSupport.ensureCrypto(context.classes(), context.config().seed());
                 decryptor = CryptoSupport.randomName(context.classes(), context.config().seed(),
-                        "string-decryptor-v3", "umbra/runtime/S");
+                        "string-decryptor-v3", RuntimeNames.path("S"));
                 int flags = (options.wipe ? 1 : 0) | (options.stackTraceHide ? 2 : 0)
                         | (options.cache ? 4 : 0);
                 Map<String, String> replacements = new LinkedHashMap<String, String>();
@@ -977,7 +1208,7 @@ public final class StringEncryptionPass implements Pass {
                 Map<String, String> extra = new LinkedHashMap<String, String>();
                 extra.put("io/umbra/core/runtime/crypto/UmbraStringCipher", target);
                 indyHelper = CryptoSupport.randomName(context.classes(), context.config().seed(),
-                        "string-indy-bootstrap-v3", "umbra/runtime/I");
+                        "string-indy-bootstrap-v3", RuntimeNames.path("I"));
                 CryptoSupport.injectWithCrypto(context.classes(), UmbraStringIndy.class, indyHelper,
                         crypto, null, extra);
             }

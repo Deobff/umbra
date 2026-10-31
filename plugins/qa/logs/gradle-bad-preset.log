@@ -1,0 +1,113 @@
+# command: "C:\Users\Administrator\.gradle\wrapper\dists\gradle-8.14-bin\38aieal9i53h9rfe7vjup95b9\gradle-8.14\bin\gradle.bat" --no-daemon --offline umbraProtect -PumbraPreset=does-not-exist
+# cwd: E:\MC\Umbra\plugins\qa\gradle-sample
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.14/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+> Task :compileJava UP-TO-DATE
+> Task :processResources NO-SOURCE
+> Task :classes UP-TO-DATE
+> Task :jar UP-TO-DATE
+
+> Task :umbraProtect FAILED
+[umbra] $ "C:\Program Files\Zulu\zulu-8\jre\bin\java.exe" -jar E:\MC\Umbra\dist\umbra.jar -i E:\MC\Umbra\plugins\qa\gradle-sample\build\libs\umbra-gradle-sample-1.0.0.jar -o E:\MC\Umbra\plugins\qa\gradle-sample\build\umbra\umbra-gradle-sample-obf.jar --preset does-not-exist --seed 23303 --keep com.example.Main --set mba.enabled=true --verify
+[umbra] Configuration error: Unknown preset: does-not-exist (expected library, spring-boot, jackson, service-loader, micronaut, aggressive, light, balanced, maximum or nocturne)
+[umbra] Umbra 3.2.0 - Java bytecode obfuscator
+[umbra] 
+[umbra] Usage:
+[umbra]   java -jar umbra-all.jar -c <config.yml>
+[umbra]   java -jar umbra-all.jar -i <input.jar> -o <output.jar> [options]
+[umbra] 
+[umbra] Options:
+[umbra]   -c, --config <file>    YAML configuration
+[umbra]   -i, --input <jar>      input JAR
+[umbra]   -o, --output <jar>     output JAR
+[umbra]   --lib <path>           library JAR or directory (repeatable)
+[umbra]   --keep <pattern>       keep glob or @annotation (repeatable/comma-separated)
+[umbra]   --preset <name>        library|spring-boot|jackson|service-loader|micronaut|aggressive|light|balanced|maximum|nocturne
+[umbra]   --keep-public-api      keep public/protected classes completely
+[umbra]   --soft-keep-public-api keep public/protected names only (other transforms still run)
+[umbra]   --reflection-off       disable automatic reflection keep analysis
+[umbra]   --trim                 remove unused private members
+[umbra]   --parameter-obfuscation add unused parameters to private methods
+[umbra]   --rewrite-resources    rewrite class names in text resources
+[umbra]   --reference-obfuscation hide static calls behind invokedynamic
+[umbra]   --reference-virtual    hide virtual/interface calls behind invokedynamic
+[umbra]   --reference-fields     hide field access behind invokedynamic
+[umbra]   --reference-constructors hide new/constructor sequences behind factory methods
+[umbra]   --exception-obfuscation add synthetic catch-all exception handlers
+[umbra]   --virtualize           virtualize eligible method bodies (custom VM)
+[umbra]   --virtualize-max-instructions <n>  skip methods larger than n instructions
+[umbra]   --virtualize-max-methods <n>       cap virtualized methods per class (0 = unlimited)
+[umbra]   --anti-llm             enable anti-LLM countermeasures (decoys + wrapper walls)
+[umbra]   --anti-llm-decoys <n>  decoy methods injected per class
+[umbra]   --anti-llm-layers <n>  nested forwarding layers per wrapped method (0-4)
+[umbra]   --incremental <prev.jar> reuse unchanged classes from a previous output
+[umbra]   --incremental-metadata <file> incremental metadata path
+[umbra]   --anti-debug           add a startup debug-agent guard
+[umbra]   --auth-gate            inject the server-backed authorization gate
+[umbra]   --auth-server <url>    authorization server base URL (e.g. http://127.0.0.1:8090)
+[umbra]   --auth-software <id>   software id registered on the authorization server
+[umbra]   --auth-title <t>       authorization window title
+[umbra]   --auth-no-register     hide account registration in the gate window
+[umbra]   --auth-cache <file>    token cache file (default ~/.umbra-auth/<software>.token)
+[umbra]   --auth-timeout <ms>    HTTP connect/read timeout for the gate (default 5000)
+[umbra]   --auth-entry <class#method>  extra verification entry point (repeatable/comma-separated)
+[umbra]   --dictionary <chars>   identifier character dictionary
+[umbra]   --min-name-length <n>  minimum generated name length
+[umbra]   --input-mapping <file> reuse a previous mapping for stable builds
+[umbra]   --mapping <file>       write the name mapping to this file
+[umbra]   --report <html>        write an HTML audit report
+[umbra]   --report-json <json>   write a JSON audit report
+[umbra]   --inspect              inspect the input archive layout/compatibility and exit
+[umbra]   --inspect-json <file>  write the inspection report as JSON and exit
+[umbra]   --compat-report <json> write layout + run statistics JSON after the run
+[umbra]   --diff-mapping <old> <new>  print a mapping difference and exit
+[umbra]   --trace-watermark <jar>     print embedded Umbra watermark(s) and exit
+[umbra]   --license <file>       signed enterprise license
+[umbra]   --license-key <pem>    RSA public key for license verification
+[umbra]   --license-server <url> online license server for revocation/feature checks
+[umbra]   --require-license      exit with code 3 when the license is missing/invalid
+[umbra]   --require-feature <f>  require a license feature (repeatable): audit, policy, ...
+[umbra]   --seed <value>         deterministic seed
+[umbra]   --set, -D key=value    advanced option (repeatable); see docs/OPTIONS.md
+[umbra]   --dry-run              analyze only, do not write output
+[umbra]   --verify               load output classes to force JVM verification
+[umbra]   --fixed-time           write a fixed ZIP timestamp (reproducible builds)
+[umbra]   --allow-in-place       allow output to overwrite the input JAR (destructive; default rejects)
+[umbra]   --no-rename            disable renaming
+[umbra]   --no-string            disable string encryption
+[umbra]   --no-integer           disable integer constant encryption
+[umbra]   --flatten              enable state-machine control-flow flattening
+[umbra]   --no-flow              disable control-flow obfuscation
+[umbra]   --no-shuffle           disable member shuffling
+[umbra]   --no-junk              disable junk members
+[umbra]   --no-watermark         disable watermark
+[umbra]   -v, --verbose          verbose logging
+[umbra]   -q, --quiet            only warnings and errors
+[umbra]   -h, --help             show this help
+[umbra]   --version              print version
+[umbra] 
+[umbra] Run without arguments (or with --gui) to start the graphical interface.
+
+[Incubating] Problems report is available at: file:///E:/MC/Umbra/plugins/qa/gradle-sample/build/reports/problems/problems-report.html
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':umbraProtect'.
+> Umbra failed with exit code 1 (configuration or transform failure). Full log: E:\MC\Umbra\plugins\qa\gradle-sample\build\umbra\protect.log Last output:   --no-integer           disable integer constant encryption |   --flatten              enable state-machine control-flow flattening |   --no-flow              disable control-flow obfuscation |   --no-shuffle           disable member shuffling |   --no-junk              disable junk members |   --no-watermark         disable watermark |   -v, --verbose          verbose logging |   -q, --quiet            only warnings and errors |   -h, --help             show this help |   --version              print version |  | Run without arguments (or with --gui) to start the graphical interface.
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights.
+> Get more help at https://help.gradle.org.
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 9.0.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/8.14/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD FAILED in 29s
+3 actionable tasks: 1 executed, 2 up-to-date
+

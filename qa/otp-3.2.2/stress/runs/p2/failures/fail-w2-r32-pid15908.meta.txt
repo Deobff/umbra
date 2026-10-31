@@ -1,0 +1,16 @@
+# Umbra stress failure sample
+label        : p2
+jar          : E:\MC\Umbra\qa\otp-3.2.2\final-maximum.jar
+java         : C:\Program Files\Zulu\zulu-8\bin\java.exe
+javaArgs     : 
+worker/round : 2/32
+pid          : 15908
+exit         : 
+timedOut     : False
+elapsed_s    : 7.143
+started      : 2026-10-31T14:58:12.8334433+08:00
+host         : BF-202508101239
+cores        : 8
+classes      : i, l, sun.reflect.NativeMethodAccessorImpl, sun.reflect.DelegatingMethodAccessorImpl, java.lang.reflect.Method, r4muVp1vVGET34c, r4muV77975f3db5408365, r4muV9bdeb841e11a11f4, r4muVb09170647f3abe07, r4muV2748bb4e7542350f, r4muLGBpEfmaWEH, r4muLVdWnz4wphG
+stdout bytes : 0
+stderr bytes : 3100

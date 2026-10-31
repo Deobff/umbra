@@ -1,0 +1,5 @@
+Manifest-Version: 1.0
+Premain-Class: AttachProbe
+Agent-Class: AttachProbe
+Can-Retransform-Classes: true
+

@@ -46,6 +46,18 @@ public final class GuardOptions {
     public static final int DETECT_HANDLE_DUMP = 1 << 22;
     public static final int DETECT_CODE_SAMPLE = 1 << 23;
     public static final int DETECT_LINUX = 1 << 24;
+    // Umbra 3.3 native memory protection (PhantomShield port).
+    /** Guard code-section CRC readback mismatch (inline patch after startup). */
+    public static final int DETECT_CODE_CRC = 1 << 25;
+    /** Guard data-page protection tampering (PAGE_NOACCESS/PAGE_GUARD rotation). */
+    public static final int DETECT_PAGE_GUARD = 1 << 26;
+
+    /**
+     * Default {@code antiDebug.execWhitelist}: JVM/AWT modules whose executable
+     * mappings are not evidence of manual mapping. {@code javafx*} covers the
+     * per-platform JavaFX native libraries.
+     */
+    public static final String DEFAULT_EXEC_WHITELIST = "jvm.dll,java.dll,javafx*,awt.dll";
 
     private static final String[] DEBUG_OPTION_MARKERS = {
             "jdwp", "xrunjdwp", "dt_socket", "dt_shmem", "agentlib:jdwp"
@@ -187,6 +199,57 @@ public final class GuardOptions {
 
     public static long fnv1a64(byte[] data) {
         return fnv1a64(data, 0, data == null ? 0 : data.length);
+    }
+
+    /**
+     * FNV-1a 32-bit digest of an ASCII name, shared with the generated native
+     * resolver: the guard decrypts an API name into a stack buffer and only calls
+     * {@code GetProcAddress} when its hash matches this build-time constant, so a
+     * patched literal cannot be redirected to another export.
+     */
+    public static int fnv1a32(String text) {
+        int hash = 0x811C9DC5;
+        for (int i = 0; i < text.length(); i++) {
+            hash ^= text.charAt(i) & 0xFF;
+            hash *= 0x01000193;
+        }
+        return hash;
+    }
+
+    /** {@link #fnv1a32(String)} formatted as the C constant emitted into the guard. */
+    public static String fnv1a32Hex(String text) {
+        return "0x" + hex(fnv1a32(text) & 0xFFFFFFFFL, 8) + "UL";
+    }
+
+    /**
+     * Canonical {@code antiDebug.execWhitelist} value: the configured list or the
+     * conservative JVM/AWT default when it is blank.
+     */
+    public static String execWhitelist(String configured) {
+        String value = configured == null ? "" : configured.trim();
+        return value.isEmpty() ? DEFAULT_EXEC_WHITELIST : value;
+    }
+
+    /**
+     * Case-insensitive match of a module name or path against a comma-separated
+     * whitelist. A token ending in {@code *} matches on its prefix, every other
+     * token on a substring; blank tokens are ignored.
+     */
+    public static boolean execWhitelistMatches(String whitelist, String moduleName) {
+        if (whitelist == null || moduleName == null) {
+            return false;
+        }
+        String name = moduleName.toLowerCase(Locale.ROOT);
+        for (String token : whitelist.split(",")) {
+            String value = token.trim().toLowerCase(Locale.ROOT);
+            if (value.endsWith("*")) {
+                value = value.substring(0, value.length() - 1);
+            }
+            if (!value.isEmpty() && name.indexOf(value) >= 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public static String hex(long value, int digits) {

@@ -1,0 +1,6 @@
+# command: "C:\Program Files\Zulu\zulu-8\bin\java.exe" -version
+# cwd: E:\MC\Umbra\plugins
+openjdk version "1.8.0_502"
+OpenJDK Runtime Environment (Zulu 8.96.0.19-CA-win64) (build 1.8.0_502-b07)
+OpenJDK 64-Bit Server VM (Zulu 8.96.0.19-CA-win64) (build 25.502-b07, mixed mode)
+

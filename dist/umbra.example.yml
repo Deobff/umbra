@@ -1,0 +1,204 @@
+# Umbra 3.0 example configuration
+#
+#   java -jar dist/umbra.jar -c umbra.example.yml
+#
+# Every section is optional; the values below are the "maximum protection"
+# preset. Paths are resolved relative to the current working directory.
+
+input: "app.jar"
+output: "app-obf.jar"
+keep:
+  - "com.example.Main"
+  - "@io.umbra.annotations.Keep"
+seed: 23303
+preserveTimestamps: true
+keepPublicApi: false
+softKeepPublicApi: false
+
+renamer:
+  enabled: true
+  prefix: ""
+  repackage: true
+  repackagePackage: "*"
+  renameClasses: true
+  renameMethods: true
+  renameFields: true
+  mappingFile: "umbra-mapping.txt"
+  dictionary: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+  minimumNameLength: 1
+
+stringEncryption:
+  enabled: true
+  minLength: 2
+
+integerEncryption:
+  enabled: true
+  includeLong: true
+
+flowObfuscation:
+  enabled: true
+  level: "normal"          # light | normal | aggressive
+  maxInstructions: 8000
+  flattening: true
+  flatteningExclude: []
+
+exceptionObfuscation:
+  enabled: true
+
+methodVirtualization:
+  enabled: true
+  maxInstructions: 4000
+  maxMethods: 0
+
+antiLlm:
+  enabled: true
+  decoyMethodsPerClass: 2
+  decoyCallSitesPerClass: 2
+  wrapperLayers: 1
+  maxWrappedMethodsPerClass: 12
+  shieldVirtualization: true
+
+debugInfo:
+  enabled: true
+  removeSourceFile: true
+  removeLineNumbers: true
+  removeLocalVariables: true
+  removeSignatures: true
+  removeInnerClasses: false
+  removeKotlin: true
+
+memberShuffle:
+  enabled: true
+
+junkMembers:
+  enabled: true
+  methods: 4
+  fields: 4
+
+reflection:
+  enabled: true
+  rewriteClassStrings: true
+
+trim:
+  enabled: false
+
+watermark:
+  enabled: true
+  id: "umbra"
+
+mapping:
+  enabled: true
+  file: "umbra-mapping.txt"
+
+report:
+  enabled: true
+  htmlFile: "umbra-report.html"
+  jsonFile: "umbra-report.json"
+
+protection:
+  antiDebug: true
+
+# Advanced options shared by the newer protection modules.
+# See docs/OPTIONS.md for the full list and meanings.
+options:
+  # Archive layout compatibility (Spring Boot fat JAR/WAR, multi-release, JPMS).
+  # Class encryption/integrity/native-guard launchers auto-skip on nested
+  # layouts with a warning; keep them for flat JARs.
+  layout.enabled: "true"
+  layout.springBoot: "true"
+  layout.war: "true"
+  layout.multiRelease: "preserve"     # preserve | flatten
+  layout.moduleInfo: "auto"           # auto | keep | drop
+
+  string.strength: "3"
+  string.engine: "auto"               # auto | xor | rc4 | chacha20 | aes-ctr | speck
+  string.engineOrder: "chacha20,aes-ctr,rc4,speck"
+  string.algorithm: "chacha20"
+  string.perClassKey: "true"
+  string.split: "true"
+  string.cache: "true"
+  string.stackTraceHide: "true"
+  string.wipe: "true"
+  string.encryptAll: "false"
+
+  typeConfusion.enabled: "true"
+  typeConfusion.level: "1"            # 1 = call ABI, 2 = + private static fields
+  typeConfusion.maxPerMethod: "24"
+
+  reflectionGate.enabled: "false"     # opt-in: changes reflection semantics
+  reflectionGate.action: "deny"       # deny | mask
+
+  flow.aggressive: "true"
+  flow.transpose: "true"
+  flow.bogusRanges: "true"
+  # One-time program state: the entry carrier of every protected method advances
+  # on each call, so two identical calls do not take the same guard path.
+  otp.enabled: "false"                # on by default for balanced/maximum/aggressive
+
+  mba.enabled: "true"
+  mba.depth: "2"
+  mba.ints: "true"
+  mba.maxPerMethod: "400"
+
+  vm2.enabled: "true"
+  vm2.encryptPayload: "true"
+  vm2.opcodeMap: "true"
+  vm2.fusion: "true"                  # superinstruction fusion
+  vm2.trys: "true"
+  vm2.nested: "true"
+  vm2.maxInstructions: "4000"
+
+  native.enabled: "false"
+  native.compiler: ""
+  native.maxInstructions: "800"
+  native.maxMethodsPerClass: "0"
+  native.keepDll: "false"
+  native.atomic: "true"
+  native.antiDump: "true"
+  native.antiBackfill: "true"
+
+  classEncryption.enabled: "true"
+  classEncryption.algorithm: "chacha20"
+  classEncryption.integrity: "true"
+  classEncryption.antiDump: "true"
+
+  integrity.enabled: "true"
+  integrity.level: "2"
+  integrity.antiDump: "true"
+
+  antiDebug.level: "2"
+  antiDebug.thread: "true"
+  antiDebug.jvmti: "true"
+  antiDebug.attach: "true"
+
+  # Minecraft mod containers: auto-detected from fabric.mod.json,
+  # META-INF/mods.toml, META-INF/neoforge.mods.toml, mcmod.info, mixin configs
+  # and access wideners. Adaptation keeps entry/@Mod/Mixin/target classes and
+  # turns off class encryption, native code, resources and VM by default.
+  minecraft.enabled: "true"
+  minecraft.forceVmp: "false"
+  minecraft.allowConflicts: "false"
+
+  # Original exclusive body engine (see docs/NOCTURNE.md). When enabled the
+  # engine disables flow/flattening/exception/MBA/VM/native/reference/anti-LLM.
+  nocturne.enabled: "false"
+  nocturne.variants: "3"
+  nocturne.maxInstructions: "4000"
+
+  # Metadata hardening and native anti-Frida/anti-debug guard
+  decompilerNoise.enabled: "true"
+  decompilerNoise.level: "1"
+  antiDebug.nativeGuard: "true"
+  antiDebug.frida: "true"
+  antiDebug.nativeHash: "true"
+  antiDebug.watchdogMs: "4000"
+  antiDebug.action: "throw"
+
+  # Encrypt non-class resources inside the encrypted archive
+  classEncryption.resources: "true"
+  classEncryption.resourceIntegrity: "true"
+  classEncryption.manifestMinimal: "true"
+
+  # VM2 coverage
+  vm2.indy: "true"
+  vm2.constructors: "false"

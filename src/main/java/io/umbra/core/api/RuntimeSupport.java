@@ -39,6 +39,24 @@ public interface RuntimeSupport {
     String ensureVirtualMachine(ClassPool pool, long seed);
 
     /**
+     * Ensures the one-time-program state class exists in the pool.
+     *
+     * <p>The generated class exposes {@code public static long next()} and
+     * {@code public static int carrier()}. {@code FlowObfuscationPass} calls the
+     * carrier at the entry of every protected method, so the state advances once
+     * per protected call and the guards resolve differently on every invocation
+     * with identical arguments.</p>
+     *
+     * @param pool program pool
+     * @param seed deterministic seed
+     * @return internal name of the state class, or {@code null} when the runtime
+     *         support does not provide one
+     */
+    default String ensureOtp(ClassPool pool, long seed) {
+        return null;
+    }
+
+    /**
      * Ensures the server-backed authorization gate class exists in the pool.
      *
      * <p>The generated gate exposes {@code public static void guard()}; the

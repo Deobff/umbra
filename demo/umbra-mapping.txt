@@ -1,0 +1,135 @@
+# Umbra mapping file
+# class and member descriptors are JVM descriptors
+
+demo/ArraySuite -> demo/a:
+
+demo/BaseShape -> demo/b:
+    id:I -> b
+    id()I -> a
+
+demo/Checks -> demo/c:
+    performed:I -> k
+    check(ZLjava/lang/String;)V -> c
+    count()I -> f
+    eq(DDDLjava/lang/String;)V -> j
+    eq(IILjava/lang/String;)V -> e
+    eq(JJLjava/lang/String;)V -> h
+    eq(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V -> g
+    eq(ZZLjava/lang/String;)V -> i
+    notNull(Ljava/lang/Object;Ljava/lang/String;)V -> d
+
+demo/Circle -> demo/d:
+    radius:D -> m
+    radius()D -> l
+
+demo/Color -> demo/e:
+    weight:I -> o
+    weight()I -> n
+
+demo/DemoException -> demo/f:
+    CODE_CHECK:I -> q
+    CODE_RANGE:I -> s
+    CODE_STATE:I -> t
+    code:I -> r
+    code()I -> p
+
+demo/ExceptionSuite -> demo/g:
+    divide(II)I -> u
+    safeParse(Ljava/lang/String;)I -> v
+
+demo/ExceptionSuite$Tracker -> demo/g$u:
+    closed:Z -> y
+    name:Ljava/lang/String; -> x
+    uses:I -> z
+    use()V -> w
+
+demo/FlowSuite -> demo/h:
+    sideEffects:I -> H
+    bump()Z -> B
+    charClass(C)Ljava/lang/String; -> A
+    clamp(III)I -> G
+    collatzSteps(I)I -> D
+    dayName(I)Ljava/lang/String; -> E
+    temperature(Ldemo/Color;)Ljava/lang/String; -> C
+    wordRank(Ljava/lang/String;)I -> F
+
+demo/FlowSuite$1 -> demo/h$1:
+    $SwitchMap$demo$Color:[I -> I
+
+demo/FunctionalSuite -> demo/i:
+    lambda$run$0(I)I -> Q
+    lambda$run$1(Ljava/lang/Integer;Ljava/lang/Integer;)Ljava/lang/Integer; -> M
+    lambda$run$2(Ljava/lang/String;)Z -> L
+    lambda$run$3([I)V -> P
+    lambda$run$4(II)I -> J
+    lambda$run$5(I)Z -> K
+    lambda$run$6(I)I -> N
+    lambda$run$7(Ljava/lang/String;)Z -> O
+
+demo/Inventory -> demo/j:
+    MAX_SLOTS:I -> a0
+    STORE_NAME:Ljava/lang/String; -> a2
+    instances:I -> a1
+    owner:Ljava/lang/String; -> Z
+    stock:Ljava/util/Map; -> Y
+    add(Ljava/lang/String;I)V -> X
+    count(Ljava/lang/String;)I -> T
+    instances()I -> V
+    items()Ljava/lang/String; -> S
+    owner()Ljava/lang/String; -> W
+    take(Ljava/lang/String;I)I -> U
+    total()I -> R
+
+demo/InventorySuite -> demo/k:
+
+demo/Main -> demo/l:
+
+demo/MathSuite -> demo/m:
+    DOUBLE_MAGIC:D -> a8
+    INT_MAGIC:I -> a9
+    LONG_MAGIC:J -> a7
+    factorial(I)J -> a3
+    fibonacci(I)J -> a5
+    gcd(II)I -> a6
+    power(II)I -> a4
+
+demo/Rectangle -> demo/n:
+    height:D -> bd
+    width:D -> bc
+    height()D -> bb
+    width()D -> ba
+
+demo/ResourceSuite -> demo/o:
+    RESOURCE:Ljava/lang/String; -> be
+
+demo/Shape -> demo/p:
+
+demo/ShapeSuite -> demo/q:
+
+demo/Square -> demo/r:
+
+demo/StringSuite -> demo/s:
+    ACCENTED:Ljava/lang/String; -> bj
+    EMOJI:Ljava/lang/String; -> bk
+    GREEK:Ljava/lang/String; -> bi
+    HELLO:Ljava/lang/String; -> bh
+    SENTENCE:Ljava/lang/String; -> bf
+    SENTINEL:Ljava/lang/String; -> bl
+    UNICODE:Ljava/lang/String; -> bg
+
+demo/WorkerSuite -> demo/t:
+    lambda$run$0([I)V -> bm
+
+demo/WorkerSuite$1 -> demo/t$1:
+    val$counter:Ldemo/WorkerSuite$Counter; -> bn
+    val$offset:I -> bo
+
+demo/WorkerSuite$2 -> demo/t$2:
+    val$limit:J -> bq
+    call()Ljava/lang/Long; -> bp
+
+demo/WorkerSuite$Counter -> demo/t$v:
+    value:J -> bt
+    add(J)V -> br
+    get()J -> bs
+

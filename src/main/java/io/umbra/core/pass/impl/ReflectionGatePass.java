@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
+import io.umbra.core.util.RuntimeNames;
 
 /**
  * Opt-in reflection gate (KBox {@code reflectionGate} parity).
@@ -180,7 +181,7 @@ public final class ReflectionGatePass implements Pass {
     private static String injectSeal(PassContext context, List<String> sealed, Options options,
                                      int key) {
         String name = CryptoSupport.randomName(context.classes(), context.config().seed(),
-                "reflection-gate-seal", "umbra/runtime/R");
+                "reflection-gate-seal", RuntimeNames.path("R"));
         ClassNode template = TemplateInjector.read(UmbraReflectionSeal.class);
         ClassNode remapped = new ClassNode();
         template.accept(new ClassRemapper(remapped, new SimpleRemapper(template.name, name)));
@@ -193,6 +194,9 @@ public final class ReflectionGatePass implements Pass {
         replacements.put(DENY_SPEC, options.deny ? "1" : "0");
         replacements.put(HIDDEN_SPEC, String.valueOf(key));
         CryptoSupport.replaceConstants(remapped, replacements);
+        // The seal is an injected runtime template: its SourceFile attribute would
+        // otherwise publish "UmbraReflectionSeal.java" in the constant pool.
+        TemplateInjector.stripDebugInfo(remapped);
         context.classes().addGenerated(remapped);
         context.log().debug("reflection-gate: injected seal %s (template %s)", name, SEAL_REFERENCE);
         return name;

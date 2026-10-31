@@ -1,5 +1,6 @@
 package io.umbra.core.engine;
 
+
 import io.umbra.core.api.Pass;
 import io.umbra.core.api.PassContext;
 import io.umbra.core.api.OutputPostProcessor;
@@ -53,6 +54,7 @@ import io.umbra.core.rules.DefaultRuleSet;
 import io.umbra.core.rules.RuleSet;
 import io.umbra.core.runtime.DefaultRuntimeSupport;
 import io.umbra.core.util.AsmUtil;
+import io.umbra.core.util.DomainTags;
 import io.umbra.core.util.Jars;
 import io.umbra.core.util.Log;
 import org.objectweb.asm.tree.ClassNode;
@@ -70,6 +72,7 @@ import java.util.Map;
 import java.util.Random;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
+import io.umbra.core.util.RuntimeNames;
 
 /** Orchestrates loading, transforming and writing a program. */
 public final class UmbraEngine {
@@ -100,6 +103,13 @@ public final class UmbraEngine {
                 layout == null ? "flat" : layout.describe());
 
         listener.onProgress(8, "Building hierarchy");
+        // The generated runtime helpers must not carry the vendor name; the
+        // package comes from runtime.package (default: derived from the seed).
+        RuntimeNames.configure(config, pool);
+        if (!RuntimeNames.DEFAULT.equals(RuntimeNames.base())) {
+            log.info("runtime helpers live in %s (runtime.package=pinned or seed-derived)",
+                    RuntimeNames.base());
+        }
         Hierarchy hierarchy = new Hierarchy();
         for (ClassNode node : pool.classes().values()) {
             hierarchy.addInput(node);
@@ -210,12 +220,24 @@ public final class UmbraEngine {
         for (String rule : minecraft.keepRules()) {
             rules.addKeepRule(rule);
         }
+        // The Eclipse jar-in-jar loader stays completely untouched: its
+        // createURLStreamHandler is reached from javax.crypto's own <clinit>, so
+        // any injected decryption there deadlocks JceSecurity.
+        if (isEclipseRunnableJar(pool)) {
+            rules.addKeepRule("org.eclipse.jdt.internal.jarinjarloader.**");
+            rules.addBodySkipGlob("org.eclipse.jdt.internal.jarinjarloader.**");
+            log.info("layout: Eclipse loader kept verbatim (names and bodies)");
+        }
         for (String rule : minecraft.softKeepRules()) {
             rules.addKeepRule(rule);
         }
         for (String glob : minecraft.bodySkipGlobs()) {
             rules.addBodySkipGlob(glob);
         }
+        // Per-build KDF domain separators: the build side (Cipher and the runtime
+        // templates the passes call directly) must agree with every injected copy, so
+        // this runs once before any pass (see DomainTags).
+        DomainTags.install(config.seed());
         RuntimeSupport runtime = new DefaultRuntimeSupport();
         MappingSet mappings = new MappingSet();
         Random random = new Random(config.seed());
@@ -513,5 +535,43 @@ public final class UmbraEngine {
             hierarchy.addLibraryJar(path);
             log.info("Loaded library %s", path);
         }
+    }
+    /**
+     * Freezes the Eclipse jar-in-jar loader when the archive is an Eclipse
+     * "Runnable JAR".
+     *
+     * <p>That loader's {@code createURLStreamHandler} is invoked from
+     * {@code java.net.URL} construction, which the JDK itself performs while
+     * initializing {@code javax.crypto.JceSecurity}. Instrumenting it re-enters
+     * the injected string decryptor before crypto is ready ("AES-256-CTR
+     * unavailable"), so the loader package is frozen and never transformed.</p>
+     */
+    private static void freezeEclipseLoader(ClassPool pool, Log log) {
+        ClassPool.Resource manifest = pool.resource("META-INF/MANIFEST.MF");
+        if (manifest == null) {
+            return;
+        }
+        java.util.Map<String, String> attributes =
+                io.umbra.core.util.Jars.parseManifest(manifest.bytes());
+        if (attributes.get("Rsrc-Main-Class") == null) {
+            return;
+        }
+        int frozen = 0;
+        for (String name : new java.util.ArrayList<String>(pool.classes().keySet())) {
+            if (name.startsWith("org/eclipse/jdt/internal/jarinjarloader/")) {
+                pool.freeze(name);
+                frozen++;
+            }
+        }
+        log.info("layout: Eclipse runnable jar detected, %d loader class(es) frozen", frozen);
+        log.info("layout: archive sealing is skipped for this layout (loader needs plain classes)");
+    }
+    /** True when the archive is an Eclipse "Runnable JAR" (JarRsrcLoader layout). */
+    private static boolean isEclipseRunnableJar(ClassPool pool) {
+        ClassPool.Resource manifest = pool.resource("META-INF/MANIFEST.MF");
+        if (manifest == null) {
+            return false;
+        }
+        return io.umbra.core.util.Jars.parseManifest(manifest.bytes()).get("Rsrc-Main-Class") != null;
     }
 }

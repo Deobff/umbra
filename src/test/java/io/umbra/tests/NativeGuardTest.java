@@ -37,6 +37,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
+import io.umbra.core.util.RuntimeNames;
 
 /**
  * Plain-main tests for the native anti-debug / anti-Frida guard.
@@ -193,8 +194,14 @@ public final class NativeGuardTest {
                 "guard C has no plaintext Java_* JNI exports");
         check(first.contains("umbra_fn_table") && first.contains("umbra_sample_table"),
                 "guard C has magic-located function/sample tables");
-        check(first.contains("NtQueryInformationProcess"), "guard C checks the debug port");
-        check(first.contains("frida"), "guard C has Frida checks");
+        check(first.contains(GuardOptions.fnv1a32Hex("NtQueryInformationProcess")),
+                "guard C resolves the debug-port API by FNV hash");
+        check(!first.contains("\"NtQueryInformationProcess\""),
+                "guard C carries no plaintext NtQueryInformationProcess name");
+        check(first.contains("umbra_unseal(") && first.contains("umbra_lit_"),
+                "guard C decodes its detection markers from sealed byte arrays");
+        check(!first.contains("\"frida\""), "guard C carries no plaintext frida marker");
+        check(!first.contains("/proc/self/maps"), "guard C carries no plaintext /proc/self/maps");
         check(first.contains("ProcessDebugObjectHandle") == false
                         || first.contains("ProcessDebugObjectHandle") || true,
                 "debug object check is present");
@@ -466,11 +473,30 @@ public final class NativeGuardTest {
                 while (first != null && first.getOpcode() < 0) {
                     first = first.getNext();
                 }
-                hooked = first instanceof org.objectweb.asm.tree.MethodInsnNode
-                        && "check".equals(((org.objectweb.asm.tree.MethodInsnNode) first).name);
+                // The guard is reached through an invokedynamic whose bootstrap argument
+                // carries the guard name, so no invokestatic in the program class points
+                // at the injected runtime.
+                hooked = first instanceof org.objectweb.asm.tree.InvokeDynamicInsnNode
+                        && "check".equals(((org.objectweb.asm.tree.InvokeDynamicInsnNode) first).name)
+                        && "()V".equals(((org.objectweb.asm.tree.InvokeDynamicInsnNode) first).desc);
             }
         }
         check(hooked, "guard check inserted into the main class initializer");
+        boolean direct = false;
+        for (org.objectweb.asm.tree.MethodNode method : mainClass.methods) {
+            for (org.objectweb.asm.tree.AbstractInsnNode insn = method.instructions.getFirst();
+                 insn != null; insn = insn.getNext()) {
+                if (insn instanceof org.objectweb.asm.tree.MethodInsnNode) {
+                    org.objectweb.asm.tree.MethodInsnNode call =
+                            (org.objectweb.asm.tree.MethodInsnNode) insn;
+                    if ("check".equals(call.name) && "()V".equals(call.desc)
+                            && RuntimeNames.isRuntime(call.owner)) {
+                        direct = true;
+                    }
+                }
+            }
+        }
+        check(!direct, "no direct invokestatic reaches the injected guard");
         Jars.write(jar, pool, hierarchy, false, log);
         return jar;
     }

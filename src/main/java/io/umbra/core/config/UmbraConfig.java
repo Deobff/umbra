@@ -99,6 +99,390 @@ public final class UmbraConfig {
         this.options = Collections.unmodifiableMap(new LinkedHashMap<String, String>(b.options));
     }
 
+    // ------------------------------------------------- advanced option bridge
+    //
+    // `--set renamer.enabled=false` and friends name a typed section directly, but
+    // the engine reads the typed sections (config.renamer(), config.flow(), ...),
+    // so the CLI has to translate them. That happens during the CLI's own assembly
+    // and not in the constructor: a derived configuration (a preset, nocturne's
+    // exclusive mode) deliberately tightens a typed section on top of a base whose
+    // option map still carries the old keys, and a constructor-level override
+    // would reopen the section it just closed.
+    //
+    // Keys use the YAML section names (`renamer.*`, `flowObfuscation.*`,
+    // `memberShuffle.*`) plus the `register`/`cache` aliases the YAML loader also
+    // accepts. An absent or unparsable value keeps the typed setter's value, and
+    // unknown keys stay untouched in the option map for the passes that own them.
+
+    /**
+     * Copies {@code <typed section>.*} advanced options over the builder's typed
+     * sections.
+     *
+     * <p>Only the keys passed to this call are applied, so the CLI can pass its
+     * {@code --set} assignments and keep the order preset &lt; {@code --set}
+     * &lt; explicit switches such as {@code --no-flow}. YAML {@code options:}
+     * entries are not translated: the YAML typed sections decide those.</p>
+     *
+     * @param builder builder to update
+     * @param options advanced options to translate (may be {@code null})
+     */
+    public static void applyTypedOverrides(Builder builder, Map<String, String> options) {
+        if (builder == null || options == null || options.isEmpty()) {
+            return;
+        }
+        builder.renamer(renamerOptions(builder.renamer, options));
+        builder.stringEncryption(stringEncryptionOptions(builder.stringEncryption, options));
+        builder.integerEncryption(integerEncryptionOptions(builder.integerEncryption, options));
+        builder.flow(flowOptions(builder.flow, options));
+        builder.debug(debugOptions(builder.debug, options));
+        builder.shuffle(shuffleOptions(builder.shuffle, options));
+        builder.invokeWrapper(wrapperOptions(builder.invokeWrapper, options));
+        builder.watermark(watermarkOptions(builder.watermark, options));
+        builder.mapping(mappingOptions(builder.mapping, options));
+        builder.report(reportOptions(builder.report, options));
+        builder.reflection(reflectionOptions(builder.reflection, options));
+        builder.trim(trimOptions(builder.trim, options));
+        builder.parameterObfuscation(parameterOptions(builder.parameterObfuscation, options));
+        builder.license(licenseOptions(builder.license, options));
+        builder.resources(resourceOptions(builder.resources, options));
+        builder.referenceObfuscation(referenceOptions(builder.referenceObfuscation, options));
+        builder.exceptionObfuscation(exceptionOptions(builder.exceptionObfuscation, options));
+        builder.incremental(incrementalOptions(builder.incremental, options));
+        builder.methodVirtualization(virtualizationOptions(builder.methodVirtualization, options));
+        builder.antiLlm(antiLlmOptions(builder.antiLlm, options));
+        builder.authGate(authGateOptions(builder.authGate, options));
+        builder.junk(junkOptions(builder.junk, options));
+    }
+
+    /** True when the option map holds at least one key of the given sections. */
+    private static boolean sectionPresent(Map<String, String> options, String... prefixes) {
+        if (options.isEmpty()) {
+            return false;
+        }
+        for (String key : options.keySet()) {
+            for (String prefix : prefixes) {
+                if (key.startsWith(prefix)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** First present option value among {@code keys}, or {@code null}. */
+    private static String firstValue(Map<String, String> options, String... keys) {
+        for (String key : keys) {
+            String value = options.get(key);
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private static boolean overrideBool(Map<String, String> options, boolean def, String... keys) {
+        return parseBool(firstValue(options, keys), def);
+    }
+
+    private static int overrideInt(Map<String, String> options, int def, String... keys) {
+        return parseInt(firstValue(options, keys), def);
+    }
+
+    private static String overrideStr(Map<String, String> options, String def, String... keys) {
+        String value = firstValue(options, keys);
+        return value == null ? def : value.trim();
+    }
+
+    /** Parses a comma-separated list; {@code def} when no key is present. */
+    private static List<String> overrideList(Map<String, String> options, List<String> def,
+                                            String... keys) {
+        String value = firstValue(options, keys);
+        if (value == null) {
+            return def;
+        }
+        List<String> out = new ArrayList<String>();
+        for (String item : value.split(",")) {
+            String trimmed = item.trim();
+            if (!trimmed.isEmpty()) {
+                out.add(trimmed);
+            }
+        }
+        return out;
+    }
+
+    /** Parses a boolean option value; returns {@code def} when absent or unknown. */
+    private static boolean parseBool(String value, boolean def) {
+        if (value == null) {
+            return def;
+        }
+        String v = value.trim().toLowerCase(java.util.Locale.ROOT);
+        if ("true".equals(v) || "yes".equals(v) || "1".equals(v) || "on".equals(v)) {
+            return true;
+        }
+        if ("false".equals(v) || "no".equals(v) || "0".equals(v) || "off".equals(v)) {
+            return false;
+        }
+        return def;
+    }
+
+    /** Parses an int option value; returns {@code def} when absent or malformed. */
+    private static int parseInt(String value, int def) {
+        if (value == null) {
+            return def;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            return def;
+        }
+    }
+
+    private static RenamerOptions renamerOptions(RenamerOptions base, Map<String, String> o) {
+        if (!sectionPresent(o, "renamer.")) {
+            return base;
+        }
+        return new RenamerOptions(
+                overrideBool(o, base.enabled(), "renamer.enabled"),
+                overrideStr(o, base.prefix(), "renamer.prefix"),
+                overrideBool(o, base.repackage(), "renamer.repackage"),
+                overrideStr(o, base.repackagePackage(), "renamer.repackagePackage"),
+                overrideBool(o, base.renameClasses(), "renamer.renameClasses"),
+                overrideBool(o, base.renameMethods(), "renamer.renameMethods"),
+                overrideBool(o, base.renameFields(), "renamer.renameFields"),
+                overrideStr(o, base.mappingFile(), "renamer.mappingFile"),
+                overrideStr(o, base.dictionary(), "renamer.dictionary"),
+                overrideInt(o, base.minimumNameLength(), "renamer.minimumNameLength"),
+                overrideList(o, base.repackageKept(), "renamer.repackageKept"));
+    }
+
+    private static StringEncryptionOptions stringEncryptionOptions(StringEncryptionOptions base,
+                                                                   Map<String, String> o) {
+        if (!sectionPresent(o, "stringEncryption.")) {
+            return base;
+        }
+        return new StringEncryptionOptions(
+                overrideBool(o, base.enabled(), "stringEncryption.enabled"),
+                overrideInt(o, base.minLength(), "stringEncryption.minLength"));
+    }
+
+    private static IntegerEncryptionOptions integerEncryptionOptions(IntegerEncryptionOptions base,
+                                                                     Map<String, String> o) {
+        if (!sectionPresent(o, "integerEncryption.")) {
+            return base;
+        }
+        return new IntegerEncryptionOptions(
+                overrideBool(o, base.enabled(), "integerEncryption.enabled"),
+                overrideBool(o, base.includeLong(), "integerEncryption.includeLong"));
+    }
+
+    private static FlowOptions flowOptions(FlowOptions base, Map<String, String> o) {
+        if (!sectionPresent(o, "flowObfuscation.")) {
+            return base;
+        }
+        return new FlowOptions(
+                overrideBool(o, base.enabled(), "flowObfuscation.enabled"),
+                overrideStr(o, base.level(), "flowObfuscation.level"),
+                overrideInt(o, base.maxInstructions(), "flowObfuscation.maxInstructions"),
+                overrideBool(o, base.flattening(), "flowObfuscation.flattening"),
+                overrideList(o, base.flatteningExclude(), "flowObfuscation.flatteningExclude"));
+    }
+
+    private static DebugOptions debugOptions(DebugOptions base, Map<String, String> o) {
+        if (!sectionPresent(o, "debugInfo.")) {
+            return base;
+        }
+        return new DebugOptions(
+                overrideBool(o, base.enabled(), "debugInfo.enabled"),
+                overrideBool(o, base.removeSourceFile(), "debugInfo.removeSourceFile"),
+                overrideBool(o, base.removeLineNumbers(), "debugInfo.removeLineNumbers"),
+                overrideBool(o, base.removeLocalVariables(), "debugInfo.removeLocalVariables"),
+                overrideBool(o, base.removeSignatures(), "debugInfo.removeSignatures"),
+                overrideBool(o, base.removeInnerClasses(), "debugInfo.removeInnerClasses"),
+                overrideBool(o, base.removeKotlin(), "debugInfo.removeKotlin"));
+    }
+
+    private static ShuffleOptions shuffleOptions(ShuffleOptions base, Map<String, String> o) {
+        if (!sectionPresent(o, "shuffle.", "memberShuffle.")) {
+            return base;
+        }
+        return new ShuffleOptions(
+                overrideBool(o, base.enabled(), "shuffle.enabled", "memberShuffle.enabled"));
+    }
+
+    private static WrapperOptions wrapperOptions(WrapperOptions base, Map<String, String> o) {
+        if (!sectionPresent(o, "invokeWrapper.")) {
+            return base;
+        }
+        return new WrapperOptions(
+                overrideBool(o, base.enabled(), "invokeWrapper.enabled"),
+                overrideInt(o, base.maxPerClass(), "invokeWrapper.maxPerClass"));
+    }
+
+    private static WatermarkOptions watermarkOptions(WatermarkOptions base, Map<String, String> o) {
+        if (!sectionPresent(o, "watermark.")) {
+            return base;
+        }
+        return new WatermarkOptions(
+                overrideBool(o, base.enabled(), "watermark.enabled"),
+                overrideStr(o, base.id(), "watermark.id"));
+    }
+
+    private static MappingOptions mappingOptions(MappingOptions base, Map<String, String> o) {
+        if (!sectionPresent(o, "mapping.")) {
+            return base;
+        }
+        return new MappingOptions(
+                overrideBool(o, base.enabled(), "mapping.enabled"),
+                overrideStr(o, base.file(), "mapping.file"),
+                overrideStr(o, base.inputFile(), "mapping.inputFile",
+                        "mapping.inputMappings", "mapping.inputMapping"));
+    }
+
+    private static ReportOptions reportOptions(ReportOptions base, Map<String, String> o) {
+        if (!sectionPresent(o, "report.")) {
+            return base;
+        }
+        return new ReportOptions(
+                overrideBool(o, base.enabled(), "report.enabled"),
+                overrideStr(o, base.htmlFile(), "report.htmlFile"),
+                overrideStr(o, base.jsonFile(), "report.jsonFile"));
+    }
+
+    private static ReflectionOptions reflectionOptions(ReflectionOptions base, Map<String, String> o) {
+        if (!sectionPresent(o, "reflection.")) {
+            return base;
+        }
+        return new ReflectionOptions(
+                overrideBool(o, base.enabled(), "reflection.enabled"),
+                overrideBool(o, base.rewriteClassStrings(), "reflection.rewriteClassStrings"));
+    }
+
+    private static TrimOptions trimOptions(TrimOptions base, Map<String, String> o) {
+        if (!sectionPresent(o, "trim.")) {
+            return base;
+        }
+        return new TrimOptions(
+                overrideBool(o, base.enabled(), "trim.enabled"),
+                overrideBool(o, base.removeUnusedPrivateMethods(),
+                        "trim.removeUnusedPrivateMethods"),
+                overrideBool(o, base.removeUnusedPrivateFields(), "trim.removeUnusedPrivateFields"));
+    }
+
+    private static ParameterOptions parameterOptions(ParameterOptions base, Map<String, String> o) {
+        if (!sectionPresent(o, "parameterObfuscation.")) {
+            return base;
+        }
+        return new ParameterOptions(
+                overrideBool(o, base.enabled(), "parameterObfuscation.enabled"));
+    }
+
+    private static LicenseOptions licenseOptions(LicenseOptions base, Map<String, String> o) {
+        if (!sectionPresent(o, "license.")) {
+            return base;
+        }
+        return new LicenseOptions(
+                overrideBool(o, base.enabled(), "license.enabled"),
+                overrideStr(o, base.file(), "license.file"),
+                overrideStr(o, base.publicKey(), "license.publicKey"),
+                overrideBool(o, base.require(), "license.require"),
+                overrideList(o, base.requiredFeatures(), "license.features"),
+                overrideStr(o, base.server(), "license.server"));
+    }
+
+    private static ResourceOptions resourceOptions(ResourceOptions base, Map<String, String> o) {
+        if (!sectionPresent(o, "resources.")) {
+            return base;
+        }
+        return new ResourceOptions(
+                overrideBool(o, base.rewriteContent(), "resources.rewriteContent"),
+                overrideBool(o, base.obfuscatePaths(), "resources.obfuscatePaths"),
+                overrideList(o, base.rewriteDomains(), "resources.rewriteDomains"));
+    }
+
+    private static ReferenceOptions referenceOptions(ReferenceOptions base, Map<String, String> o) {
+        if (!sectionPresent(o, "referenceObfuscation.")) {
+            return base;
+        }
+        return new ReferenceOptions(
+                overrideBool(o, base.enabled(), "referenceObfuscation.enabled"),
+                overrideBool(o, base.staticCalls(), "referenceObfuscation.staticCalls"),
+                overrideBool(o, base.virtualCalls(), "referenceObfuscation.virtualCalls"),
+                overrideBool(o, base.fields(), "referenceObfuscation.fields"),
+                overrideBool(o, base.constructors(), "referenceObfuscation.constructors"));
+    }
+
+    private static ExceptionOptions exceptionOptions(ExceptionOptions base, Map<String, String> o) {
+        if (!sectionPresent(o, "exceptionObfuscation.")) {
+            return base;
+        }
+        return new ExceptionOptions(
+                overrideBool(o, base.enabled(), "exceptionObfuscation.enabled"));
+    }
+
+    private static IncrementalOptions incrementalOptions(IncrementalOptions base,
+                                                         Map<String, String> o) {
+        if (!sectionPresent(o, "incremental.")) {
+            return base;
+        }
+        return new IncrementalOptions(
+                overrideBool(o, base.enabled(), "incremental.enabled"),
+                overrideStr(o, base.previousOutput(), "incremental.previousOutput"),
+                overrideStr(o, base.metadataFile(), "incremental.metadataFile"));
+    }
+
+    private static VirtualizationOptions virtualizationOptions(VirtualizationOptions base,
+                                                               Map<String, String> o) {
+        if (!sectionPresent(o, "methodVirtualization.", "virtualization.")) {
+            return base;
+        }
+        return new VirtualizationOptions(
+                overrideBool(o, base.enabled(), "methodVirtualization.enabled",
+                        "virtualization.enabled"),
+                overrideInt(o, base.maxInstructions(), "methodVirtualization.maxInstructions",
+                        "virtualization.maxInstructions"),
+                overrideInt(o, base.maxMethods(), "methodVirtualization.maxMethods",
+                        "virtualization.maxMethods"));
+    }
+
+    private static AntiLlmOptions antiLlmOptions(AntiLlmOptions base, Map<String, String> o) {
+        if (!sectionPresent(o, "antiLlm.")) {
+            return base;
+        }
+        return new AntiLlmOptions(
+                overrideBool(o, base.enabled(), "antiLlm.enabled"),
+                overrideInt(o, base.decoyMethodsPerClass(), "antiLlm.decoyMethodsPerClass"),
+                overrideInt(o, base.decoyCallSitesPerClass(), "antiLlm.decoyCallSitesPerClass"),
+                overrideInt(o, base.wrapperLayers(), "antiLlm.wrapperLayers"),
+                overrideInt(o, base.maxWrappedMethodsPerClass(),
+                        "antiLlm.maxWrappedMethodsPerClass"),
+                overrideBool(o, base.shieldVirtualization(), "antiLlm.shieldVirtualization"));
+    }
+
+    private static AuthGateOptions authGateOptions(AuthGateOptions base, Map<String, String> o) {
+        if (!sectionPresent(o, "authGate.")) {
+            return base;
+        }
+        return new AuthGateOptions(
+                overrideBool(o, base.enabled(), "authGate.enabled"),
+                overrideStr(o, base.server(), "authGate.server"),
+                overrideStr(o, base.software(), "authGate.software"),
+                overrideStr(o, base.title(), "authGate.title"),
+                overrideBool(o, base.allowRegister(), "authGate.register", "authGate.allowRegister"),
+                overrideStr(o, base.cacheFile(), "authGate.cacheFile", "authGate.cache"),
+                overrideInt(o, base.timeoutMs(), "authGate.timeoutMs"),
+                overrideList(o, base.entryPoints(), "authGate.entryPoints"));
+    }
+
+    private static JunkOptions junkOptions(JunkOptions base, Map<String, String> o) {
+        if (!sectionPresent(o, "junk.", "junkMembers.")) {
+            return base;
+        }
+        return new JunkOptions(
+                overrideBool(o, base.enabled(), "junk.enabled", "junkMembers.enabled"),
+                overrideInt(o, base.methods(), "junk.methods", "junkMembers.methods"),
+                overrideInt(o, base.fields(), "junk.fields", "junkMembers.fields"));
+    }
+
     public Path input() { return input; }
     public Path output() { return output; }
     public List<Path> libraries() { return libraries; }
@@ -145,31 +529,12 @@ public final class UmbraConfig {
 
     /** Returns a boolean advanced option (accepts true/false/yes/no/1/0/on/off). */
     public boolean optionBool(String key, boolean def) {
-        String value = options.get(key);
-        if (value == null) {
-            return def;
-        }
-        String v = value.trim().toLowerCase(java.util.Locale.ROOT);
-        if ("true".equals(v) || "yes".equals(v) || "1".equals(v) || "on".equals(v)) {
-            return true;
-        }
-        if ("false".equals(v) || "no".equals(v) || "0".equals(v) || "off".equals(v)) {
-            return false;
-        }
-        return def;
+        return parseBool(options.get(key), def);
     }
 
     /** Returns an int advanced option or {@code def} when absent or malformed. */
     public int optionInt(String key, int def) {
-        String value = options.get(key);
-        if (value == null) {
-            return def;
-        }
-        try {
-            return Integer.parseInt(value.trim());
-        } catch (NumberFormatException e) {
-            return def;
-        }
+        return parseInt(options.get(key), def);
     }
 
     /** Returns a long advanced option or {@code def} when absent or malformed. */

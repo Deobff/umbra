@@ -21,6 +21,19 @@ import java.util.concurrent.TimeUnit;
 public final class NativeCompiler {
 
     private static final long COMPILE_TIMEOUT_SECONDS = 180L;
+    /** Upper bound for the size-scaled timeout. */
+    private static final long COMPILE_TIMEOUT_MAX_SECONDS = 1800L;
+    /**
+     * Translation units above this size are compiled at {@code -O1}.
+     *
+     * <p>Measured on a 40 MB unit (a full preset with ~1,200 translated methods):
+     * {@code -O2} takes 92 s, {@code -O1} takes 37 s. The native layer is not
+     * performance critical (it is a protection layer, and the obfuscated code is
+     * dominated by JNI call overhead anyway), so the faster setting removes the
+     * worst case where an {@code -O2} build under machine load exceeded the budget
+     * and silently dropped the whole native layer.</p>
+     */
+    private static final long LARGE_UNIT_BYTES = 2L * 1024L * 1024L;
 
     /** Result of one compilation attempt. */
     public static final class Result {
@@ -188,7 +201,7 @@ public final class NativeCompiler {
                 command.add("-Wl,--no-insert-timestamp");
             }
         }
-        command.add("-O2");
+        command.add(optimizationLevel(source));
         command.add("-fwrapv");
         command.add("-fno-strict-aliasing");
         command.add("-o");
@@ -199,6 +212,37 @@ public final class NativeCompiler {
         }
         command.addAll(tokenize(extraFlags));
         return command;
+    }
+
+    /**
+     * Compile timeout for one translation unit.
+     *
+     * <p>A full preset translates hundreds of methods into a multi-megabyte unit
+     * that needs more than the base budget; hitting the cap used to drop the whole
+     * native layer (the pass falls back to Java and only warns). The budget
+     * therefore scales with the unit size, within a sane upper bound.</p>
+     *
+     * @param source generated translation unit
+     * @return timeout in seconds
+     */
+    static long timeoutSeconds(Path source) {
+        long bytes = sourceSize(source);
+        long scaled = COMPILE_TIMEOUT_SECONDS + (bytes / (1024L * 1024L)) * 4L;
+        return Math.min(COMPILE_TIMEOUT_MAX_SECONDS, scaled);
+    }
+
+    /** Optimization flag for one translation unit (see {@link #LARGE_UNIT_BYTES}). */
+    static String optimizationLevel(Path source) {
+        return sourceSize(source) >= LARGE_UNIT_BYTES ? "-O1" : "-O2";
+    }
+
+    private static long sourceSize(Path source) {
+        try {
+            return Files.size(source);
+        } catch (IOException e) {
+            // Unknown size: keep the conservative budget and the best codegen.
+            return 0L;
+        }
     }
 
     /** Compiles {@code source} into {@code library} (reproducible PE timestamp). */
@@ -217,6 +261,7 @@ public final class NativeCompiler {
     public static Result compile(String compiler, Path source, Path library, String target,
                                  String extraFlags, Log log, boolean reproducible) {
         List<String> command = command(compiler, source, library, target, extraFlags, reproducible);
+        long timeoutSeconds = timeoutSeconds(source);
         long start = System.currentTimeMillis();
         Path logFile = null;
         try {
@@ -225,12 +270,17 @@ public final class NativeCompiler {
             builder.redirectErrorStream(true);
             builder.redirectOutput(logFile.toFile());
             Process process = builder.start();
-            boolean finished = process.waitFor(COMPILE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
             String output;
             if (!finished) {
                 process.destroyForcibly();
             }
             output = new String(Files.readAllBytes(logFile), StandardCharsets.UTF_8);
+            if (!finished) {
+                // A compiler killed on timeout usually wrote nothing at all, which made
+                // the pass report a bare "compilation failed" with no cause. Name it.
+                output = "[timed out after " + timeoutSeconds + "s]\n" + output;
+            }
             int exit = finished ? process.exitValue() : -1;
             boolean ok = finished && exit == 0 && Files.isRegularFile(library);
             return new Result(ok, library, render(command), output, System.currentTimeMillis() - start);

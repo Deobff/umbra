@@ -1,0 +1,11 @@
+pluginManagement {
+    // The Umbra plugin is installed into ~/.m2 by plugins/build-plugins.ps1
+    // (Gradle task publishToMavenLocal). A published release resolves from the
+    // Gradle Plugin Portal / your artifact repository instead.
+    repositories {
+        mavenLocal()
+        gradlePluginPortal()
+    }
+}
+
+rootProject.name = 'umbra-gradle-sample'

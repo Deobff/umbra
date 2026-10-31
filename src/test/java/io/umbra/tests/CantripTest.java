@@ -33,6 +33,26 @@ public final class CantripTest {
         int[] loop = UmbraCantrip.run(new String[]{"~3;[-]."});
         check(loop.length == 1 && loop[0] == 0, "interpreter loop semantics");
 
+        // P0-3: the sealed second layer substitutes the dialect syntax through a
+        // per-build opcode table and ChaCha20-encrypts the program text.
+        String[] plain = new String[]{"~7;.~-3;.", "~42;."};
+        String[] sealed = UmbraCantrip.seal(plain, 0x5EED1234);
+        check(!sealed[0].contains("~") && !sealed[0].contains(";"),
+                "sealed chunks hide the dialect syntax");
+        int[] decoded = UmbraCantrip.runSealed(sealed, 0x5EED1234);
+        check(decoded.length == 3 && decoded[0] == 7 && decoded[1] == -3 && decoded[2] == 42,
+                "sealed chunks round-trip to the same values");
+        int[] wrongKey = null;
+        try {
+            wrongKey = UmbraCantrip.runSealed(sealed, 0x11112222);
+        } catch (RuntimeException expected) {
+            wrongKey = null;
+        }
+        check(wrongKey == null || wrongKey.length != 3 || wrongKey[0] != 7,
+                "a wrong dialect key does not reproduce the values");
+        check(UmbraCantrip.decode(sealed, 0x5EED1234)[0].contains("~"),
+                "unsealing exposes the dialect text again");
+
         Path root = Paths.get("").toAbsolutePath();
         Path input = root.resolve("demo").resolve("demo.jar");
         Path dir = Files.createTempDirectory("umbra-cantrip-test-");
@@ -52,6 +72,7 @@ public final class CantripTest {
             check(stat(stats, "virtualization.methods") > 0, "VM2 virtualized methods");
             check(stat(stats, "cantrip.programs") > 0, "Cantrip programs generated");
             check(stat(stats, "cantrip.values") > 0, "Cantrip reconstructed values");
+            check(stat(stats, "cantrip.sealed") > 0, "Cantrip programs are sealed by default");
             check(UmbraVerifier.verify(output).isEmpty(), "Cantrip output verifies");
             check(run(output).contains("OK"), "Cantrip output runs and prints OK");
         } finally {

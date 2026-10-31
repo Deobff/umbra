@@ -1,0 +1,16 @@
+# Umbra stress failure sample
+label        : p1
+jar          : E:\MC\Umbra\qa\otp-3.2.2\final-maximum.jar
+java         : C:\Program Files\Zulu\zulu-8\bin\java.exe
+javaArgs     : 
+worker/round : 6/21
+pid          : 8180
+exit         : 
+timedOut     : False
+elapsed_s    : 4.953
+started      : 2026-10-31T14:45:25.9140157+08:00
+host         : BF-202508101239
+cores        : 8
+classes      : 
+stdout bytes : 4
+stderr bytes : 0

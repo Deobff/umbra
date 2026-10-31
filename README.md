@@ -1,295 +1,203 @@
-<div align="center">
-
-<img src="assets/banner.svg" alt="Umbra — Java bytecode protection suite" width="100%">
-
 # Umbra
 
-**Java bytecode protection, without compromise.**
+**Umbra** is a commercial-grade Java bytecode protection suite: renaming,
+encryption, control-flow, virtualization, native-code and anti-analysis layers
+with a desktop GUI, a scriptable CLI, and Gradle/Maven build integration. It is
+written in Java 8, depends only on ASM, and ships as one executable jar.
+**Current release: 3.2.2** (one-time program state + `--set` reaches every typed section).
 
-[![Release](https://img.shields.io/github/v/release/Deobff/umbra?style=flat-square&color=2563eb)](https://github.com/Deobff/umbra/releases)
-[![Java](https://img.shields.io/badge/Java-8%2B-0ea5e9?style=flat-square)](#requirements)
-[![ASM](https://img.shields.io/badge/ASM-9.11-8b5cf6?style=flat-square)](#requirements)
-[![License](https://img.shields.io/badge/License-MIT-64748b?style=flat-square)](LICENSE)
-[![GUI](https://img.shields.io/badge/GUI-Swing-10b981?style=flat-square)](#desktop-gui)
-
-Umbra is a layout-aware Java bytecode protection suite. It combines renaming,
-multi-engine string encryption, control-flow hardening, VM virtualization,
-native code generation, archive encryption and runtime anti-analysis in one
-self-contained Java 8 JAR — with a desktop GUI, a scriptable CLI, YAML
-configuration and Gradle/Maven plugins.
-
-[Download latest release](https://github.com/Deobff/umbra/releases/latest) ·
-[Quick start](#quick-start) · [Features](#features) · [Compatibility](#compatibility) · [Build](#build-from-source)
-
-</div>
-
----
-
-## Why Umbra
-
-Most Java obfuscators optimize for one layer. Umbra is built as a pipeline that
-understands the **shape of the artifact** (Spring Boot fat JAR, executable WAR,
-multi-release JAR, JPMS module, signed JAR, Java agent, OSGi bundle, Minecraft
-mod), so protection layers that depend on a working class loader and manifest
-do not break the application.
-
-```text
-JAR/WAR ──▶ layout analysis ──▶ hierarchy-aware rename ──▶ data/flow/VM/native passes
-        ──▶ class & resource encryption + runtime guard ──▶ verifier ──▶ protected artifact
+```bat
+Umbra.cmd                         :: desktop console (JavaFX)
+java -jar dist\umbra.jar -i app.jar -o app-obf.jar --preset maximum --verify
 ```
 
-Everything is deterministic per seed, reproducible for a fixed seed and
-toolchain, and can be driven from the GUI, CLI, YAML or a build plugin.
+## Capabilities
 
----
-
-## Screenshots
-
-<div align="center">
-<table>
-<tr>
-<td width="62%"><img src="assets/gui-main.png" alt="Umbra desktop GUI" width="100%"></td>
-<td width="38%"><img src="assets/gui-options.png" alt="Per-mode detailed options" width="100%"></td>
-</tr>
-<tr>
-<td align="center"><sub>Desktop GUI — presets, live console, statistics and YAML round-trip</sub></td>
-<td align="center"><sub>Every mode exposes detailed options; numeric values use animated sliders</sub></td>
-</tr>
-</table>
-
-<img src="assets/gui-sliders.png" alt="Mode options with animated sliders" width="72%">
-
-<sub>Mode options sheet — 12 groups / 111 controls, 25 animated sliders</sub>
-</div>
-
----
-
-## Features
-
-### Archive compatibility
-- Spring Boot 2/3 fat JARs and executable WARs, plain WARs, multi-release JARs,
-  modular (JPMS) JARs, signed JARs, Java agents and OSGi bundles.
-- Preserves `BOOT-INF/classes`, `WEB-INF/classes`, nested libraries (including
-  STORED compression), `module-info`, `Multi-Release`, `spring.factories`,
-  `AutoConfiguration.imports`, ServiceLoader metadata and framework manifests.
-- `--inspect` / `--inspect-json` compatibility report; post-run
-  `--compat-report`; output verifier loads every emitted class.
-
-### Names and metadata
-- Hierarchy-correct class/method/field renaming, package repackaging,
-  dictionary and length control, mapping export/import, incremental builds.
-- Reflection-aware keeps, annotation rules, framework presets and Minecraft
-  adaptation; optional public API preservation.
-- Debug metadata erasure, member shuffling, junk members and watermarking.
-
-### Data and control flow
-- Per-site string encryption with **XOR / RC4 / ChaCha20 / AES-256-CTR /
-  Speck**, randomized per-class site indices, per-artifact domain salt,
-  split payloads, optional `invokedynamic`, stack-trace hiding, decrypt-and-wipe
-  and encrypt-all. Plaintext caching is opt-in and off by default.
-- Integer/long constant encryption, MBA arithmetic rewriting.
-- Opaque predicates, branch inversion, junk/dead blocks, block transposition,
-  bogus exception ranges, synthetic exception handlers, state-machine
-  flattening, method splitting and wrapper indirection.
-
-### Virtualization
-- Custom stack-machine interpreter for eligible methods.
-- **VM2**: rolling-key opcode encoding, superinstruction fusion, encrypted split
-  payloads, try/catch dispatch, per-thread state, nested dispatch,
-  `invokedynamic` bridges and constructor bodies.
-- Optional **Cantrip** second virtualization layer.
-
-### Native and archive protection
-- JNI native compilation for eligible methods, embedded native library,
-  anti-dump fingerprint, native backfill verification and keyed challenge.
-- Whole-JAR class/resource encryption with a plaintext bootstrap loader,
-  sample-bound master key, per-entry nonce KDF, HMAC-keyed integrity digests,
-  anti-dump checks and a sampled payload watchdog.
-
-### Runtime anti-analysis
-- Java runtime guard: JVM/agent arguments, dynamic attach, JDWP, JMX,
-  environment markers, heap-dump flags, instrumentation, timing anomalies and a
-  randomized watchdog.
-- Native guard: debugger APIs, PEB, debug registers, Frida modules/pipes/
-  threads/env, module integrity, memory-breakpoint scan, code-section sampling,
-  timing, optional handle anti-dump and Linux `/proc` checks.
-- Sticky fail-closed state; actions `throw`, `exit`, `corrupt` or `log`;
-  encrypted-class refusal and buffer wiping.
-
-### Decompiler / analysis hardening
-- Type confusion through `Object`/`Object[]` carriers.
-- Decompiler/AI noise levels 1–4: contradictory debug tables, bogus signatures,
-  phantom inner classes and code-attribute traps.
-- `invokedynamic` reference hiding, reflection gate, anti-LLM decoy methods and
-  wrapper layers.
-- **Nocturne** polymorphic method shadows with keyed arguments and
-  runtime-selected equivalent bodies.
-
-### Tooling
-- One executable JAR: desktop **GUI**, CLI and YAML.
-- Deterministic seeds, presets (`light`, `balanced`, `aggressive`, `maximum`,
-  `nocturne`, framework presets) and per-option overrides.
-- HTML/JSON audit reports, mapping diff/trace, watermark tracing, JVM verifier.
-- Gradle plugin `io.umbra` (`umbraProtect`) and Maven plugin
-  `io.umbra:umbra-maven-plugin` (`umbra:protect`).
-- Automatic Minecraft mod-container adaptation: Fabric/Quilt, Forge
-  legacy/modern, NeoForge, mixins, access wideners/transformers and coremods.
-
----
+| Layer | Techniques |
+|---|---|
+| Compatibility | Spring Boot 2/3 fat JAR and WAR layouts, plain WAR, multi-release JARs (preserved or flattened), `module-info` remapping, signed-JAR stripping, agent manifests, OSGi headers, service/`spring.factories` rewriting, duplicate-entry tolerance, STORED nested-jar preservation; `--inspect` compatibility report and `--compat-report` JSON |
+| Names | class/method/field renaming with hierarchy-correct overrides, package repackaging, dictionary and length control, mapping export/import, stable incremental mappings, reflection-aware keeps, annotation keep rules, framework presets |
+| Data | per-site multi-engine string encryption (XOR / RC4 / ChaCha20 / AES-256-CTR / Speck), randomized per-class site indices, per-artifact domain salt, per-class keys, split payloads, optional `invokedynamic` bootstrap, decrypt-and-wipe and stack-trace hiding by default (plaintext cache is opt-in and off by default), encrypt-all; integer/long constant encryption, MBA arithmetic rewriting, metadata erasure |
+| Control flow | opaque predicates (value/range/hash invariants), branch inversion, junk/dead blocks, independent-block transposition, bogus exception ranges, state-machine flattening with shuffled dispatchers, synthetic exception handlers, method splitting, wrapper indirection |
+| Virtualization | method bodies translated into a custom instruction stream executed by an injected stack-machine interpreter; hardened VM2 engine with rolling-key opcode encoding, superinstruction fusion, encrypted split payloads, try/catch dispatch, per-thread state, nested dispatch, invokedynamic bridges and constructor bodies; optional Cantrip second layer |
+| Native | eligible methods transpiled to C, compiled into a JNI library, bound back as `native` methods, loaded from an embedded DLL; anti-dump fingerprint + native-method backfill verification; graceful Java fallback on every failure path |
+| Archive | whole-jar class/resource encryption (index v3) with a plaintext bootstrap loader, sample-bound master key (random site seed + ZIP comment + entry count), per-entry nonce in the KDF, HMAC-keyed class/resource/loader digests, anti-dump checks, sampled payload watchdog, minimized manifest |
+| Anti-analysis | **unified Java runtime guard** (agent/attach/env/timing/JDWP/JMX signals, dynamic-attach watcher, watchdog, fail-closed class decryption) plus a hardened native guard (debugger/PEB/DRx, anti-remote-thread, executable-memory scan, memory-breakpoint/code-sampling, timing, module integrity, opt-in handle anti-dump, Linux `/proc` checks), self-integrity, keyed challenges, reference hiding via `invokedynamic`, reflection analysis and optional reflection seal, anti-LLM decoy/wrapper walls, watermarks, audit reports |
+| Dynamic protection | runtime attach/debugger detection at entry points, before integrity checks and before every encrypted class decrypt; sticky fail-closed state; watchdogs with randomized intervals; plaintext/key buffer wiping; native DLL fingerprint + backfill challenge |
+| Type confusion | static call ABI and private static field traffic routed through `Object[]`/`Object` carriers (KBox-style decompiler confusion, opt-in levels) |
+| Metadata | decompiler/AI hardening levels 1–4: unknown attributes, contradictory debug tables, bogus signatures, phantom inner classes, class-level `Code` trap, EnclosingMethod/SourceDebugExtension/MethodParameters traps — JVM-legal and verifier-safe |
+| Original engine | **Nocturne**: polymorphic keyed-argument method shadows with per-method ARX-encoded parameters and runtime-selected equivalent bodies |
+| Delivery | deterministic seeds, keep rules, presets, incremental builds, mapping diff/trace, HTML/JSON audit reports, JVM verification, JavaFX desktop console, CLI + YAML + Gradle/Maven plugins |
+| Mod containers | automatic Minecraft adaptation: Fabric/Quilt, Forge legacy/modern, NeoForge, mixin configs, access wideners/transformers and coremod manifests; keeps entry points, `@Mod`, Mixin classes/targets and referenced members |
 
 ## Quick start
 
-### Requirements
+```bat
+:: GUI (JavaFX console, needs a JDK 8 with JavaFX)
+Umbra.cmd
+java -jar dist\umbra.jar --gui
 
-| | |
-|---|---|
-| Run Umbra | JDK 8 or newer |
-| Protected output | Keeps the input class-file version; runs on JDK 8+ |
-| Native guard/code | Optional C toolchain on Windows (graceful Java fallback elsewhere) |
-| Build source | JDK 8, PowerShell (Windows) |
+:: CLI
+java -jar dist\umbra.jar -i app.jar -o app-obf.jar --preset balanced --verify
+java -jar dist\umbra.jar -i app.jar -o app-obf.jar --preset maximum --seed 23303
+java -jar dist\umbra.jar -c umbra.example.yml --dry-run
 
-### Desktop GUI
+:: inspect an input before protecting it (read-only)
+java -jar dist\umbra.jar -i app.jar --inspect
+java -jar dist\umbra.jar -i app.jar --inspect-json inspection.json
+```
+
+Presets: `library`, `spring-boot`, `jackson`, `service-loader`, `micronaut`,
+`light`, `balanced`, `aggressive`, `maximum`, `nocturne`.
+
+## Input handling
+
+Any JAR produced by a normal build tool is accepted:
+
+* **Spring Boot fat JAR / WAR** — classes under `BOOT-INF/classes/` (or
+  `WEB-INF/classes/`) are transformed in place, nested libraries are preserved
+  byte-identically (including their STORED compression), root loader classes are
+  never renamed or rewritten, `Start-Class`/`Main-Class` are remapped, and the
+  archive still boots. Whole-archive class encryption, the startup integrity
+  seal and the native guard launcher are flat-JAR constructs and are skipped on
+  nested layouts with an explicit warning.
+* **Multi-release JARs** — `META-INF/versions/N/` and the `Multi-Release`
+  attribute are preserved with one consistent mapping
+  (`layout.multiRelease=preserve`, default); `flatten` returns a plain JAR.
+* **Modular JARs** — `module-info` exports/opens/uses/provides are remapped
+  (`layout.moduleInfo=auto|keep|drop`).
+* **Signed JARs** — signatures are stripped; re-sign the output if needed.
+* **Agents / OSGi / ServiceLoader** — `Premain-Class`/`Agent-Class` attributes,
+  OSGi headers and `META-INF/services/*` are rewritten through the mapping.
+* Duplicate entries are resolved deterministically instead of aborting.
+
+See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for the layout model and the
+tested input matrix.
+
+## Minecraft mods
+
+Mod containers are detected and adapted automatically (default on). Entry
+classes/methods, `@Mod` classes, Mixin classes/targets/configs and referenced
+target members are kept; mixin/target method bodies are exempted; conflicting
+protections are downgraded automatically.
 
 ```bat
-java -jar umbra.jar
+java -jar dist\umbra.jar -i mymod.jar -o mymod-obf.jar --verify
+java -jar dist\umbra.jar -i mymod.jar -o mymod-obf.jar --set minecraft.forceVmp=true
+java -jar dist\umbra.jar -i mymod.jar -o mymod-obf.jar --set minecraft.enabled=false
 ```
 
-Choose an input JAR, a mode, open **Mode options…** for detailed settings, then
-press **Start**. Drag-and-drop, YAML load/save, presets, live console and
-statistics are built in.
+Details: [docs/MINECRAFT.md](docs/MINECRAFT.md).
 
-### CLI
+## Build
+
+Requirements: JDK 8+ (built with Zulu 8), Windows PowerShell 5.1 or newer.
+ASM is vendored under `lib/`; no network access is needed.
 
 ```bat
-:: balanced protection with verification
-java -jar umbra.jar -i app.jar -o app-obf.jar --preset balanced --verify
-
-:: maximum protection: encryption + VM2 + native guard, etc.
-java -jar umbra.jar -i app.jar -o app-obf.jar --preset maximum --verify
-
-:: inspect an artifact before protecting it
-java -jar umbra.jar --inspect app.jar
+build.cmd                    :: compile + self tests + dist\umbra.jar
+build.cmd -Task compile      :: fast compile
+build.cmd -Task test         :: compile + self tests
+build.cmd -Task dist         :: executable jar
+build.cmd -Task package      :: executable jar + distribution zip + SHA-256 sums
 ```
 
-### Presets
+Linux/macOS: `pwsh build.ps1 -Task dist`.
 
-| Preset | What it is for |
-|---|---|
-| `light` | Fast rename + string/integer encryption, minimal behavioral change |
-| `balanced` | Rename, strings, flow, exceptions, VM2, anti-LLM, class encryption |
-| `aggressive` | Balanced plus aggressive flow, integrity and anti-debug |
-| `maximum` | Aggressive plus type confusion, reference obfuscation and full metadata/noise |
-| `nocturne` | Nocturne polymorphic shadows, VM/flow still available |
-| framework presets | `library`, `spring-boot`, `jackson`, `service-loader`, `micronaut` |
+## GUI
 
-### YAML
+A JavaFX desktop console, shipped as `umbra-gui-fx.jar` next to the engine jar
+(the engine jar itself stays JavaFX-free so it runs on any JDK 8). Launch it with
+`Umbra.cmd` or `umbra-fx.cmd`; a JDK 8 that ships JavaFX is required (set
+`JFX_JAVA_HOME` to point at one). Self-drawn window chrome, a configuration rail
+grouping every switch and value the engine accepts, three views (Options /
+Command / Output) in one segmented control, a targets band for input and output,
+a preset selector that loads the engine's own effective values, live log,
+progress, cancel, and an About window with the version and jar locations.
 
-```yaml
-input: "app.jar"
-output: "app-obf.jar"
-preset: "balanced"
-methodVirtualization:
-  enabled: true
-string:
-  strength: 3
-```
+The engine jar no longer carries the old Swing console: `java -jar umbra.jar`
+looks for `umbra-gui-fx.jar` next to itself and starts the console as a child
+process, and prints the command line help when either the console jar or a
+JavaFX-capable JVM is missing.
+
+## CLI
 
 ```bat
-java -jar umbra.jar -c umbra.yml
+java -jar dist\umbra.jar -i app.jar -o app-obf.jar ^
+  --keep "com.example.Main" --preset aggressive ^
+  --flatten --virtualize --anti-llm --verify --seed 23303
 ```
 
----
-
-## Compatibility
-
-| Input | Status |
-|---|---|
-| Plain JAR / executable JAR | ✅ |
-| Spring Boot 2.x / 3.x fat JAR | ✅ (nested libs preserved, STORED kept) |
-| Executable WAR | ✅ |
-| Plain WAR (external container) | ✅ with layout notes; root-only guards may need re-verification in the container |
-| Multi-release JAR | ✅ preserved or flattened |
-| JPMS modular JAR | ✅ `module-info` remapped |
-| Signed JAR | ✅ signatures stripped, artifact re-verified |
-| Java agent | ✅ `Premain-Class` / `Agent-Class` protected |
-| OSGi bundle | ✅ `Bundle-Activator` remapped |
-| Minecraft Fabric/Quilt/Forge/NeoForge | ✅ automatic adaptation and mixin keeps |
-| Gradle Shadow / Maven Shade | ✅ |
-
-Protected artifacts have been exercised on JDK 8, 21 and 26; the tool itself
-runs on JDK 8.
-
----
-
-## Security model
-
-Umbra raises the cost of static and dynamic analysis; it does not claim
-"unbreakable". The design is layered and fail-closed:
-
-- **Encrypted archive**: sample-bound master key, per-entry nonce in the KDF,
-  HMAC-keyed class/resource/loader digests, integrity level ≥ 2 by default,
-  sampled watchdog with fail-closed heartbeat, silent refusals with no
-  self-identifying stack traces.
-- **Runtime guard**: Java + native detection, dynamic-attach watcher, heap-dump
-  flags, host/instrumentation markers and timing checks.
-- **Anti-dump**: per-class digest verification before define, key/plaintext
-  wiping and native library fingerprint/backfill checks.
-
-Known limitations: Java-only dynamic attach detection on Windows is
-best-effort (the native guard is the reliable path), mapped DLLs stay on disk
-until the next run, and no obfuscator stops a determined native-level reverse
-engineer.
-
-`demo-obf.jar` is an example of an Umbra-encrypted demo application. It is a
-local test artifact (no network, no persistence); only run binaries you trust.
-
----
-
-## Build from source
+Advanced modules are configured through `--set`:
 
 ```bat
-:: Windows (JDK 8 on PATH or JAVA_HOME)
-build.cmd
-
-:: full test suite
-build.cmd -Task test
-
-:: distribution jar + release zip
-build.cmd -Task dist
-build.cmd -Task package
+java -jar dist\umbra.jar -i app.jar -o app-obf.jar ^
+  --set typeConfusion.enabled=true ^
+  --set string.engine=auto --set string.wipe=true ^
+  --set vm2.enabled=true --set vm2.fusion=true ^
+  --set nocturne.enabled=true ^
+  --set classEncryption.enabled=true --set classEncryption.resources=true ^
+  --set integrity.enabled=true ^
+  --set native.enabled=true --set native.compiler=E:/mingw64/bin/gcc.exe
 ```
 
-Linux/macOS can use `build.ps1` with PowerShell 7 and a JDK 8. The build has no
-runtime dependency beyond the vendored ASM under `lib/`.
+Every key is documented in [docs/OPTIONS.md](docs/OPTIONS.md). Additional CLI
+flags include `--inspect`, `--inspect-json`, `--compat-report`, `--mapping`,
+`--report`/`--report-json`, `--input-mapping`, `--trace-watermark`,
+`--diff-mapping`, `--license*`.
 
----
+## Gradle / Maven
+
+The official plugins live under `plugins/` and run the Umbra CLI as part of a
+normal build, failing the build on any protection error:
+
+```groovy
+// build.gradle
+plugins { id 'io.umbra' version '3.0.0' }
+umbraProtect {
+    toolJar = file("tools/umbra.jar")
+    preset  = "balanced"
+    verify  = true
+}
+```
+
+```xml
+<!-- pom.xml -->
+<plugin>
+  <groupId>io.umbra</groupId>
+  <artifactId>umbra-maven-plugin</artifactId>
+  <version>3.0.0</version>
+  <executions><execution><goals><goal>protect</goal></goals></execution></executions>
+</plugin>
+```
+
+Full parameter tables, CI examples and troubleshooting: [plugins/README.md](plugins/README.md).
 
 ## Repository layout
 
-```text
-src/main/java/io/umbra/        engine, passes, VM2, native/JNI, GUI
-src/test/java/io/umbra/tests/  self-test suites (plain main, JDK 8)
-lib/                           vendored ASM 9.11
-demo/                          demo sources and demo.jar
-plugins/                       Gradle + Maven plugin sources
-.github/workflows/             release automation (tag v*)
-assets/                        README visuals
-demo-obf.jar                   example protected demo
+```
+Umbra/
+  build.ps1 / build.cmd / Umbra.cmd / umbra-cli.cmd
+  lib/                       ASM
+  src/main/java/io/umbra/    annotations, cli, core (api/config/compat/engine/
+                             model/pass/runtime/rules/util), gui (control model)
+  gui-fx/                    JavaFX console sources (separate jar, needs JavaFX)
+  src/test/java/io/umbra/tests/
+  plugins/                   Gradle + Maven plugins, samples, QA runner
+  demo/  qa/  docs/  dist/
 ```
 
----
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) describes the pass pipeline and
+core APIs; [docs/REFERENCE-MATRIX.md](docs/REFERENCE-MATRIX.md) records the
+capability analysis of the tools studied for 3.0; [docs/REPORT-3.0.md](docs/REPORT-3.0.md)
+is the 3.0 release report; [docs/REPORT-3.1.md](docs/REPORT-3.1.md) covers the
+3.1 bug-hunt/dynamic-protection release and [docs/AUDIT-3.1.md](docs/AUDIT-3.1.md)
+is the full audit findings table.
 
-## 中文简介
+## Safety and scope
 
-Umbra 是一套面向 Java 字节码的混淆器：兼容 Spring Boot fat JAR、
-WAR、多版本 JAR、JPMS、签名 JAR、agent、OSGi 与 Minecraft 模组；提供重命名、
-多引擎字符串加密、控制流、VM2 虚拟化、原生 JNI、整包类加密、运行时反调试与
-反 dump，并附带桌面 GUI、CLI、YAML、Gradle/Maven 插件。每个模式都可在
-Mode options 中细调，数值项使用带缓动的滑块。发布包见
-[Releases](https://github.com/Deobff/umbra/releases)。
-
----
-
-## License
-
-[MIT](LICENSE) · Copyright (c) 2026 YZT
+Umbra is a defensive engineering tool for protecting your own software. Only
+apply it to code you own or are authorized to modify. Some techniques (native
+code, encrypted loaders, anti-debug) are intentionally detectable by endpoint
+security products; validate licensing, distribution and legal requirements
+before shipping protected artifacts.

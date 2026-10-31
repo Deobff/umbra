@@ -2,10 +2,14 @@ package io.umbra.core.pass.impl;
 
 import io.umbra.core.api.Pass;
 import io.umbra.core.api.PassContext;
+import io.umbra.core.config.UmbraConfig;
 import io.umbra.core.util.AsmUtil;
+import io.umbra.core.util.NameGenerator;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
+import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.IincInsnNode;
 import org.objectweb.asm.tree.InsnList;
@@ -19,6 +23,7 @@ import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
@@ -30,60 +35,50 @@ import java.util.Set;
  * <p>The pass is a JVM approximation of the ideas behind Matryoshka Wall,
  * Double Fond, Dispatch Maze and SemAder-style semantic decoys:</p>
  * <ul>
- *   <li><b>Semantic decoys</b> (Double Fond / SemAder): plausible crypto,
- *       network, image, database or compression helpers are added to real
- *       classes. They are never reached in practice but look like live code.</li>
+ *   <li><b>Semantic decoys</b> (Double Fond / SemAder): plausible string
+ *       parsers, checksum helpers and normalizers are added to real classes.
+ *       Each decoy uses one of four different shapes, has a different return
+ *       type and reuses a literal that already exists in the same class, so the
+ *       decoys do not cluster by structure, signature or vocabulary.</li>
  *   <li><b>Guarded call sites</b> (Dispatch Maze): real methods call a decoy
- *       behind an opaque predicate whose seed is computed by another method.</li>
+ *       behind a predicate whose seed comes from {@code System.nanoTime()}. The
+ *       branch is therefore not statically foldable, and the decoys are
+ *       referenced from live code instead of looking like unused leftovers.</li>
+ *   <li><b>Chained decoys</b>: each decoy also calls the next one behind the
+ *       same predicate, so a reference-graph walk finds a chain rather than a
+ *       set of leaves.</li>
  *   <li><b>Nested forwarding walls</b> (Matryoshka): a method body is moved
  *       behind one or more private forwarding layers, so a decompiler/LLM sees
  *       a chain of methods instead of the original body.</li>
  * </ul>
  *
+ * <p>Every generated member is named through the same {@link NameGenerator} and
+ * dictionary the renamer uses, so decoys and wrappers are indistinguishable from
+ * renamed program members. Earlier versions used semantic identifiers
+ * ({@code expandRoundKey}) and fixed prefixes ({@code s$0}); in a renamed
+ * artifact those stood out as the only readable names, which made the decoys
+ * trivial to filter out.</p>
+ *
  * <p>This raises the token/compute cost of static analysis. It is not a
  * security proof, and dynamic execution plus a human analyst can still recover
- * the logic. The pass must run after renaming and before virtualization so the
- * generated code is still string-encrypted and can be virtualized.</p>
+ * the logic. The pass runs after renaming and before string encryption and
+ * virtualization, so generated code is still encrypted and can be virtualized.</p>
  */
 public final class AntiLlmPass implements Pass {
 
-    private static final String[] CRYPTO_NAMES = {
-            "expandRoundKey", "deriveAesState", "mixColumns", "scheduleKey"
-    };
-    private static final String[] NETWORK_NAMES = {
-            "parseTlsRecord", "decodeHttpHeader", "checksumFrame", "routePacket"
-    };
-    private static final String[] IMAGE_NAMES = {
-            "decodeScanline", "blendRgbaRows", "resamplePlane", "unpackPixels"
-    };
-    private static final String[] DATABASE_NAMES = {
-            "mergeIndexPage", "scanBTreeLeaf", "decodeRowHeader", "prepareStatement"
-    };
-    private static final String[] COMPRESSION_NAMES = {
-            "inflateWindow", "rebuildHuffman", "decodeBlockHeader", "restoreDictionary"
-    };
-    private static final String[][] NAMES = {
-            CRYPTO_NAMES, NETWORK_NAMES, IMAGE_NAMES, DATABASE_NAMES, COMPRESSION_NAMES
-    };
+    /** Decoy body shapes; different signatures keep the decoys from clustering. */
+    private enum Shape {
+        /** {@code int hash(String)}: rolling hash with a mixing table. */
+        INT_HASH,
+        /** {@code boolean looksLike(String)}: characteristic-bit predicate. */
+        BOOL_PREDICATE,
+        /** {@code long checksum(String)}: weighted character sum. */
+        LONG_CHECKSUM,
+        /** {@code String normalize(String)}: trim plus length cap. */
+        STRING_NORMALIZE
+    }
 
-    private static final String[] CRYPTO_STRINGS = {
-            "AES/CBC/PKCS5Padding", "HmacSHA256", "TLS_AES_256_GCM_SHA384"
-    };
-    private static final String[] NETWORK_STRINGS = {
-            "Content-Encoding: gzip", "GET /api/v2/session HTTP/1.1", "TLSv1.3"
-    };
-    private static final String[] IMAGE_STRINGS = {
-            "image/png;base64", "RGBA8888", "IHDR"
-    };
-    private static final String[] DATABASE_STRINGS = {
-            "SELECT * FROM accounts WHERE token = ?", "jdbc:mysql://", "PRIMARY KEY"
-    };
-    private static final String[] COMPRESSION_STRINGS = {
-            "deflate", "gzip", "zstd"
-    };
-    private static final String[][] STRINGS = {
-            CRYPTO_STRINGS, NETWORK_STRINGS, IMAGE_STRINGS, DATABASE_STRINGS, COMPRESSION_STRINGS
-    };
+    private static final int NAME_LENGTH = 5;
 
     @Override
     public String name() {
@@ -108,14 +103,21 @@ public final class AntiLlmPass implements Pass {
         int seeds = 0;
         int classes = 0;
         Random random = context.random();
+        UmbraConfig.RenamerOptions renamer = context.config().renamer();
+        NameGenerator names = new NameGenerator(random, "", renamer.dictionary(),
+                renamer.minimumNameLength());
+
+        java.util.Map<ClassNode, String> registrySeed = new java.util.LinkedHashMap<ClassNode, String>();
+        java.util.Map<ClassNode, List<String[]>> registryDecoys =
+                new java.util.LinkedHashMap<ClassNode, List<String[]>>();
 
         for (ClassNode node : new ArrayList<ClassNode>(context.classes().classes().values())) {
             if (context.classes().isGenerated(node.name) || context.classes().isFrozen(node.name)) {
                 continue;
             }
-                if (context.rules().skipBodyTransform(node.name)) {
-                    continue;
-                }
+            if (context.rules().skipBodyTransform(node.name)) {
+                continue;
+            }
             if ("module-info".equals(node.name)) {
                 continue;
             }
@@ -133,37 +135,65 @@ public final class AntiLlmPass implements Pass {
             int decoyCount = context.config().antiLlm().decoyMethodsPerClass();
             if (decoyCount > 0) {
                 touched = true;
+                List<String> literals = collectLiterals(node);
                 List<String> decoyNames = new ArrayList<String>();
-                List<String> decoyStrings = new ArrayList<String>();
+                List<String> decoyDescs = new ArrayList<String>();
                 for (int i = 0; i < decoyCount; i++) {
-                    int category = random.nextInt(NAMES.length);
-                    String name = uniqueMethodName(node, NAMES[category][random.nextInt(NAMES[category].length)]);
-                    node.methods.add(createDecoy(name, category, random));
+                    Shape shape = Shape.values()[random.nextInt(Shape.values().length)];
+                    String name = uniqueMethodName(node, names);
+                    String desc = descriptorOf(shape);
+                    String literal = literals.get(random.nextInt(literals.size()));
+                    node.methods.add(createDecoy(name, shape, literal, random));
                     added.add(name);
                     decoyNames.add(name);
-                    decoyStrings.add(STRINGS[category][random.nextInt(STRINGS[category].length)]);
+                    decoyDescs.add(desc);
                     decoys++;
                 }
 
-                String seedField = uniqueFieldName(node);
-                String seedMethod = uniqueMethodName(node, "deriveState");
+                String seedField = uniqueFieldName(node, names);
+                String seedMethod = uniqueMethodName(node, names);
                 node.methods.add(createSeed(seedMethod, random));
                 added.add(seedMethod);
+                // Anchor one visible reference in the static initializer: virtualization
+                // moves the guarded call sites of ordinary methods into VM payloads, so
+                // without this anchor a decoy looks unreferenced in the class file.
+                MethodNode clinit = ensureClinit(node);
+                insertDecoyCall(node, clinit, seedField, decoyNames.get(0), decoyDescs.get(0),
+                        literals.get(random.nextInt(literals.size())), random);
                 addSeedInit(node, seedField, seedMethod);
                 seeds++;
 
-                int sites = Math.min(context.config().antiLlm().decoyCallSitesPerClass(), decoyNames.size());
-                int inserted = 0;
+                // Chain the decoys so a reference-graph walk finds live-looking code
+                // instead of a set of never-called leaves.
+                for (int i = 0; i + 1 < decoyNames.size(); i++) {
+                    MethodNode decoy = findMethod(node, decoyNames.get(i));
+                    if (decoy != null) {
+                        insertDecoyCall(node, decoy, seedField, decoyNames.get(i + 1),
+                                decoyDescs.get(i + 1), literals.get(random.nextInt(literals.size())),
+                                random);
+                    }
+                }
+
+                if (!decoyNames.isEmpty()) {
+                    List<String[]> recorded = new ArrayList<String[]>();
+                    for (int i = 0; i < decoyNames.size(); i++) {
+                        recorded.add(new String[] {decoyNames.get(i), decoyDescs.get(i)});
+                    }
+                    registryDecoys.put(node, recorded);
+                    registrySeed.put(node, seedField);
+                }
+                List<MethodNode> eligible = new ArrayList<MethodNode>();
                 for (MethodNode method : originals) {
-                    if (inserted >= sites) {
-                        break;
+                    if (callSiteEligible(method) && !added.contains(method.name)) {
+                        eligible.add(method);
                     }
-                    if (!callSiteEligible(method) || added.contains(method.name)) {
-                        continue;
-                    }
-                    insertDecoyCall(node, method, seedField,
-                            decoyNames.get(inserted), decoyStrings.get(inserted));
-                    inserted++;
+                }
+                int sites = Math.min(context.config().antiLlm().decoyCallSitesPerClass(),
+                        Math.min(decoyNames.size(), eligible.size()));
+                for (int i = 0; i < sites; i++) {
+                    insertDecoyCall(node, eligible.get(i), seedField, decoyNames.get(i),
+                            decoyDescs.get(i), literals.get(random.nextInt(literals.size())),
+                            random);
                     callSites++;
                 }
             }
@@ -179,7 +209,7 @@ public final class AntiLlmPass implements Pass {
                     if (!wrapEligible(method) || added.contains(method.name)) {
                         continue;
                     }
-                    wrap(node, method, layers);
+                    wrap(node, method, layers, names);
                     wrapperLayers += layers;
                     wrapped++;
                     touched = true;
@@ -188,6 +218,52 @@ public final class AntiLlmPass implements Pass {
             if (touched) {
                 classes++;
             }
+        }
+
+        if (registryDecoys.size() >= 2) {
+            List<ClassNode> known = new ArrayList<ClassNode>(registryDecoys.keySet());
+            int cross = 0;
+            for (ClassNode caller : known) {
+                String seed = registrySeed.get(caller);
+                if (seed == null) {
+                    continue;
+                }
+                List<MethodNode> hosts = new ArrayList<MethodNode>();
+                for (MethodNode method : caller.methods) {
+                    if (callSiteEligible(method)) {
+                        hosts.add(method);
+                    }
+                }
+                if (hosts.isEmpty()) {
+                    continue;
+                }
+                Collections.shuffle(hosts, random);
+                int limit = Math.min(2, hosts.size());
+                for (int i = 0; i < limit; i++) {
+                    ClassNode target = known.get(random.nextInt(known.size()));
+                    if (target == caller || !samePackage(target.name, caller.name)) {
+                        continue;
+                    }
+                    List<String[]> pool = registryDecoys.get(target);
+                    if (pool == null || pool.isEmpty()) {
+                        continue;
+                    }
+                    String[] decoy = pool.get(random.nextInt(pool.size()));
+                    // The decoy is created private because only its own class calls
+                    // it; a cross-class call site needs at least package access, and
+                    // the target must be in the same package (the flattener puts
+                    // every renamed class there). Skipping the promotion is what
+                    // produced an intermittent IllegalAccessError at runtime: the
+                    // call site is guarded by a nanoTime-seeded predicate, so the
+                    // illegal instruction only linked when the guard happened to
+                    // fire.
+                    promoteDecoy(target, decoy[0], decoy[1]);
+                    insertDecoyCall(caller, hosts.get(i), seed, target.name, decoy[0], decoy[1],
+                            "", random);
+                    cross++;
+                }
+            }
+            callSites += cross;
         }
 
         context.stats().add("antiLlm.decoys", decoys);
@@ -230,17 +306,98 @@ public final class AntiLlmPass implements Pass {
     }
 
     /**
-     * Adds a private decoy that looks like a domain-specific parser/hash
-     * helper. It uses only loops, arrays and String methods so later passes can
-     * still virtualize it.
+     * Literals a decoy can feed its own body with.
+     *
+     * <p>Reusing constants that already occur in the same class keeps the decoy
+     * plausible and avoids shipping a fixed decoy vocabulary: earlier versions
+     * embedded strings such as {@code "AES/CBC/PKCS5Padding"}, which turned the
+     * decoys themselves into a fingerprint.</p>
      */
-    private static MethodNode createDecoy(String name, int category, Random random) {
-        MethodNode method = new MethodNode(
-                Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC,
-                name, "(Ljava/lang/String;)I", null, null);
+    private static List<String> collectLiterals(ClassNode node) {
+        List<String> literals = new ArrayList<String>();
+        for (MethodNode method : node.methods) {
+            if (method.instructions == null) {
+                continue;
+            }
+            for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null;
+                 insn = insn.getNext()) {
+                if (insn instanceof LdcInsnNode) {
+                    Object value = ((LdcInsnNode) insn).cst;
+                    if (value instanceof String && !((String) value).isEmpty()
+                            && ((String) value).length() <= 64) {
+                        literals.add((String) value);
+                    }
+                }
+            }
+        }
+        if (literals.isEmpty()) {
+            literals.add("");
+        }
+        return literals;
+    }
+
+    private static String descriptorOf(Shape shape) {
+        switch (shape) {
+            case BOOL_PREDICATE:
+                return "(Ljava/lang/String;)Z";
+            case LONG_CHECKSUM:
+                return "(Ljava/lang/String;)J";
+            case STRING_NORMALIZE:
+                return "(Ljava/lang/String;)Ljava/lang/String;";
+            default:
+                return "(Ljava/lang/String;)I";
+        }
+    }
+
+    /**
+     * Makes a decoy callable from another class: decoys are created private
+     * because only their owner calls them, while a cross-class call site needs at
+     * least package access.
+     */
+    private static void promoteDecoy(ClassNode target, String name, String desc) {
+        for (MethodNode method : target.methods) {
+            if (method.name.equals(name) && method.desc.equals(desc)) {
+                method.access &= ~(Opcodes.ACC_PRIVATE | Opcodes.ACC_PROTECTED);
+                return;
+            }
+        }
+    }
+
+    /** True when both internal names live in the same package ("" = default). */
+    private static boolean samePackage(String a, String b) {
+        int slashA = a.lastIndexOf('/');
+        int slashB = b.lastIndexOf('/');
+        String packageA = slashA < 0 ? "" : a.substring(0, slashA);
+        String packageB = slashB < 0 ? "" : b.substring(0, slashB);
+        return packageA.equals(packageB);
+    }
+
+    /** Adds a private decoy with one of four plausible shapes. */
+    private static MethodNode createDecoy(String name, Shape shape, String literal, Random random) {
+        MethodNode method = new MethodNode(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC,
+                name, descriptorOf(shape), null, null);
+        switch (shape) {
+            case BOOL_PREDICATE:
+                buildPredicate(method, literal, random);
+                break;
+            case LONG_CHECKSUM:
+                buildChecksum(method, literal, random);
+                break;
+            case STRING_NORMALIZE:
+                buildNormalize(method, literal, random);
+                break;
+            default:
+                buildHash(method, literal, random);
+                break;
+        }
+        return method;
+    }
+
+    /** {@code int hash(String)}: rolling hash plus a small mixing table. */
+    private static void buildHash(MethodNode method, String literal, Random random) {
         InsnList code = method.instructions;
-        int seed = random.nextInt();
-        AsmUtil.pushInt(code, seed);
+        int multiplier = oddMultiplier(random);
+        AsmUtil.pushInt(code, random.nextInt());
         code.add(new VarInsnNode(Opcodes.ISTORE, 1));
         AsmUtil.pushInt(code, 0);
         code.add(new VarInsnNode(Opcodes.ISTORE, 2));
@@ -254,19 +411,18 @@ public final class AntiLlmPass implements Pass {
                 "length", "()I", false));
         code.add(new JumpInsnNode(Opcodes.IF_ICMPGE, end));
         code.add(new VarInsnNode(Opcodes.ILOAD, 1));
-        AsmUtil.pushInt(code, 31);
+        AsmUtil.pushInt(code, multiplier);
         code.add(new InsnNode(Opcodes.IMUL));
         code.add(new VarInsnNode(Opcodes.ALOAD, 0));
         code.add(new VarInsnNode(Opcodes.ILOAD, 2));
         code.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/String",
                 "charAt", "(I)C", false));
-        code.add(new InsnNode(Opcodes.IXOR));
+        code.add(new InsnNode(Opcodes.IADD));
         code.add(new VarInsnNode(Opcodes.ISTORE, 1));
         code.add(new IincInsnNode(2, 1));
         code.add(new JumpInsnNode(Opcodes.GOTO, loop));
         code.add(end);
 
-        // A small table and a second mixing step mirror common codec shapes.
         AsmUtil.pushInt(code, 8);
         code.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_INT));
         code.add(new VarInsnNode(Opcodes.ASTORE, 3));
@@ -287,98 +443,281 @@ public final class AntiLlmPass implements Pass {
         code.add(new InsnNode(Opcodes.IXOR));
         code.add(new VarInsnNode(Opcodes.ISTORE, 1));
 
-        // Semantic cue for a decompiler / model.
-        code.add(new LdcInsnNode(STRINGS[category][random.nextInt(STRINGS[category].length)]));
-        code.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/String",
-                "hashCode", "()I", false));
-        code.add(new InsnNode(Opcodes.POP));
-
+        semanticCue(code, literal, random);
         code.add(new VarInsnNode(Opcodes.ILOAD, 1));
         code.add(new InsnNode(Opcodes.IRETURN));
         method.maxLocals = 4;
         method.maxStack = 4;
-        return method;
+    }
+
+    /** {@code boolean looksLike(String)}: characteristic-bit test. */
+    private static void buildPredicate(MethodNode method, String literal, Random random) {
+        InsnList code = method.instructions;
+        int multiplier = oddMultiplier(random);
+        int mask = 1 + random.nextInt(0xFFFF);
+        int target = random.nextInt() & mask;
+        AsmUtil.pushInt(code, 0);
+        code.add(new VarInsnNode(Opcodes.ISTORE, 1));
+        AsmUtil.pushInt(code, 0);
+        code.add(new VarInsnNode(Opcodes.ISTORE, 2));
+
+        LabelNode loop = new LabelNode();
+        LabelNode end = new LabelNode();
+        code.add(loop);
+        code.add(new VarInsnNode(Opcodes.ILOAD, 2));
+        code.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        code.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/String",
+                "length", "()I", false));
+        code.add(new JumpInsnNode(Opcodes.IF_ICMPGE, end));
+        code.add(new VarInsnNode(Opcodes.ILOAD, 1));
+        AsmUtil.pushInt(code, multiplier);
+        code.add(new InsnNode(Opcodes.IMUL));
+        code.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        code.add(new VarInsnNode(Opcodes.ILOAD, 2));
+        code.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/String",
+                "charAt", "(I)C", false));
+        code.add(new InsnNode(Opcodes.IXOR));
+        code.add(new VarInsnNode(Opcodes.ISTORE, 1));
+        code.add(new IincInsnNode(2, 1));
+        code.add(new JumpInsnNode(Opcodes.GOTO, loop));
+        code.add(end);
+
+        semanticCue(code, literal, random);
+        code.add(new VarInsnNode(Opcodes.ILOAD, 1));
+        AsmUtil.pushInt(code, mask);
+        code.add(new InsnNode(Opcodes.IAND));
+        AsmUtil.pushInt(code, target);
+        LabelNode differs = new LabelNode();
+        code.add(new JumpInsnNode(Opcodes.IF_ICMPNE, differs));
+        code.add(new InsnNode(Opcodes.ICONST_1));
+        code.add(new InsnNode(Opcodes.IRETURN));
+        code.add(differs);
+        code.add(new InsnNode(Opcodes.ICONST_0));
+        code.add(new InsnNode(Opcodes.IRETURN));
+        method.maxLocals = 3;
+        method.maxStack = 4;
+    }
+
+    /** {@code long checksum(String)}: weighted character sum. */
+    private static void buildChecksum(MethodNode method, String literal, Random random) {
+        InsnList code = method.instructions;
+        int weight = oddMultiplier(random);
+        code.add(new LdcInsnNode(Long.valueOf(random.nextLong())));
+        code.add(new VarInsnNode(Opcodes.LSTORE, 1));
+        AsmUtil.pushInt(code, 0);
+        code.add(new VarInsnNode(Opcodes.ISTORE, 3));
+
+        LabelNode loop = new LabelNode();
+        LabelNode end = new LabelNode();
+        code.add(loop);
+        code.add(new VarInsnNode(Opcodes.ILOAD, 3));
+        code.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        code.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/String",
+                "length", "()I", false));
+        code.add(new JumpInsnNode(Opcodes.IF_ICMPGE, end));
+        code.add(new VarInsnNode(Opcodes.LLOAD, 1));
+        code.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        code.add(new VarInsnNode(Opcodes.ILOAD, 3));
+        code.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/String",
+                "charAt", "(I)C", false));
+        AsmUtil.pushInt(code, weight);
+        code.add(new InsnNode(Opcodes.IMUL));
+        code.add(new InsnNode(Opcodes.I2L));
+        code.add(new InsnNode(Opcodes.LADD));
+        code.add(new VarInsnNode(Opcodes.LSTORE, 1));
+        code.add(new IincInsnNode(3, 1));
+        code.add(new JumpInsnNode(Opcodes.GOTO, loop));
+        code.add(end);
+
+        semanticCue(code, literal, random);
+        code.add(new VarInsnNode(Opcodes.LLOAD, 1));
+        code.add(new InsnNode(Opcodes.LRETURN));
+        method.maxLocals = 4;
+        method.maxStack = 5;
+    }
+
+    /** {@code String normalize(String)}: trim plus length cap. */
+    private static void buildNormalize(MethodNode method, String literal, Random random) {
+        InsnList code = method.instructions;
+        int cap = 4 + random.nextInt(28);
+        code.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        code.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/String",
+                "trim", "()Ljava/lang/String;", false));
+        code.add(new VarInsnNode(Opcodes.ASTORE, 1));
+        semanticCue(code, literal, random);
+        LabelNode shortEnough = new LabelNode();
+        code.add(new VarInsnNode(Opcodes.ALOAD, 1));
+        code.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/String",
+                "length", "()I", false));
+        AsmUtil.pushInt(code, cap);
+        code.add(new JumpInsnNode(Opcodes.IF_ICMPLE, shortEnough));
+        code.add(new VarInsnNode(Opcodes.ALOAD, 1));
+        AsmUtil.pushInt(code, 0);
+        AsmUtil.pushInt(code, cap);
+        code.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/String",
+                "substring", "(II)Ljava/lang/String;", false));
+        code.add(new InsnNode(Opcodes.ARETURN));
+        code.add(shortEnough);
+        code.add(new VarInsnNode(Opcodes.ALOAD, 1));
+        code.add(new InsnNode(Opcodes.ARETURN));
+        method.maxLocals = 2;
+        method.maxStack = 3;
     }
 
     /**
-     * The opaque-predicate seed. It computes zero through a short chain of
-     * arithmetic, and is itself eligible for virtualization and flow noise.
+     * A cheap, plausible use of a literal already present in the class. Which
+     * {@code String} operation is used varies so the decoys do not share one shape.
+     */
+    private static void semanticCue(InsnList code, String literal, Random random) {
+        code.add(new LdcInsnNode(literal));
+        switch (random.nextInt(3)) {
+            case 0:
+                code.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/String",
+                        "hashCode", "()I", false));
+                code.add(new InsnNode(Opcodes.POP));
+                break;
+            case 1:
+                code.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/String",
+                        "length", "()I", false));
+                code.add(new InsnNode(Opcodes.POP));
+                break;
+            default:
+                code.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/String",
+                        "intern", "()Ljava/lang/String;", false));
+                code.add(new InsnNode(Opcodes.POP));
+                break;
+        }
+    }
+
+    private static int oddMultiplier(Random random) {
+        int value = (random.nextInt() | 1);
+        return value == 0 ? 31 : value;
+    }
+
+    /**
+     * The call-site seed.
+     *
+     * <p>It mixes {@code System.nanoTime()}, so no static analysis can fold the
+     * guarded call away: the decoy path looks reachable and must be followed. The
+     * value is read once per class during initialization, so the cost is one call
+     * per class and the decoy body only ever runs if the value happens to match.</p>
      */
     private static MethodNode createSeed(String name, Random random) {
-        MethodNode method = new MethodNode(
-                Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC,
+        MethodNode method = new MethodNode(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC,
                 name, "()I", null, null);
         InsnList code = method.instructions;
-        int value = random.nextInt();
-        int mask = random.nextInt();
-        AsmUtil.pushInt(code, value);
-        code.add(new VarInsnNode(Opcodes.ISTORE, 0));
-        code.add(new VarInsnNode(Opcodes.ILOAD, 0));
-        AsmUtil.pushInt(code, mask);
+        int multiplier = oddMultiplier(random);
+        int salt = random.nextInt();
+        code.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/System",
+                "nanoTime", "()J", false));
+        code.add(new InsnNode(Opcodes.DUP2));
+        AsmUtil.pushInt(code, 32);
+        code.add(new InsnNode(Opcodes.LUSHR));
+        code.add(new InsnNode(Opcodes.LXOR));
+        code.add(new InsnNode(Opcodes.L2I));
+        AsmUtil.pushInt(code, multiplier);
+        code.add(new InsnNode(Opcodes.IMUL));
+        AsmUtil.pushInt(code, salt);
         code.add(new InsnNode(Opcodes.IXOR));
-        code.add(new VarInsnNode(Opcodes.ISTORE, 0));
-        code.add(new VarInsnNode(Opcodes.ILOAD, 0));
-        AsmUtil.pushInt(code, mask);
-        code.add(new InsnNode(Opcodes.IXOR));
-        code.add(new VarInsnNode(Opcodes.ISTORE, 0));
-        code.add(new VarInsnNode(Opcodes.ILOAD, 0));
-        AsmUtil.pushInt(code, value);
-        code.add(new InsnNode(Opcodes.IXOR));
-        code.add(new VarInsnNode(Opcodes.ISTORE, 0));
-        code.add(new VarInsnNode(Opcodes.ILOAD, 0));
         code.add(new InsnNode(Opcodes.IRETURN));
-        method.maxLocals = 1;
-        method.maxStack = 2;
+        method.maxLocals = 0;
+        method.maxStack = 4;
         return method;
+    }
+
+    private static MethodNode ensureClinit(ClassNode node) {
+        for (MethodNode method : node.methods) {
+            if ("<clinit>".equals(method.name) && "()V".equals(method.desc)) {
+                return method;
+            }
+        }
+        MethodNode created = new MethodNode(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null);
+        created.instructions.add(new InsnNode(Opcodes.RETURN));
+        created.maxLocals = 0;
+        created.maxStack = 1;
+        node.methods.add(created);
+        return created;
     }
 
     private static void addSeedInit(ClassNode node, String fieldName, String seedMethod) {
         node.fields.add(new FieldNode(
-                Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL | Opcodes.ACC_SYNTHETIC,
+                Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL
+                        | Opcodes.ACC_SYNTHETIC,
                 fieldName, "I", null, null));
 
-        MethodNode clinit = null;
-        for (MethodNode method : node.methods) {
-            if ("<clinit>".equals(method.name) && "()V".equals(method.desc)) {
-                clinit = method;
-                break;
-            }
-        }
-        if (clinit == null) {
-            clinit = new MethodNode(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null);
-            clinit.instructions.add(new InsnNode(Opcodes.RETURN));
-            clinit.maxLocals = 0;
-            clinit.maxStack = 1;
-            node.methods.add(clinit);
-        }
+        MethodNode clinit = ensureClinit(node);
         InsnList init = new InsnList();
         init.add(new MethodInsnNode(Opcodes.INVOKESTATIC, node.name, seedMethod, "()I", false));
-        init.add(new org.objectweb.asm.tree.FieldInsnNode(
-                Opcodes.PUTSTATIC, node.name, fieldName, "I"));
+        init.add(new FieldInsnNode(Opcodes.PUTSTATIC, node.name, fieldName, "I"));
         clinit.instructions.insert(init);
         clinit.maxStack = Math.max(clinit.maxStack, 1);
     }
 
-    private static void insertDecoyCall(ClassNode owner, MethodNode method, String seedField,
-                                        String decoyName, String decoyString) {
+    /**
+     * Inserts {@code if ((seed & mask) == target) decoy(literal);} at the start of
+     * {@code method}. The predicate compares a runtime-derived seed against a
+     * random constant, so the branch is not statically decidable.
+     */
+    private static void insertDecoyCall(ClassNode caller, MethodNode method, String seedField,
+                                        String targetOwner, String decoyName, String decoyDesc,
+                                        String literal, Random random) {
+        int mask = 1 + random.nextInt(0x7FFFFF);
+        int target = random.nextInt() & mask;
         LabelNode real = new LabelNode();
         InsnList prelude = new InsnList();
-        prelude.add(new org.objectweb.asm.tree.FieldInsnNode(
-                Opcodes.GETSTATIC, owner.name, seedField, "I"));
-        prelude.add(new JumpInsnNode(Opcodes.IFEQ, real));
-        prelude.add(new LdcInsnNode(decoyString));
-        prelude.add(new MethodInsnNode(Opcodes.INVOKESTATIC, owner.name, decoyName,
-                "(Ljava/lang/String;)I", false));
-        prelude.add(new InsnNode(Opcodes.POP));
+        prelude.add(new FieldInsnNode(Opcodes.GETSTATIC, caller.name, seedField, "I"));
+        AsmUtil.pushInt(prelude, mask);
+        prelude.add(new InsnNode(Opcodes.IAND));
+        AsmUtil.pushInt(prelude, target);
+        prelude.add(new JumpInsnNode(Opcodes.IF_ICMPNE, real));
+        prelude.add(new LdcInsnNode(literal));
+        prelude.add(new MethodInsnNode(Opcodes.INVOKESTATIC, targetOwner, decoyName,
+                decoyDesc, false));
+        prelude.add(popFor(decoyDesc));
         prelude.add(real);
         method.instructions.insert(prelude);
+        method.maxStack = Math.max(method.maxStack, 3);
+    }
+    private static void insertDecoyCall(ClassNode owner, MethodNode method, String seedField,
+                                        String decoyName, String decoyDesc, String literal,
+                                        Random random) {
+        int mask = 1 + random.nextInt(0x7FFFFF);
+        int target = random.nextInt() & mask;
+        LabelNode real = new LabelNode();
+        InsnList prelude = new InsnList();
+        prelude.add(new FieldInsnNode(Opcodes.GETSTATIC, owner.name, seedField, "I"));
+        AsmUtil.pushInt(prelude, mask);
+        prelude.add(new InsnNode(Opcodes.IAND));
+        AsmUtil.pushInt(prelude, target);
+        prelude.add(new JumpInsnNode(Opcodes.IF_ICMPNE, real));
+        prelude.add(new LdcInsnNode(literal));
+        prelude.add(new MethodInsnNode(Opcodes.INVOKESTATIC, owner.name, decoyName,
+                decoyDesc, false));
+        prelude.add(popFor(decoyDesc));
+        prelude.add(real);
+        method.instructions.insert(prelude);
+        method.maxStack = Math.max(method.maxStack, 3);
+    }
+
+    private static AbstractInsnNode popFor(String desc) {
+        Type type = Type.getReturnType(desc);
+        return new InsnNode(type.getSize() == 2 ? Opcodes.POP2 : Opcodes.POP);
+    }
+
+    private static MethodNode findMethod(ClassNode node, String name) {
+        for (MethodNode method : node.methods) {
+            if (method.name.equals(name)) {
+                return method;
+            }
+        }
+        return null;
     }
 
     /** Moves the body behind {@code layers} private forwarding methods. */
-    private static void wrap(ClassNode node, MethodNode method, int layers) {
+    private static void wrap(ClassNode node, MethodNode method, int layers, NameGenerator names) {
         MethodNode current = method;
         for (int i = 0; i < layers; i++) {
-            String bodyName = uniqueMethodName(node, "a");
+            String bodyName = uniqueMethodName(node, names);
             MethodNode body = new MethodNode(movedAccess(current.access), bodyName,
                     current.desc, current.signature,
                     current.exceptions == null ? null : current.exceptions.toArray(new String[0]));
@@ -435,44 +774,35 @@ public final class AntiLlmPass implements Pass {
         return slots;
     }
 
-    private static String uniqueMethodName(ClassNode node, String base) {
-        String name = sanitize(base);
+    /**
+     * A member name from the renamer's own generator and dictionary, so generated
+     * members cannot be told apart from renamed program members.
+     */
+    private static String uniqueMethodName(ClassNode node, NameGenerator names) {
         Set<String> existing = new HashSet<String>();
         for (MethodNode method : node.methods) {
             existing.add(method.name);
         }
-        String candidate = name;
-        int counter = 0;
-        while (existing.contains(candidate)) {
-            candidate = name + Integer.toHexString(counter++);
+        for (int attempt = 0; attempt < 10000; attempt++) {
+            String candidate = names.random(NAME_LENGTH);
+            if (!existing.contains(candidate)) {
+                return candidate;
+            }
         }
-        return candidate;
+        throw new IllegalStateException("Unable to allocate a unique member name");
     }
 
-    private static String uniqueFieldName(ClassNode node) {
+    private static String uniqueFieldName(ClassNode node, NameGenerator names) {
         Set<String> existing = new HashSet<String>();
         for (FieldNode field : node.fields) {
             existing.add(field.name);
         }
-        int counter = 0;
-        String candidate;
-        do {
-            candidate = "s$" + Integer.toHexString(counter++);
-        } while (existing.contains(candidate));
-        return candidate;
-    }
-
-    private static String sanitize(String value) {
-        StringBuilder out = new StringBuilder();
-        for (int i = 0; i < value.length(); i++) {
-            char c = value.charAt(i);
-            if (Character.isJavaIdentifierPart(c)) {
-                out.append(c);
+        for (int attempt = 0; attempt < 10000; attempt++) {
+            String candidate = names.random(NAME_LENGTH);
+            if (!existing.contains(candidate)) {
+                return candidate;
             }
         }
-        if (out.length() == 0 || !Character.isJavaIdentifierStart(out.charAt(0))) {
-            out.insert(0, 'x');
-        }
-        return out.toString();
+        throw new IllegalStateException("Unable to allocate a unique field name");
     }
 }

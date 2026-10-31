@@ -14,33 +14,31 @@ import io.umbra.core.engine.EngineResult;
 import io.umbra.core.engine.UmbraEngine;
 import io.umbra.core.engine.UmbraVerifier;
 import io.umbra.core.util.Log;
-import io.umbra.gui.GuiMain;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /** Command-line entry point. */
 public final class Main {
 
-    private static final String VERSION = "3.2.1";
+    private static final String VERSION = "3.2.2";
 
     private Main() {
     }
 
     public static void main(String[] args) {
-        // No arguments opens the GUI; "gui"/"--gui" forwards the remaining
-        // arguments to the GUI launcher (for example --port or --no-browser).
+        // No arguments opens the desktop console. The console is a separate JavaFX
+        // jar (the engine jar must stay JavaFX-free so it runs on any JDK 8), so it
+        // is launched as a child process when it sits next to this jar; otherwise the
+        // command line help is printed instead of failing silently.
         if (args.length == 0 || "gui".equals(args[0]) || "--gui".equals(args[0])) {
-            String[] rest = args.length == 0 ? new String[0] : java.util.Arrays.copyOfRange(args, 1, args.length);
-            try {
-                GuiMain.main(rest);
-            } catch (Exception e) {
-                System.err.println("Umbra GUI failed: " + e.getMessage());
-                e.printStackTrace();
+            if (!launchConsole()) {
                 System.exit(1);
             }
             return;
@@ -68,6 +66,15 @@ public final class Main {
                         System.out.println(mark);
                     }
                 }
+                return;
+            }
+
+            if (parsed.dumpPreset != null) {
+                UmbraConfig base = new UmbraConfig.Builder()
+                        .input(Paths.get("in.jar"))
+                        .output(Paths.get("out.jar"))
+                        .build();
+                System.out.print(io.umbra.core.config.PresetValues.dump(parsed.dumpPreset, base));
                 return;
             }
             if (parsed.inspect) {
@@ -313,12 +320,27 @@ public final class Main {
         if (args.seed != null) {
             b.seed(args.seed);
         }
+        Map<String, String> typedSets = new LinkedHashMap<String, String>();
         for (String assignment : args.sets) {
             int split = assignment.indexOf('=');
             if (split <= 0) {
                 throw new ConfigException("--set expects key=value, got: " + assignment);
             }
-            b.option(assignment.substring(0, split).trim(), assignment.substring(split + 1).trim());
+            String key = assignment.substring(0, split).trim();
+            String value = assignment.substring(split + 1).trim();
+            b.option(key, value);
+            typedSets.put(key, value);
+        }
+        if (!typedSets.isEmpty()) {
+            // A --set key may name a typed section (`renamer.enabled=false`,
+            // `flowObfuscation.level=aggressive`); the engine reads the typed
+            // sections, so translate them here. This is the only front end that
+            // does it, and only for --set: a derived configuration (preset,
+            // nocturne exclusive mode) must still be able to tighten a section.
+            UmbraConfig.applyTypedOverrides(b, typedSets);
+            // The explicit switches below start from the typed values, so refresh
+            // the snapshot they read: preset < --set < --no-* / --flatten.
+            base = b.build(false);
         }
         if (args.dryRun) {
             b.dryRun(true);
@@ -517,6 +539,103 @@ public final class Main {
         return result;
     }
 
+    /**
+     * Starts the desktop console.
+     *
+     * <p>The console is a separate JavaFX jar: the engine jar has to stay free of
+     * JavaFX so it runs on any JDK 8, while the console needs a JDK that ships
+     * JavaFX. So this looks for {@code umbra-gui-fx.jar} next to the running jar and
+     * for a JavaFX-capable {@code javaw}, and spawns the console as a child process.
+     * When either is missing it prints the command line help instead of pretending
+     * a window opened.</p>
+     */
+    private static boolean launchConsole() {
+        java.nio.file.Path engine = runningJar();
+        java.nio.file.Path gui = null;
+        if (engine != null && engine.getParent() != null) {
+            java.nio.file.Path sibling = engine.getParent().resolve("umbra-gui-fx.jar");
+            if (Files.isRegularFile(sibling)) {
+                gui = sibling;
+            }
+        }
+        java.nio.file.Path javaFx = javaFxLauncher();
+        if (engine == null || gui == null || javaFx == null) {
+            System.out.println("The desktop console is not available next to this jar.");
+            if (gui == null) {
+                System.out.println("  missing: umbra-gui-fx.jar (built by gui-fx\\build-fx.cmd)");
+            }
+            if (javaFx == null) {
+                System.out.println("  missing: a JDK 8 with JavaFX (set JFX_JAVA_HOME)");
+            }
+            System.out.println();
+            usage();
+            return false;
+        }
+        try {
+            new ProcessBuilder(javaFx.toString(),
+                    "-cp", gui + java.io.File.pathSeparator + engine,
+                    "io.umbra.guifx.FxGui", "--jar", engine.toString())
+                    .start();
+            return true;
+        } catch (Exception failure) {
+            System.err.println("Cannot start the desktop console: " + failure);
+            usage();
+            return false;
+        }
+    }
+
+    /** Path of the jar this class was loaded from, or {@code null} in a class directory. */
+    private static java.nio.file.Path runningJar() {
+        try {
+            java.security.CodeSource source = Main.class.getProtectionDomain().getCodeSource();
+            if (source == null || source.getLocation() == null) {
+                return null;
+            }
+            java.nio.file.Path path = Paths.get(source.getLocation().toURI());
+            return Files.isRegularFile(path) ? path : null;
+        } catch (Exception failure) {
+            return null;
+        }
+    }
+
+    /**
+     * A {@code javaw} from a JDK that ships JavaFX: {@code JFX_JAVA_HOME} first, then
+     * the running JVM, then the usual installation roots.
+     */
+    private static java.nio.file.Path javaFxLauncher() {
+        List<java.nio.file.Path> roots = new ArrayList<java.nio.file.Path>();
+        String configured = System.getenv("JFX_JAVA_HOME");
+        if (configured != null && !configured.trim().isEmpty()) {
+            roots.add(Paths.get(configured.trim()));
+        }
+        String home = System.getProperty("java.home");
+        if (home != null && !home.isEmpty()) {
+            java.nio.file.Path current = Paths.get(home);
+            roots.add(current);
+            if (current.getParent() != null) {
+                roots.add(current.getParent());
+            }
+        }
+        // The running JVM is often a plain JDK 8 without JavaFX, while the machine
+        // has a JavaFX build installed; the launcher scripts already look in these
+        // roots, so the jar has to agree with them.
+        String userHome = System.getProperty("user.home");
+        if (userHome != null && !userHome.isEmpty()) {
+            roots.add(Paths.get(userHome, ".jdks", "corretto-1.8.0_462"));
+            roots.add(Paths.get(userHome, ".jdks", "jdk1.8.0_462"));
+        }
+        roots.add(Paths.get("C:\\Program Files\\Java\\jdk1.8.0_261"));
+        roots.add(Paths.get("C:\\Program Files\\Java\\jre1.8.0_471"));
+        for (java.nio.file.Path root : roots) {
+            java.nio.file.Path jfx = root.resolve("jre").resolve("lib").resolve("ext").resolve("jfxrt.jar");
+            java.nio.file.Path launcher = root.resolve("bin").resolve("javaw.exe");
+            if (Files.isRegularFile(jfx) && Files.isRegularFile(launcher)) {
+                return launcher;
+            }
+        }
+        return null;
+    }
+
     private static void usage() {
         System.out.println("Umbra " + VERSION + " - Java bytecode obfuscator");
         System.out.println();
@@ -567,6 +686,7 @@ public final class Main {
         System.out.println("  --report-json <json>   write a JSON audit report");
         System.out.println("  --inspect              inspect the input archive layout/compatibility and exit");
         System.out.println("  --inspect-json <file>  write the inspection report as JSON and exit");
+        System.out.println("  --dump-preset <name>   print the effective option values of a preset and exit");
         System.out.println("  --compat-report <json> write layout + run statistics JSON after the run");
         System.out.println("  --diff-mapping <old> <new>  print a mapping difference and exit");
         System.out.println("  --trace-watermark <jar>     print embedded Umbra watermark(s) and exit");
@@ -594,7 +714,8 @@ public final class Main {
         System.out.println("  -h, --help             show this help");
         System.out.println("  --version              print version");
         System.out.println();
-        System.out.println("Run without arguments (or with --gui) to start the graphical interface.");
+        System.out.println("Run without arguments (or with --gui) to start the desktop console.");
+        System.out.println("The console ships as umbra-gui-fx.jar next to this jar and needs a JDK 8 with JavaFX.");
     }
 
     private static final class Args {
@@ -643,6 +764,7 @@ public final class Main {
         String reportJson;
         boolean inspect;
         String inspectJson;
+
         String compatReport;
         String diffOld;
         String diffNew;
@@ -652,6 +774,8 @@ public final class Main {
         String licenseServer;
         boolean requireLicense;
         Long seed;
+        /** Prints the effective option values of a preset and exits. */
+        String dumpPreset;
         boolean dryRun;
         boolean verify;
         boolean allowInPlace;
@@ -775,6 +899,9 @@ public final class Main {
                 } else if ("--inspect-json".equals(arg)) {
                     a.inspect = true;
                     a.inspectJson = value(argv, ++i, arg);
+                } else if ("--dump-preset".equals(arg)) {
+                    a.dumpPreset = value(argv, ++i, arg);
+
                 } else if ("--compat-report".equals(arg)) {
                     a.compatReport = value(argv, ++i, arg);
                 } else if ("--diff-mapping".equals(arg)) {

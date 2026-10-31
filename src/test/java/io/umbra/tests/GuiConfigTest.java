@@ -26,7 +26,7 @@ public final class GuiConfigTest {
     public static void main(String[] args) throws Exception {
         Path dir = Files.createTempDirectory("umbra-gui-test-");
         try {
-            check("3.2.1".equals(GuiConfig.VERSION), "GUI version is 3.2.1");
+            check("3.2.2".equals(GuiConfig.VERSION), "GUI version is 3.2.2");
 
             Path input = dir.resolve("app.jar");
             Files.write(input, new byte[0]);
@@ -271,23 +271,6 @@ public final class GuiConfigTest {
                 }
             }
             check(integerSpecs >= 15, "catalogue has slider-backed integer options");
-            io.umbra.gui.ui.ModeOptionsPanel sliderPanel =
-                    new io.umbra.gui.ui.ModeOptionsPanel(
-                            io.umbra.gui.GuiModeOptions.defaults("Balanced"),
-                            "Balanced", null);
-            sliderPanel.setSize(io.umbra.gui.ui.ModeOptionsPanel.SHEET_WIDTH,
-                    io.umbra.gui.ui.ModeOptionsPanel.SHEET_HEIGHT);
-            io.umbra.gui.GuiScreenshot.layoutTree(sliderPanel);
-            check(sliderPanel.sliderCount() == integerSpecs,
-                    "panel builds one slider per integer spec");
-            check(sliderPanel.slider("string.strength") != null,
-                    "string strength slider exists");
-            check(sliderPanel.slider("decompilerNoise.level") != null,
-                    "decompiler noise slider exists");
-            check(sliderPanel.slider("flowObfuscation.maxInstructions") != null,
-                    "flow instruction slider exists");
-            check("200".equals(String.valueOf(io.umbra.gui.ui.Animation.MAX_DURATION)),
-                    "interactive animation duration is capped at 200ms");
         } finally {
             delete(dir);
         }

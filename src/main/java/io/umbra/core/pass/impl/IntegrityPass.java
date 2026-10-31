@@ -28,6 +28,7 @@ import java.util.Random;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
+import io.umbra.core.util.RuntimeNames;
 
 /**
  * Startup integrity / anti-tamper guard for archives that are not encrypted.
@@ -149,11 +150,11 @@ public final class IntegrityPass implements Pass {
         String digestEntry = randomEntryName(context, random);
         String crypto = CryptoSupport.ensureCrypto(context.classes(), config.seed());
         String guard = CryptoSupport.randomName(context.classes(), config.seed(),
-                "integrity-guard", "umbra/runtime/G");
+                "integrity-guard", RuntimeNames.path("G"));
         String watchdog = "";
         if (level >= 3) {
             watchdog = TemplateInjector.inject(context.classes(), UmbraWatchdog.class,
-                    "umbra/runtime/W", config.seed()).replace('/', '.');
+                    RuntimeNames.path("W"), config.seed()).replace('/', '.');
         }
         Map<String, String> replacements = new LinkedHashMap<String, String>();
         replacements.put("@@DIGEST@@", digestEntry);

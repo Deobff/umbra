@@ -1,0 +1,99 @@
+﻿[INFO] layout: flat
+[INFO] Loaded 26 classes and 2 resources from E:\MC\Umbra\demo\demo.jar (flat layout)
+[INFO] runtime helpers live in p8 (runtime.package=pinned or seed-derived)
+[INFO] nocturne: compatible mode - classic body passes run first and Nocturne shadows their output
+[INFO] Pass reflection-analysis started
+[INFO] reflection-analysis: kept 1 classes and kept 3 member names from reflection call sites
+[INFO] Pass reflection-analysis finished in 2 ms
+[INFO] Pass field-initialization started
+[INFO] field-initialization: moved 16 static constants into <clinit>
+[INFO] Pass field-initialization finished in 1 ms
+[INFO] Pass debug-info started
+[INFO] debug-info: cleaned 25 classes
+[INFO] Pass debug-info finished in 0 ms
+[INFO] Pass decompiler-noise started
+[INFO] decompiler-noise: level=1, 25 classes, 783 attributes, 23578 bytes
+[INFO] Pass decompiler-noise finished in 6 ms
+[INFO] Pass member-shuffle started
+[INFO] member-shuffle: shuffled 25 classes
+[INFO] Pass member-shuffle finished in 0 ms
+[INFO] Pass rename started
+[INFO] rename: mapping written to C:\Users\Administrator\AppData\Local\Temp\umbra-nocturne-compat-1653182708488418493\umbra-mapping.txt
+[INFO] rename: 25 classes, 47 methods, 35 fields renamed
+[INFO] Pass rename finished in 41 ms
+[INFO] Pass method-virtualization started
+[INFO] method-virtualization[vm2]: virtualized 52 methods (2455 instructions, 1 handlers, 0 indy bridges, 0 constructor bodies, 63 fused instructions), 0 skipped
+[INFO] Pass method-virtualization finished in 34 ms
+[INFO] Pass string-encryption started
+[INFO] string-encryption: encrypted 325 string constants (auto:chacha20=89, aes-ctr=69, rc4=74, speck=93, split=true, cache=false, perClassKey=13 classes, indy=0 sites, minLength=2, wipe=true, stackTraceHide=true, payload=v3, size-skips=0/0)
+[INFO] Pass string-encryption finished in 104 ms
+[INFO] Pass integer-encryption started
+[INFO] integer-encryption: obfuscated 322 constants
+[INFO] Pass integer-encryption finished in 1 ms
+[INFO] Pass mba started
+[INFO] mba[depth=2]: rewrote 1075 arithmetic expressions and 1370 constants in 71 methods
+[INFO] Pass mba finished in 10 ms
+[INFO] Pass flow-obfuscation started
+[INFO] flow-obfuscation[light]: 72 methods across 23 classes, 72 predicates (0 range, 0 hash), 0 branches inverted, 0 dead blocks, 279 junk blocks, 0 transposed blocks, 0 bogus exception ranges (0 verification skips, 0 classes kept conservative)
+[INFO] Pass flow-obfuscation finished in 207 ms
+[INFO] Pass control-flow-flattening started
+[INFO] control-flow-flattening: flattened 48 methods (144 blocks, 0 with try/catch, 0 with switches); skipped {unreachable=18, stack=5}
+[INFO] Pass control-flow-flattening finished in 55 ms
+[INFO] Pass exception-obfuscation started
+[INFO] exception-obfuscation[level=2]: wrapped 72 methods, 216 synthetic handlers, 144 dead throw paths, 0 fake handler entries (0 verification skips)
+[INFO] Pass exception-obfuscation finished in 95 ms
+[INFO] Pass junk-members started
+[INFO] junk-members: added 48 methods and 48 fields
+[INFO] Pass junk-members finished in 1 ms
+[INFO] Pass nocturne started
+[INFO] nocturne: shadowed 116 methods with 348 keyed variants (85604 instructions) across 24 classes; 4 skipped
+[INFO] Pass nocturne finished in 233 ms
+[INFO] Pass watermark started
+[INFO] watermark: embedded in a.umbra$d6155a and manifest
+[INFO] Pass watermark finished in 1 ms
+[INFO] Pass resource-rewrite started
+[INFO] resource-rewrite: updated 1 resource entries
+[INFO] Pass resource-rewrite finished in 0 ms
+[INFO] layout: wrote flat archive (238 classes, 0 multi-release variants, 0 module-info kept, 0 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] Output written to C:\Users\Administrator\AppData\Local\Temp\umbra-nocturne-compat-1653182708488418493\compatible.jar (238 classes, 2 resources, 1070 ms)
+[INFO] layout: flat
+[INFO] Loaded 26 classes and 2 resources from E:\MC\Umbra\demo\demo.jar (flat layout)
+[INFO] runtime helpers live in ji (runtime.package=pinned or seed-derived)
+[INFO] nocturne: exclusive mode �� flow/flattening/exception/MBA/VM/native/reference-hiding/anti-LLM/parameter/junk passes disabled
+[INFO] Pass reflection-analysis started
+[INFO] reflection-analysis: kept 1 classes and kept 3 member names from reflection call sites
+[INFO] Pass reflection-analysis finished in 1 ms
+[INFO] Pass field-initialization started
+[INFO] field-initialization: moved 16 static constants into <clinit>
+[INFO] Pass field-initialization finished in 0 ms
+[INFO] Pass debug-info started
+[INFO] debug-info: cleaned 25 classes
+[INFO] Pass debug-info finished in 0 ms
+[INFO] Pass decompiler-noise started
+[INFO] decompiler-noise: level=1, 25 classes, 763 attributes, 23303 bytes
+[INFO] Pass decompiler-noise finished in 3 ms
+[INFO] Pass member-shuffle started
+[INFO] member-shuffle: shuffled 25 classes
+[INFO] Pass member-shuffle finished in 0 ms
+[INFO] Pass rename started
+[INFO] rename: mapping written to C:\Users\Administrator\AppData\Local\Temp\umbra-nocturne-compat-1653182708488418493\umbra-mapping.txt
+[INFO] rename: 25 classes, 47 methods, 35 fields renamed
+[INFO] Pass rename finished in 25 ms
+[INFO] Pass string-encryption started
+[INFO] string-encryption: encrypted 469 string constants (auto:chacha20=113, aes-ctr=114, rc4=135, speck=107, split=true, cache=false, perClassKey=19 classes, indy=0 sites, minLength=2, wipe=true, stackTraceHide=true, payload=v3, size-skips=0/0)
+[INFO] Pass string-encryption finished in 26 ms
+[INFO] Pass integer-encryption started
+[INFO] integer-encryption: obfuscated 489 constants
+[INFO] Pass integer-encryption finished in 2 ms
+[INFO] Pass nocturne started
+[INFO] nocturne: shadowed 69 methods with 207 keyed variants (39252 instructions) across 21 classes; 3 skipped
+[INFO] Pass nocturne finished in 71 ms
+[INFO] Pass watermark started
+[INFO] watermark: embedded in a.umbra$d6155b and manifest
+[INFO] Pass watermark finished in 0 ms
+[INFO] Pass resource-rewrite started
+[INFO] resource-rewrite: updated 1 resource entries
+[INFO] Pass resource-rewrite finished in 1 ms
+[INFO] layout: wrote flat archive (28 classes, 0 multi-release variants, 0 module-info kept, 0 manifest attributes rewritten, 0 services/framework resources, 0 duplicates resolved)
+[INFO] Output written to C:\Users\Administrator\AppData\Local\Temp\umbra-nocturne-compat-1653182708488418493\exclusive.jar (28 classes, 2 resources, 181 ms)
+NocturneCompatibleTest: 14 checks passed

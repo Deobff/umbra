@@ -30,6 +30,12 @@ public final class GuardFeatures {
     public final boolean timing;
     /** Deep, level 3 opt-in: external process handle with VM_READ access. */
     public final boolean handleDump;
+    /** Deep: CRC readback of the guard's own code section (inline-patch detection). */
+    public final boolean codeCrc;
+    /** Deep: PAGE_NOACCESS/PAGE_GUARD rotation of a guard-owned data page. */
+    public final boolean pageGuard;
+    /** Module name/path fragments excluded from the module and exec-memory scans. */
+    public final String execWhitelist;
     /** Linux-only: native /proc/self checks, ptrace self-check. */
     public final boolean linuxChecks;
     /** Watchdog interval used for the timing-drift threshold (milliseconds). */
@@ -50,6 +56,9 @@ public final class GuardFeatures {
         this.moduleIntegrity = builder.moduleIntegrity;
         this.timing = builder.timing;
         this.handleDump = builder.handleDump;
+        this.codeCrc = builder.codeCrc;
+        this.pageGuard = builder.pageGuard;
+        this.execWhitelist = builder.execWhitelist;
         this.linuxChecks = builder.linuxChecks;
         this.watchdogMs = builder.watchdogMs;
         this.testHooks = builder.testHooks;
@@ -67,15 +76,21 @@ public final class GuardFeatures {
         Builder builder = builder(normalized);
         if (normalized >= 2) {
             builder.remoteThread(true)
-                    .execMemoryScan(true)
+                    // The executable-memory scan is kept out of level 2: GUI
+                    // toolkits (AWT/Swing) map JIT and native code in anonymous
+                    // executable regions and trip it as a false positive, which
+                    // kills a healthy application. Level 3 opts back in.
+                    .execMemoryScan(false)
                     .imageBreakpoints(true)
                     .codeSampling(true)
                     .moduleIntegrity(true)
                     .timing(true)
+                    .codeCrc(true)
+                    .pageGuard(true)
                     .linuxChecks(true);
         }
         if (normalized >= 3) {
-            builder.handleDump(true);
+            builder.execMemoryScan(true).handleDump(true);
         }
         return builder;
     }
@@ -116,6 +131,12 @@ public final class GuardFeatures {
         if (handleDump) {
             count++;
         }
+        if (codeCrc) {
+            count++;
+        }
+        if (pageGuard) {
+            count++;
+        }
         if (linuxChecks) {
             count++;
         }
@@ -134,6 +155,9 @@ public final class GuardFeatures {
                 + ", moduleIntegrity=" + moduleIntegrity
                 + ", timing=" + timing
                 + ", handleDump=" + handleDump
+                + ", codeCrc=" + codeCrc
+                + ", pageGuard=" + pageGuard
+                + ", execWhitelist=" + execWhitelist
                 + ", linuxChecks=" + linuxChecks
                 + ", watchdogMs=" + watchdogMs;
     }
@@ -150,6 +174,9 @@ public final class GuardFeatures {
         private boolean moduleIntegrity;
         private boolean timing;
         private boolean handleDump;
+        private boolean codeCrc;
+        private boolean pageGuard;
+        private String execWhitelist = GuardOptions.DEFAULT_EXEC_WHITELIST;
         private boolean linuxChecks;
         private long watchdogMs = 4000L;
         private boolean testHooks;
@@ -202,6 +229,21 @@ public final class GuardFeatures {
 
         public Builder handleDump(boolean value) {
             this.handleDump = value;
+            return this;
+        }
+
+        public Builder codeCrc(boolean value) {
+            this.codeCrc = value;
+            return this;
+        }
+
+        public Builder pageGuard(boolean value) {
+            this.pageGuard = value;
+            return this;
+        }
+
+        public Builder execWhitelist(String value) {
+            this.execWhitelist = GuardOptions.execWhitelist(value);
             return this;
         }
 

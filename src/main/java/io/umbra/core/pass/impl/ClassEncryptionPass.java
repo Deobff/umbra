@@ -38,6 +38,7 @@ import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
+import io.umbra.core.util.RuntimeNames;
 
 /**
  * Whole-archive encryption with a plaintext bootstrap loader.
@@ -83,10 +84,17 @@ public final class ClassEncryptionPass implements Pass {
     private static final String CONNECTION_TEMPLATE = "io/umbra/core/runtime/crypto/UmbraResourceConnection";
 
     private static final int MAGIC = 0x554D4232;
-    private static final int INDEX_VERSION = 3;
+    /**
+     * Index format version. 4 adds the constant-pool flag; a loader built before
+     * that change rejects the archive with "Unsupported encrypted archive
+     * version" instead of misreading the flag.
+     */
+    private static final int INDEX_VERSION = 4;
     private static final int FLAG_INTEGRITY = 1;
     private static final int FLAG_ANTIDUMP = 2;
     private static final int FLAG_RESOURCE_INTEGRITY = 4;
+    /** Mirrored by {@code UmbraClassLoader}: encrypted {@code CONSTANT_Utf8} data. */
+    private static final int FLAG_CONSTANT_POOL = 32;
     private static final int ALG_SHIFT = 3;
 
 
@@ -115,6 +123,16 @@ public final class ClassEncryptionPass implements Pass {
     public void run(PassContext context) {
         UmbraConfig config = context.config();
         ClassPool pool = context.classes();
+
+        // Eclipse runnable jars resolve classes through JarRsrcLoader, which builds
+        // a URLClassLoader over the archive; sealed payloads are not class files,
+        // so that loader cannot work with them.
+        ClassPool.Resource archiveManifest = pool.resource("META-INF/MANIFEST.MF");
+        if (archiveManifest != null && io.umbra.core.util.Jars
+                .parseManifest(archiveManifest.bytes()).get("Rsrc-Main-Class") != null) {
+            context.log().info("class-encryption: Eclipse runnable jar, archive left unencrypted");
+            return;
+        }
 
         String[] entry = resolveEntryPoint(context);
         if (entry == null) {
@@ -161,7 +179,7 @@ public final class ClassEncryptionPass implements Pass {
         String configuredLoader = config.option("classEncryption.loaderClass", "").trim().replace('.', '/');
         String loaderName;
         if (configuredLoader.isEmpty()) {
-            loaderName = CryptoSupport.randomName(pool, config.seed(), "class-loader", "umbra/runtime/L");
+            loaderName = CryptoSupport.randomName(pool, config.seed(), "class-loader", RuntimeNames.path("L"));
         } else {
             loaderName = configuredLoader;
             if (pool.getClass(loaderName) != null) {
@@ -172,12 +190,12 @@ public final class ClassEncryptionPass implements Pass {
         }
         String cryptoName = CryptoSupport.ensureCrypto(pool, config.seed());
         String connectionName = uniqueTemplateName(pool, config.seed(), "resource-connection",
-                "umbra/runtime/K", loaderName);
+                RuntimeNames.path("K"), loaderName);
         String handlerName = uniqueTemplateName(pool, config.seed(), "resource-handler",
-                "umbra/runtime/H", loaderName, connectionName);
+                RuntimeNames.path("H"), loaderName, connectionName);
         String watchdog = "";
         if (level >= 2) {
-            watchdog = TemplateInjector.inject(pool, UmbraWatchdog.class, "umbra/runtime/W",
+            watchdog = TemplateInjector.inject(pool, UmbraWatchdog.class, RuntimeNames.path("W"),
                     config.seed()).replace('/', '.');
         }
         // The encrypted loader refuses to decrypt/define classes while the unified
@@ -453,6 +471,7 @@ public final class ClassEncryptionPass implements Pass {
 
         @Override
         public void process(Path output, PassContext context) throws Exception {
+            boolean constantPool = context.config().optionBool("classEncryption.constantPool", true);
             Map<String, Integer> entryMethods = new LinkedHashMap<String, Integer>();
             Map<String, byte[]> entries = readEntries(output, entryMethods);
             String loaderEntry = loaderName + ".class";
@@ -577,16 +596,30 @@ public final class ClassEncryptionPass implements Pass {
                 byte[] nonce = Cipher.randomBytes(random, Cipher.NONCE_BYTES);
                 String label = (plan.kind == PayloadPlan.CLASS ? "c:" : "r:") + plan.logical;
                 byte[] key = Cipher.hmacSha256(master, Cipher.concat(Cipher.utf8(label), nonce));
+                byte[] payload = plan.bytes;
                 try {
-                    rewritten.put(plan.entry, Cipher.seal(plan.bytes, key, nonce, algorithm));
+                    if (plan.kind == PayloadPlan.CLASS && constantPool) {
+                        // Same routine the injected loader runs before defineClass, so
+                        // build-time and run-time cannot drift apart.
+                        payload = new byte[plan.bytes.length];
+                        System.arraycopy(plan.bytes, 0, payload, 0, plan.bytes.length);
+                        if (!UmbraClassLoader.cryptConstantPool(payload, key)) {
+                            throw new IllegalStateException(
+                                    "class-encryption: cannot encrypt the constant pool of "
+                                            + plan.logical);
+                        }
+                    }
+                    rewritten.put(plan.entry, Cipher.seal(payload, key, nonce, algorithm));
                 } finally {
                     Cipher.wipe(key);
                 }
                 if (plan.kind == PayloadPlan.CLASS) {
                     classNames.add(plan.logical);
                     classPayloads.add(plan.entry);
+                    // The digest covers exactly the bytes the loader unseals (constant
+                    // pool still encrypted), so verification needs no define-path patch.
                     classDigests.add(Cipher.hmacSha256(master,
-                            Cipher.concat(Cipher.utf8("d:c:" + plan.logical), plan.bytes)));
+                            Cipher.concat(Cipher.utf8("d:c:" + plan.logical), payload)));
                 } else {
                     resourceNames.add(plan.logical);
                     resourcePayloads.add(plan.entry);
@@ -602,6 +635,7 @@ public final class ClassEncryptionPass implements Pass {
             index.write(INDEX_VERSION);
             int flags = (integrity ? FLAG_INTEGRITY : 0) | (antiDump ? FLAG_ANTIDUMP : 0)
                     | (resourceIntegrity ? FLAG_RESOURCE_INTEGRITY : 0)
+                    | (constantPool ? FLAG_CONSTANT_POOL : 0)
                     | ((algorithm == Cipher.Algorithm.AES_CTR ? 2 : 1) << ALG_SHIFT);
             index.write(flags);
             index.write(level);

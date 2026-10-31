@@ -9,6 +9,7 @@ import io.umbra.core.jni.NativeMethodTranslator;
 import io.umbra.core.jni.NativeSettings;
 import io.umbra.core.runtime.TemplateInjector;
 import io.umbra.core.runtime.UmbraNativeLoader;
+import io.umbra.core.runtime.crypto.GuardSupport;
 import io.umbra.core.util.AsmUtil;
 import io.umbra.core.util.NameGenerator;
 import org.objectweb.asm.Opcodes;
@@ -43,6 +44,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import io.umbra.core.util.RuntimeNames;
 
 /**
  * Native (JNI) code generation.
@@ -117,6 +119,9 @@ public final class NativeCodePass implements Pass {
         try {
             tempDirectory = Files.createTempDirectory("umbra-native");
             CGenerator generator = new CGenerator();
+            // Per-build key of the encrypted name/descriptor pool, so a dumped
+            // library does not share the literal keystream with the next build.
+            generator.configureLiteralKey(context.random().nextLong());
             boolean antiDump = settings.antiDump();
             boolean antiBackfill = settings.antiBackfill();
             String resourceName = resourceName(context, settings);
@@ -126,6 +131,7 @@ public final class NativeCodePass implements Pass {
             int skipped = 0;
             int indyBridges = 0;
             int constructorsExtracted = 0;
+            Map<String, Integer> ownerIds = new LinkedHashMap<String, Integer>();
             if (settings.constructors()) {
                 for (ClassWork work : classes) {
                     constructorsExtracted += extractConstructorBodies(context, work, rewrites);
@@ -158,6 +164,12 @@ public final class NativeCodePass implements Pass {
                         generator.addMethod(generated);
                         work.translated.add(generated);
                         work.translatedNames.add(method.name + method.desc);
+                        // The generator groups bindings by owner in first-appearance
+                        // order, so the id assigned here is the id the registration
+                        // dispatcher expects.
+                        if (!ownerIds.containsKey(work.node.name)) {
+                            ownerIds.put(work.node.name, Integer.valueOf(ownerIds.size()));
+                        }
                         accepted++;
                         translatedInstructions += translator.instructionCount();
                         indyBridges += methodBridges.size();
@@ -207,11 +219,14 @@ public final class NativeCodePass implements Pass {
             replacements.put("@@FP1@@", "00000000000000000000");
             replacements.put("@@FP2@@", "00000000000000000000");
             loaderName = TemplateInjector.inject(context.classes(), UmbraNativeLoader.class,
-                    "umbra/runtime/N", context.config().seed(), replacements);
+                    RuntimeNames.path("N"), context.config().seed(), replacements);
             loaderInjected = true;
             if (antiDump || antiBackfill) {
                 generator.configureAntiDump(loaderName, antiDumpKey, antiBackfill);
             }
+            // Registration is always needed: without it the business classes have no
+            // way to bind their natives (nothing is exported any more).
+            generator.configureRegistration(loaderName);
 
             String sourceText = generator.finish();
             Path sourceFile = tempDirectory.resolve("umbra_native.c");
@@ -256,6 +271,9 @@ public final class NativeCodePass implements Pass {
 
             int convertedClasses = 0;
             int convertedMethods = 0;
+            // The loader hook reaches the injected loader through an indirect call site,
+            // so the program class carries no `invokestatic umbra/runtime/...`.
+            String hookDispatch = GuardSupport.ensureGuardDispatch(context.classes(), loaderName);
             for (ClassWork work : classes) {
                 if (work.translated.isEmpty()) {
                     continue;
@@ -267,7 +285,8 @@ public final class NativeCodePass implements Pass {
                     convertToNative(method);
                     convertedMethods++;
                 }
-                addLoaderHook(work.node, loaderName);
+                addLoaderHook(work.node, loaderName, ownerIds.get(work.node.name).intValue(),
+                        hookDispatch);
                 convertedClasses++;
             }
 
@@ -708,7 +727,7 @@ public final class NativeCodePass implements Pass {
             // Umbra's injected runtime helpers (VM holders, guards, loaders,
             // decryptors) are infrastructure: compiling them to native would
             // explode the library and may break their own bootstrapping.
-            if (name.startsWith("umbra/")) {
+            if (RuntimeNames.isRuntime(name) || name.startsWith("umbra/")) {
                 continue;
             }
             if (context.rules().skipBodyTransform(node.name)) {
@@ -803,7 +822,18 @@ public final class NativeCodePass implements Pass {
         return kept.isEmpty() ? null : kept;
     }
 
-    private static void addLoaderHook(ClassNode node, String loaderName) {
+    /**
+     * Prepends the native-library hook to a class's static initializer.
+     *
+     * <p>Two calls are inserted: {@code loader.ensureLoaded()} loads (and
+     * fingerprint-checks) the library once, and {@code loader.register(classId,
+     * Owner.class)} binds this class's native methods. Registering from the
+     * owning class's own {@code <clinit>} is what keeps initialization order
+     * identical to the unprotected program, because
+     * {@code RegisterNatives} initializes the class it registers for.</p>
+     */
+    private static void addLoaderHook(ClassNode node, String loaderName, int classId,
+                                      String dispatch) {
         MethodNode clinit = null;
         for (MethodNode method : node.methods) {
             if ("<clinit>".equals(method.name) && "()V".equals(method.desc)) {
@@ -812,16 +842,24 @@ public final class NativeCodePass implements Pass {
             }
         }
         InsnList hook = new InsnList();
-        hook.add(new MethodInsnNode(Opcodes.INVOKESTATIC, loaderName, "ensureLoaded", "()Z", false));
+        hook.add(GuardSupport.indirectCall(dispatch, loaderName, "ensureLoaded", "()Z"));
         hook.add(new InsnNode(Opcodes.POP));
+        AsmUtil.pushInt(hook, classId);
+        hook.add(new LdcInsnNode(org.objectweb.asm.Type.getObjectType(node.name)));
+        hook.add(GuardSupport.indirectCall(dispatch, loaderName, "register",
+                "(ILjava/lang/Class;)I"));
+        hook.add(new InsnNode(Opcodes.POP));
+        // register(int, Class) keeps the id and the class literal on the stack at the
+        // same time, so the initializer needs two stack slots.
+        int hookStack = 2;
         if (clinit != null) {
             clinit.instructions.insert(hook);
-            clinit.maxStack = Math.max(clinit.maxStack, 1);
+            clinit.maxStack = Math.max(clinit.maxStack, hookStack);
         } else {
             MethodNode created = new MethodNode(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null);
             created.instructions.add(hook);
             created.instructions.add(new InsnNode(Opcodes.RETURN));
-            created.maxStack = 1;
+            created.maxStack = hookStack;
             created.maxLocals = 0;
             node.methods.add(created);
         }

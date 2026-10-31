@@ -23,6 +23,7 @@ import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
+import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
@@ -37,6 +38,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import io.umbra.core.util.RuntimeNames;
 
 /**
  * Native anti-tamper / anti-Frida guard pass.
@@ -112,8 +114,8 @@ public final class NativeGuardPass implements Pass {
         List<String> nativeMethods = collectNativeMethods(context.classes());
         Random random = new Random(config.seed() ^ 0x47554152444CL);
         NameGenerator names = new NameGenerator(random, "");
-        String guardName = uniqueName(context.classes(), names, "umbra/runtime/G");
-        String watchdogName = uniqueName(context.classes(), names, "umbra/runtime/W");
+        String guardName = uniqueName(context.classes(), names, RuntimeNames.path("G"));
+        String watchdogName = uniqueName(context.classes(), names, RuntimeNames.path("W"));
 
         String resourceName = "";
         byte[] library = null;
@@ -125,9 +127,19 @@ public final class NativeGuardPass implements Pass {
         String compiler = NativeCompiler.resolve(config.option("native.compiler", ""), context.log());
         long secret = new Random(config.seed() ^ 0x4755415244554CL).nextLong();
         long sampleSeed = new Random(config.seed() ^ 0x53414D504C45534CL).nextLong();
+        // P0-2-b: bind the one-time-state advance to native code. The OTP class is
+        // injected by the flow pass (order 90, before this one); asking the shared
+        // runtime support returns the same cached name, so the C side registers
+        // natives for exactly the class the call sites use.
+        String otpClass = null;
+        if (config.optionBool("otp.enabled", false) && config.optionBool("otp.native", true)
+                && config.flow().enabled()) {
+            otpClass = context.runtime().ensureOtp(context.classes(), config.seed());
+            context.stats().add("otp.native", otpClass == null ? 0 : 1);
+        }
         if (compiler != null && NativeCompiler.hasJniHeaders()) {
             GuardBuild build = buildGuard(context, compiler, guardName, secret, features,
-                    sampleSeed);
+                    sampleSeed, otpClass);
             if (build != null) {
                 library = build.library;
                 source = build.source;
@@ -188,6 +200,9 @@ public final class NativeGuardPass implements Pass {
         context.stats().add("antiDebug.nativeGuard.moduleIntegrity", features.moduleIntegrity ? 1 : 0);
         context.stats().add("antiDebug.nativeGuard.timing", features.timing ? 1 : 0);
         context.stats().add("antiDebug.nativeGuard.handleDump", features.handleDump ? 1 : 0);
+        context.stats().add("antiDebug.nativeGuard.codeCrc", features.codeCrc ? 1 : 0);
+        context.stats().add("antiDebug.nativeGuard.pageGuard", features.pageGuard ? 1 : 0);
+        context.stats().text("antiDebug.nativeGuard.execWhitelist", features.execWhitelist);
         context.stats().add("antiDebug.nativeGuard.linuxChecks", features.linuxChecks ? 1 : 0);
         context.stats().add("antiDebug.nativeGuard.codeSamples", buildSamples);
         if (launcher) {
@@ -224,12 +239,16 @@ public final class NativeGuardPass implements Pass {
                 .frida(config.optionBool("antiDebug.frida", true))
                 .hash(config.optionBool("antiDebug.nativeHash", true))
                 .remoteThread(config.optionBool("antiDebug.remoteThread", dynamic))
-                .execMemoryScan(config.optionBool("antiDebug.execMemoryScan", dynamic))
+                .execMemoryScan(config.optionBool("antiDebug.execMemoryScan", false))
                 .imageBreakpoints(config.optionBool("antiDebug.imageBreakpoints", dynamic))
                 .codeSampling(config.optionBool("antiDebug.codeSampling", dynamic))
                 .moduleIntegrity(config.optionBool("antiDebug.moduleIntegrity", dynamic))
                 .timing(config.optionBool("antiDebug.timing", dynamic))
                 .handleDump(config.optionBool("antiDebug.handleDump", level >= 3))
+                .codeCrc(config.optionBool("antiDebug.codeCrc", dynamic))
+                .pageGuard(config.optionBool("antiDebug.pageGuard", dynamic))
+                .execWhitelist(config.option("antiDebug.execWhitelist",
+                        GuardOptions.DEFAULT_EXEC_WHITELIST))
                 .linuxChecks(config.optionBool("antiDebug.linuxChecks", true));
         return builder.build();
     }
@@ -350,7 +369,8 @@ public final class NativeGuardPass implements Pass {
         return count;
     }
     private static GuardBuild buildGuard(PassContext context, String compiler, String guardName,
-                                         long secret, GuardFeatures features, long sampleSeed) {
+                                         long secret, GuardFeatures features, long sampleSeed,
+                                         String otpClass) {
         String target = guardTarget();
         String suffix = librarySuffix(target);
         // Samples are PE RVAs: only Windows guard images can be patched this way.
@@ -364,7 +384,7 @@ public final class NativeGuardPass implements Pass {
                     secret ^ 0x4D4F44554C454E41L, 16);
             Path sourceFile = temp.resolve("g" + neutral.substring(1) + ".c");
             Path libraryFile = temp.resolve(neutral + suffix);
-            String source = GuardCodeGenerator.generate(guardName, secret, features);
+            String source = GuardCodeGenerator.generate(guardName, secret, features, null, otpClass);
             if (source.indexOf("@@") >= 0) {
                 throw new IllegalStateException(
                         "native-guard hygiene assertion failed: generated C still has @@ placeholders");
@@ -425,6 +445,9 @@ public final class NativeGuardPass implements Pass {
                 .moduleIntegrity(features.moduleIntegrity)
                 .timing(features.timing)
                 .handleDump(features.handleDump)
+                .codeCrc(features.codeCrc)
+                .pageGuard(features.pageGuard)
+                .execWhitelist(features.execWhitelist)
                 .linuxChecks(features.linuxChecks);
         return builder.build();
     }
@@ -468,7 +491,18 @@ public final class NativeGuardPass implements Pass {
      */
     private static boolean installGuardLauncher(PassContext context, String guardName, Random random) {
         String original = context.classes().mainClass();
-        if (original == null || original.isEmpty() || original.startsWith("umbra/")) {
+        // Eclipse runnable jars: the manifest entry is JarRsrcLoader and the real
+        // application main is Rsrc-Main-Class. Targeting the loader would run it
+        // twice ("factory already defined"), so the launcher targets the app main.
+        ClassPool.Resource launcherManifest = context.classes().resource("META-INF/MANIFEST.MF");
+        if (launcherManifest != null) {
+            String rsrcMain = io.umbra.core.util.Jars
+                    .parseManifest(launcherManifest.bytes()).get("Rsrc-Main-Class");
+            if (rsrcMain != null && !rsrcMain.trim().isEmpty()) {
+                original = rsrcMain.trim().replace('.', '/');
+            }
+        }
+        if (original == null || original.isEmpty() || RuntimeNames.isRuntime(original) || original.startsWith("umbra/")) {
             return false;
         }
         String mapped = context.mappings().classes().get(original);
@@ -480,19 +514,35 @@ public final class NativeGuardPass implements Pass {
         replacements.put("@@MAIN@@", original.replace('/', '.'));
         try {
             String launcher = TemplateInjector.inject(context.classes(),
-                    UmbraGuardLauncher.class, "umbra/runtime/L", context.config().seed(),
+                    UmbraGuardLauncher.class, RuntimeNames.path("L"), context.config().seed(),
                     replacements);
-            context.classes().setMainClass(launcher);
-            // Make the launcher visible in the manifest immediately so later
-            // passes (resource rewrite, watermark, writer) keep it instead of
-            // restoring the original entry point.
             ClassPool.Resource manifest = context.classes().resource("META-INF/MANIFEST.MF");
             if (manifest != null) {
                 Map<String, String> attributes = io.umbra.core.util.Jars.parseManifest(manifest.bytes());
+                if (attributes.get("Rsrc-Main-Class") != null) {
+                    // Eclipse "Runnable JAR": the entry is JarRsrcLoader and it resolves
+                    // the application main through Rsrc-Main-Class. Replacing
+                    // Main-Class makes the loader fail with "Missing attributes for
+                    // JarRsrcLoader", so keep the loader as the entry and route the
+                    // guard launcher through Rsrc-Main-Class instead.
+                    attributes.put("Rsrc-Main-Class", launcher.replace('/', '.'));
+                    context.classes().putResource("META-INF/MANIFEST.MF",
+                            io.umbra.core.util.Jars.writeManifest(attributes),
+                            manifest.time(), manifest.method());
+                    context.log().info("native-guard: Eclipse runnable jar detected, "
+                            + "guard routed through Rsrc-Main-Class (%s)", original);
+                    return true;
+                }
                 attributes.put("Main-Class", launcher.replace('/', '.'));
+                context.classes().setMainClass(launcher);
+                // Make the launcher visible in the manifest immediately so later
+                // passes (resource rewrite, watermark, writer) keep it instead of
+                // restoring the original entry point.
                 context.classes().putResource("META-INF/MANIFEST.MF",
                         io.umbra.core.util.Jars.writeManifest(attributes),
                         manifest.time(), manifest.method());
+            } else {
+                context.classes().setMainClass(launcher);
             }
             return true;
         } catch (RuntimeException failure) {
@@ -577,6 +627,10 @@ public final class NativeGuardPass implements Pass {
         remapped.access |= Opcodes.ACC_SYNTHETIC;
         remapped.version = Math.min(remapped.version, Opcodes.V1_8);
         replaceConstants(remapped, replacements);
+        // Keep the template's real SourceFile/SourceDebugExtension/line table out
+        // of the output: "UmbraNativeGuard.java"/"UmbraGuard.java" in the constant
+        // pool is a direct signature of the injected guard.
+        TemplateInjector.stripDebugInfo(remapped);
         pool.addGenerated(remapped);
     }
 
@@ -630,19 +684,20 @@ public final class NativeGuardPass implements Pass {
                 owners.add(owner);
             }
         }
+        String dispatch = GuardSupport.ensureGuardDispatch(pool, guardCheck);
         for (String owner : owners) {
             ClassNode node = pool.getClass(owner);
             if (node == null || pool.isGenerated(owner) || pool.isFrozen(owner)) {
                 continue;
             }
-            if (addClinitHook(node, guardCheck)) {
+            if (addClinitHook(node, guardCheck, dispatch)) {
                 instrumented++;
             }
         }
         return instrumented;
     }
 
-    private static boolean addClinitHook(ClassNode node, String guardName) {
+    private static boolean addClinitHook(ClassNode node, String guardName, String dispatch) {
         MethodNode clinit = null;
         for (MethodNode method : node.methods) {
             if ("<clinit>".equals(method.name) && "()V".equals(method.desc)) {
@@ -651,7 +706,7 @@ public final class NativeGuardPass implements Pass {
             }
         }
         InsnList hook = new InsnList();
-        hook.add(new MethodInsnNode(Opcodes.INVOKESTATIC, guardName, "check", "()V", false));
+        hook.add(GuardSupport.guardCall(dispatch, guardName));
         if (clinit != null) {
             if (alreadyHooked(clinit, guardName)) {
                 return false;
@@ -673,6 +728,12 @@ public final class NativeGuardPass implements Pass {
         AbstractInsnNode first = method.instructions.getFirst();
         while (first != null && first.getOpcode() < 0) {
             first = first.getNext();
+        }
+        if (first instanceof InvokeDynamicInsnNode) {
+            InvokeDynamicInsnNode indy = (InvokeDynamicInsnNode) first;
+            return "check".equals(indy.name) && "()V".equals(indy.desc)
+                    && indy.bsmArgs != null && indy.bsmArgs.length == 1
+                    && guardName.equals(indy.bsmArgs[0]);
         }
         if (!(first instanceof MethodInsnNode)) {
             return false;

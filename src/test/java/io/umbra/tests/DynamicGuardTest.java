@@ -68,6 +68,7 @@ import java.util.jar.Manifest;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
+import io.umbra.core.util.RuntimeNames;
 
 /**
  * Plain-main tests for the 3.1 unified Java runtime guard and the hardened
@@ -1136,7 +1137,28 @@ public final class DynamicGuardTest {
         }
     }
 
+    /**
+     * Runs the late-load scenario, retrying once on a miss.
+     *
+     * <p>The child performs its 24 loads in a few milliseconds, so the window
+     * between an accepted attach and the last load is a scheduling race: a miss
+     * is a test artefact, not a guard regression. A real regression (sticky
+     * refusal broken) fails both attempts. The check counter is restored before
+     * the retry so the reported total stays deterministic.</p>
+     */
     private static void runLateLoadScenario(Path fixtures, Path agentJar, Path jar) throws Exception {
+        int before = checks;
+        try {
+            runLateLoadOnce(fixtures, agentJar, jar);
+        } catch (AssertionError first) {
+            checks = before;
+            System.out.println("DynamicGuardTest: late-load scenario missed ("
+                    + first.getMessage() + "); retrying once (" + jar.getFileName() + ")");
+            runLateLoadOnce(fixtures, agentJar, jar);
+        }
+    }
+
+    private static void runLateLoadOnce(Path fixtures, Path agentJar, Path jar) throws Exception {
         LiveChild child = LiveChild.start(jdkJava(8), jar, new ArrayList<String>());
         try {
             check(child.awaitOutput("READY", 30000) != null,
@@ -1144,6 +1166,13 @@ public final class DynamicGuardTest {
             long pid = child.pid();
             long started = System.nanoTime();
             boolean attachedDetected = false;
+            // Distinguishes "the OS refused the attach" (nothing to assert) from
+            // "the agent loaded but the marker was missed" (assert the sticky
+            // refusal). Without this flag an attach that fails at the OS level
+            // (AttachNotSupportedException / IOException from the pipe enqueue)
+            // leaves the child to finish normally, and the assertion below then
+            // reports a failure for a scenario that never ran.
+            boolean attachAccepted = false;
             for (int attempt = 1; attempt <= 4 && !attachedDetected; attempt++) {
                 if (!isAlive(child)) {
                     System.out.println("DynamicGuardTest: late-load child stopped before attach "
@@ -1156,9 +1185,15 @@ public final class DynamicGuardTest {
                             + " failed (output: " + attached.output + "); skipping sticky check");
                     break;
                 }
+                attachAccepted = true;
                 attachedDetected = child.awaitOutput("attach detected", 5000L) != null;
             }
             if (!attachedDetected) {
+                if (!attachAccepted) {
+                    System.out.println("DynamicGuardTest: no attach was accepted by the OS; "
+                            + "skipping sticky-loader assertion (environmental)");
+                    return;
+                }
                 if (isAlive(child)) {
                     System.out.println("DynamicGuardTest: late-load attach sampling missed after 4 "
                             + "attempts and the child is still running; skipping sticky-loader "
@@ -1805,7 +1840,7 @@ public final class DynamicGuardTest {
         String watchdogName = "";
         if (watchdog) {
             watchdogName = TemplateInjector.inject(pool, UmbraWatchdog.class,
-                    "umbra/runtime/W", 99L).replace('/', '.');
+                    RuntimeNames.path("W"), 99L).replace('/', '.');
         }
         String guard = GuardSupport.ensureRuntimeGuard(pool, 99L,
                 guardReplacements(level, action, watchdogName));

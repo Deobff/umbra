@@ -3,6 +3,7 @@ package io.umbra.core.runtime;
 import io.umbra.core.api.RuntimeSupport;
 import io.umbra.core.config.UmbraConfig;
 import io.umbra.core.model.ClassPool;
+import io.umbra.core.util.DomainTags;
 import io.umbra.core.util.NameGenerator;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
@@ -23,6 +24,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import io.umbra.core.util.RuntimeNames;
 
 /** Default runtime support: injected string decryptor, indy bootstrap and watermark. */
 public final class DefaultRuntimeSupport implements RuntimeSupport {
@@ -30,6 +32,7 @@ public final class DefaultRuntimeSupport implements RuntimeSupport {
     private String decryptorName;
     private String indyBootstrapName;
     private String virtualMachineName;
+    private String otpName;
     private String authGateName;
     private String authGateKey;
 
@@ -42,7 +45,7 @@ public final class DefaultRuntimeSupport implements RuntimeSupport {
     @Override
     public synchronized String ensureStringDecryptor(ClassPool pool, long seed) {
         if (decryptorName == null) {
-            decryptorName = injectTemplate(UmbraStringDecryptor.class, "umbra/runtime/", seed, pool);
+            decryptorName = injectTemplate(UmbraStringDecryptor.class, RuntimeNames.prefix(), seed, pool);
         }
         return decryptorName;
     }
@@ -50,7 +53,7 @@ public final class DefaultRuntimeSupport implements RuntimeSupport {
     @Override
     public synchronized String ensureIndyBootstrap(ClassPool pool, long seed) {
         if (indyBootstrapName == null) {
-            indyBootstrapName = injectTemplate(UmbraIndyBootstrap.class, "umbra/runtime/I", seed, pool);
+            indyBootstrapName = injectTemplate(UmbraIndyBootstrap.class, RuntimeNames.path("I"), seed, pool);
         }
         return indyBootstrapName;
     }
@@ -58,9 +61,17 @@ public final class DefaultRuntimeSupport implements RuntimeSupport {
     @Override
     public synchronized String ensureVirtualMachine(ClassPool pool, long seed) {
         if (virtualMachineName == null) {
-            virtualMachineName = injectTemplate(UmbraVM.class, "umbra/runtime/V", seed, pool);
+            virtualMachineName = injectTemplate(UmbraVM.class, RuntimeNames.path("V"), seed, pool);
         }
         return virtualMachineName;
+    }
+
+    @Override
+    public synchronized String ensureOtp(ClassPool pool, long seed) {
+        if (otpName == null) {
+            otpName = injectTemplate(UmbraOtp.class, RuntimeNames.path("O"), seed, pool);
+        }
+        return otpName;
     }
 
     @Override
@@ -130,7 +141,7 @@ public final class DefaultRuntimeSupport implements RuntimeSupport {
             NameGenerator names = new NameGenerator(random, "");
             String candidate;
             do {
-                candidate = "umbra/runtime/A" + names.random(10);
+                candidate = RuntimeNames.path("A") + names.random(10);
             } while (pool.getClass(candidate) != null);
 
             ClassNode remapped = new ClassNode();
@@ -218,6 +229,11 @@ public final class DefaultRuntimeSupport implements RuntimeSupport {
             ClassNode remapped = new ClassNode();
             node.accept(new ClassRemapper(remapped, new SimpleRemapper(originalName, candidate)));
             remapped.access |= Opcodes.ACC_SYNTHETIC;
+            // These templates derive keys from the shared KDF labels, so they need the
+            // per-build separators like every other injection path; the debug metadata
+            // would otherwise publish the template's source file name.
+            replacePlaceholders(remapped, DomainTags.replacements());
+            TemplateInjector.stripDebugInfo(remapped);
             pool.addGenerated(remapped);
             return candidate;
         } catch (IOException e) {

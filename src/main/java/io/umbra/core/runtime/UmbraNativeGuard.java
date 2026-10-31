@@ -177,25 +177,28 @@ public final class UmbraNativeGuard {
      * (short-lived applications). The shutdown hook re-verifies that every
      * Umbra-created native method is still native and still present; a mismatch
      * forces a non-zero exit code even though the JVM is already terminating.
+     *
+     * <p>The hook body is a lambda on purpose: {@code TemplateInjector} copies
+     * this class into the protected program on its own, so an anonymous
+     * {@code Runnable} would compile to a separate {@code UmbraNativeGuard$1}
+     * class file that never gets injected, silently turning the hook into dead
+     * code. A lambda only adds an {@code invokedynamic} to this class.</p>
      */
     private static void installShutdownGuard() {
         try {
-            Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        int mask = verifyNativeMethods();
-                        if (mask == 0) {
-                            return;
-                        }
-                        System.err.println("[Umbra] native method backfill detected at shutdown (0x"
-                                + Integer.toHexString(mask) + ")");
-                        if (ACTION == 1 || ACTION == 2) {
-                            Runtime.getRuntime().halt(101);
-                        }
-                    } catch (Throwable ignored) {
-                        // Never make a clean shutdown fail because of the guard.
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                try {
+                    int mask = verifyNativeMethods();
+                    if (mask == 0) {
+                        return;
                     }
+                    System.err.println("[Umbra] native method backfill detected at shutdown (0x"
+                            + Integer.toHexString(mask) + ")");
+                    if (ACTION == 1 || ACTION == 2) {
+                        Runtime.getRuntime().halt(101);
+                    }
+                } catch (Throwable ignored) {
+                    // Never make a clean shutdown fail because of the guard.
                 }
             }, "umbra-shutdown-guard"));
         } catch (Throwable ignored) {

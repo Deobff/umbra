@@ -1,11 +1,17 @@
 package io.umbra.core.runtime.vm2;
 
+import java.lang.invoke.CallSite;
+import java.lang.invoke.ConstantCallSite;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.lang.reflect.AccessibleObject;
 import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -44,8 +50,6 @@ public final class UmbraVM2 {
     }
 
     // ---- wire format (kept in sync with Vm2Format) ----
-    private static final int MAGIC = 0x564D3202;
-    private static final int PAYLOAD_MAGIC = 0x564D3203;
     /** Legacy payload version: shared opcode map, no rolling opcode key. */
     private static final int FORMAT = 3;
     /** Current payload version: adds the rolling opcode-key layer. */
@@ -139,7 +143,7 @@ public final class UmbraVM2 {
     private static final int FRAME_RL = 4;
     private static final int FRAME_NEXT = 5;
 
-    /** Decoded payload cache, keyed by the holder's block array identity. */
+    /** Decoded payload cache, keyed by the holder's meta array identity. */
     private static final ConcurrentHashMap<Object, Object> STATES =
             new ConcurrentHashMap<Object, Object>();
     private static final ConcurrentHashMap<String, Object> TYPES =
@@ -161,6 +165,43 @@ public final class UmbraVM2 {
     // ==================================================================
     // Entry point
     // ==================================================================
+
+    /**
+     * Bootstrap of a virtualized call site.
+     *
+     * <p>A virtualized method body contains exactly one {@code invokedynamic}:
+     * its descriptor only carries the boxed locals array, its name is random and
+     * its single static argument is the payload id. The interpreter entry is
+     * resolved here, once per call site, through its signature - so neither the
+     * entry name nor the holder classes are referenced as strings by the caller,
+     * and the linked call site is a constant method handle.</p>
+     *
+     * @param caller    lookup of the class containing the call site (unused)
+     * @param name      random call-site name (unused)
+     * @param type      call-site type, {@code (Object[])Object}
+     * @param payloadId payload bound to this call site
+     */
+    public static CallSite bootstrap(MethodHandles.Lookup caller, String name, MethodType type,
+                                     int payloadId) throws Throwable {
+        MethodHandles.Lookup lookup = MethodHandles.lookup();
+        Method[] candidates = lookup.lookupClass().getDeclaredMethods();
+        for (int i = 0; i < candidates.length; i++) {
+            Method candidate = candidates[i];
+            if (!Modifier.isStatic(candidate.getModifiers())
+                    || !Object.class.equals(candidate.getReturnType())) {
+                continue;
+            }
+            Class<?>[] parameters = candidate.getParameterTypes();
+            if (parameters.length != 2 || parameters[0] != int.class
+                    || parameters[1] != Object[].class) {
+                continue;
+            }
+            MethodHandle entry = lookup.unreflect(candidate);
+            return new ConstantCallSite(MethodHandles.insertArguments(entry, 0,
+                    Integer.valueOf(payloadId)));
+        }
+        throw new IllegalStateException("VM2 interpreter entry is missing");
+    }
 
     /**
      * Executes one virtualized method body.
@@ -1392,24 +1433,95 @@ public final class UmbraVM2 {
     // Payload decoding
     // ==================================================================
 
+    /**
+     * Decoded payloads kept at once.
+     *
+     * <p>Every parsed payload holds its plaintext instruction stream, so an
+     * unbounded cache means a heap dump taken after warm-up contains the whole
+     * protected program. The cache is therefore capacity- and time-bounded: the
+     * oldest payload is dropped when the cap is reached, and payloads expire after
+     * {@link #STATE_TTL_NANOS}.</p>
+     */
+    private static final int STATE_CACHE_MAX = 128;
+    /** Age after which a decoded payload is dropped even if the program keeps running. */
+    private static final long STATE_TTL_NANOS = 5_000_000_000L;
+    /** Minimum gap between expiry sweeps (bounds the cost of the bookkeeping). */
+    private static final long STATE_SWEEP_NANOS = 250_000_000L;
+    /** Decode timestamp per cached payload, used for the age check. */
+    private static final java.util.concurrent.ConcurrentHashMap<Object, Long> STATE_STAMPS =
+            new java.util.concurrent.ConcurrentHashMap<Object, Long>();
+    private static volatile long stateSweptAt;
+
     private static Object[] stateFor(int[] meta, int[] map, int[][] blocks) {
-        Object existing = STATES.get(blocks);
+        // The block array is assembled by the call site on every invocation, so
+        // it cannot identify a payload; the meta array is the stable holder.
+        Object key = meta != null ? meta : blocks;
+        Object existing = STATES.get(key);
         if (existing != null) {
+            expireStates();
             return (Object[]) existing;
         }
-        synchronized (blocks) {
-            existing = STATES.get(blocks);
+        synchronized (key) {
+            existing = STATES.get(key);
             if (existing != null) {
                 return (Object[]) existing;
             }
             Object[] state = parse(meta, map, blocks);
-            STATES.put(blocks, state);
+            STATES.put(key, state);
+            STATE_STAMPS.put(key, Long.valueOf(System.nanoTime()));
+            trimStates();
             return state;
         }
     }
 
+    /**
+     * Drops payloads older than {@link #STATE_TTL_NANOS}.
+     *
+     * <p>References are only removed, never zeroed: another thread may still be
+     * executing the array it obtained before the sweep, so clearing the contents
+     * would corrupt a live dispatch.</p>
+     */
+    private static void expireStates() {
+        long now = System.nanoTime();
+        if (now - stateSweptAt < STATE_SWEEP_NANOS) {
+            return;
+        }
+        stateSweptAt = now;
+        for (Object key : STATE_STAMPS.keySet()) {
+            Long stamp = STATE_STAMPS.get(key);
+            if (stamp != null && now - stamp.longValue() > STATE_TTL_NANOS) {
+                STATE_STAMPS.remove(key);
+                STATES.remove(key);
+            }
+        }
+    }
+
+    /** Evicts the oldest decoded payload once the cap is exceeded. */
+    private static void trimStates() {
+        int size = STATES.size();
+        if (size <= STATE_CACHE_MAX) {
+            return;
+        }
+        Object oldestKey = null;
+        long oldestStamp = Long.MAX_VALUE;
+        for (Object key : STATE_STAMPS.keySet()) {
+            Long stamp = STATE_STAMPS.get(key);
+            if (stamp == null) {
+                continue;
+            }
+            if (stamp.longValue() < oldestStamp) {
+                oldestStamp = stamp.longValue();
+                oldestKey = key;
+            }
+        }
+        if (oldestKey != null) {
+            STATE_STAMPS.remove(oldestKey);
+            STATES.remove(oldestKey);
+        }
+    }
+
     private static Object[] parse(int[] meta, int[] map, int[][] blocks) {
-        if (meta == null || meta.length < META_LEN || meta[0] != MAGIC) {
+        if (meta == null || meta.length < META_LEN || meta[0] != magicFor(meta)) {
             throw tampered("header");
         }
         int payloadId = meta[6] >>> 16;
@@ -1468,7 +1580,7 @@ public final class UmbraVM2 {
             crypt(plain, stage);
         }
         int format = plain[1];
-        if (plain[0] != PAYLOAD_MAGIC || (format != FORMAT && format != ROLLING_FORMAT)) {
+        if (plain[0] != payloadMagic(key) || (format != FORMAT && format != ROLLING_FORMAT)) {
             throw tampered("format");
         }
         int codeLen = plain[3];
@@ -1641,6 +1753,18 @@ public final class UmbraVM2 {
             key = 0x51ED270B1F2A3C4DL;
         }
         return key;
+    }
+
+    /** Mirrors {@code Vm2Format.magicFor}: per-payload marker, no fixed literal. */
+    private static int magicFor(int[] meta) {
+        return (int) (metaKey(meta) >>> 32) ^ meta[7] ^ 0x2B;
+    }
+
+    /** Mirrors {@code Vm2Format.payloadMagic}: payload marker derived from the key. */
+    private static int payloadMagic(long key) {
+        long mixed = key ^ (key >>> 32) ^ 0x2B;
+        mixed *= GOLDEN;
+        return (int) (mixed >>> 32) ^ (int) mixed;
     }
 
     private static int mask(long key, int index) {

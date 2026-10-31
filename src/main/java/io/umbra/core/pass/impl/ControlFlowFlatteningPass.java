@@ -427,7 +427,7 @@ public final class ControlFlowFlatteningPass implements Pass {
 
         int stateSize = useLongState ? 2 : 1;
         int stateLocal = localSlots;
-        method.maxLocals = stateLocal + stateSize;
+        method.maxLocals = stateLocal + stateSize + 1;
 
         InsnList out = new InsnList();
         emitLocalInit(out, slotCategories, parameterSlots, localSlots);
@@ -753,7 +753,18 @@ public final class ControlFlowFlatteningPass implements Pass {
             out.add(new LdcInsnNode(Long.valueOf(targetBlock.longState)));
             out.add(new VarInsnNode(Opcodes.LSTORE, stateLocal));
         } else {
+            // target + (n - n): identical value, but the decompiler no longer sees a
+            // constant per case and cannot re-emit the state machine as if/else.
+            int scratch = stateLocal + 1;
+            out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/System",
+                    "nanoTime", "()J", false));
+            out.add(new InsnNode(Opcodes.L2I));
+            out.add(new VarInsnNode(Opcodes.ISTORE, scratch));
             AsmUtil.pushInt(out, targetBlock.intState);
+            out.add(new VarInsnNode(Opcodes.ILOAD, scratch));
+            out.add(new VarInsnNode(Opcodes.ILOAD, scratch));
+            out.add(new InsnNode(Opcodes.ISUB));
+            out.add(new InsnNode(Opcodes.IADD));
             out.add(new VarInsnNode(Opcodes.ISTORE, stateLocal));
         }
         out.add(new JumpInsnNode(Opcodes.GOTO, loop));

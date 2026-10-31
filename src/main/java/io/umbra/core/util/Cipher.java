@@ -134,12 +134,13 @@ public final class Cipher {
 
     /** Derives the 256-bit key used by the legacy string API. */
     public static byte[] legacyKey(long key) {
-        return sha256(concat(utf8("io.umbra.cipher.legacy.key.v2"), le64(key)));
+        return sha256(concat(utf8(DomainTags.tag(DomainTags.I_LEGACY_KEY)), le64(key)));
     }
 
     /** Derives the 96-bit nonce used by the legacy string API. */
     public static byte[] legacyNonce(long key) {
-        return first(sha256(concat(utf8("io.umbra.cipher.legacy.nonce.v2"), le64(key))), NONCE_BYTES);
+        return first(sha256(concat(utf8(DomainTags.tag(DomainTags.I_LEGACY_NONCE)), le64(key))),
+                NONCE_BYTES);
     }
 
     // ------------------------------------------------------------------
@@ -148,36 +149,39 @@ public final class Cipher {
 
     /** Deterministic per-call-site seed embedded in the class file. */
     public static long deriveSiteSeed(long seed, String className, int siteId) {
-        byte[] digest = sha256(concat(utf8("io.umbra.string.site.seed.v1"), le64(seed),
+        byte[] digest = sha256(concat(utf8(DomainTags.tag(DomainTags.I_SITE_SEED)), le64(seed),
                 utf8(className), le32(siteId)));
         return readLongBE(digest, 0);
     }
 
     /** Deterministic 256-bit per-class key. */
     public static byte[] deriveClassKey(long seed, String className) {
-        return sha256(concat(utf8("io.umbra.string.class.key.v1"), le64(seed), utf8(className)));
+        return sha256(concat(utf8(DomainTags.tag(DomainTags.I_CLASS_KEY)), le64(seed),
+                utf8(className)));
     }
 
     /** Per-site key (32 bytes) derived from the embedded 64-bit site seed. */
     public static byte[] stringSiteKey(long siteSeed, int siteId) {
-        return sha256(concat(utf8("io.umbra.string.site.key.v1"), le64(siteSeed), le32(siteId)));
+        return sha256(concat(utf8(DomainTags.tag(DomainTags.I_SITE_KEY)), le64(siteSeed),
+                le32(siteId)));
     }
 
     /** Per-site nonce (12 bytes) derived from the embedded 64-bit site seed. */
     public static byte[] stringSiteNonce(long siteSeed, int siteId) {
-        return first(sha256(concat(utf8("io.umbra.string.site.nonce.v1"), le64(siteSeed), le32(siteId))),
-                NONCE_BYTES);
+        return first(sha256(concat(utf8(DomainTags.tag(DomainTags.I_SITE_NONCE)), le64(siteSeed),
+                le32(siteId))), NONCE_BYTES);
     }
 
     /** Per-class nonce (12 bytes) derived from the 256-bit class key. */
     public static byte[] stringClassNonce(byte[] classKey, int siteId) {
-        return first(sha256(concat(utf8("io.umbra.string.class.nonce.v1"), classKey, le32(siteId))),
-                NONCE_BYTES);
+        return first(sha256(concat(utf8(DomainTags.tag(DomainTags.I_CLASS_NONCE)), classKey,
+                le32(siteId))), NONCE_BYTES);
     }
 
     /** AES-CTR IV derived from the key and the payload nonce. */
     public static byte[] aesIv(byte[] key, byte[] nonce) {
-        return first(sha256(concat(utf8("io.umbra.aes.iv.v1"), key, nonce)), AES_IV_BYTES);
+        return first(sha256(concat(utf8(DomainTags.tag(DomainTags.I_AES_IV)), key, nonce)),
+                AES_IV_BYTES);
     }
 
     // ------------------------------------------------------------------

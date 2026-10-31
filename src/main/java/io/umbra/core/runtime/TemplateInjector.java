@@ -1,6 +1,7 @@
 package io.umbra.core.runtime;
 
 import io.umbra.core.model.ClassPool;
+import io.umbra.core.util.DomainTags;
 import io.umbra.core.util.NameGenerator;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
@@ -58,7 +59,7 @@ public final class TemplateInjector {
      *
      * @param pool         program pool
      * @param template     compiled runtime class
-     * @param prefix       internal-name prefix, for example {@code "umbra/runtime/V"}
+     * @param prefix       internal-name prefix, for example {@code <runtime>/V}
      * @param seed         deterministic seed
      * @param replacements map of exact string constants to replacements (may be
      *                     {@code null}); every occurrence is rewritten in LDC
@@ -82,8 +83,14 @@ public final class TemplateInjector {
         ClassNode remapped = new ClassNode();
         node.accept(new ClassRemapper(remapped, new SimpleRemapper(node.name, candidate)));
         remapped.access |= Opcodes.ACC_SYNTHETIC;
+        // Every injected template gets the per-build domain separators, so a template
+        // cannot keep the literal KDF labels while the build side uses derived ones.
+        Map<String, String> constants = DomainTags.replacements();
         if (replacements != null && !replacements.isEmpty()) {
-            replaceConstants(remapped, replacements);
+            constants.putAll(replacements);
+        }
+        if (!constants.isEmpty()) {
+            replaceConstants(remapped, constants);
         }
         // The injected helper must run on every supported JVM; keep it at the
         // class file version the obfuscator itself is compiled for.

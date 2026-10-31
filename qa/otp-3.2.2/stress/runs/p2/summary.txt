@@ -1,0 +1,12 @@
+label            : p2
+jar              : E:\MC\Umbra\qa\otp-3.2.2\final-maximum.jar
+javaArgs         : 
+workers x rounds : 12 x 40 = 480
+runs recorded    : 480
+OK               : 479
+FAIL             : 1
+failure rate     : 0.208 %
+wall clock       : 430 s
+run time p50/p95 : 9.901 s / 15.341 s
+failures dir     : E:\MC\Umbra\qa\otp-3.2.2\stress\runs\p2\failures
+csv              : E:\MC\Umbra\qa\otp-3.2.2\stress\runs\p2\summary.csv

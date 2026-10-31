@@ -1,0 +1,13 @@
+label            : fixcheck
+jar              : E:\MC\Umbra\qa\otp-3.2.2\fix-maximum.jar
+javaArgs         : 
+workers x rounds : 16 x 50 = 800
+runs recorded    : 800
+OK               : 800
+FAIL (artifact)  : 0
+FAIL (JVM start) : 0
+failure rate     : 0 %
+wall clock       : 490.1 s
+run time p50/p95 : 8.356 s / 15.9 s
+failures dir     : E:\MC\Umbra\qa\otp-3.2.2\stress\runs\fixcheck\failures
+csv              : E:\MC\Umbra\qa\otp-3.2.2\stress\runs\fixcheck\summary.csv

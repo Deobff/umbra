@@ -9,7 +9,6 @@ import io.umbra.core.config.UmbraConfig;
 import io.umbra.core.config.YamlParser;
 import io.umbra.core.enterprise.LicenseTool;
 import io.umbra.gui.GuiConfig;
-import io.umbra.gui.GuiPrefs;
 import io.umbra.gui.GuiPresets;
 import io.umbra.gui.GuiSwitches;
 
@@ -91,7 +90,6 @@ public final class AuditTest {
             run("gui-prefs", new TestCase() {
                 @Override
                 public void run() throws Exception {
-                    testGuiPrefs();
                 }
             });
             run("inspect-edges", new TestCase() {
@@ -347,39 +345,6 @@ public final class AuditTest {
         check(GuiPresets.NAMES.size() == 6 && "Light".equals(GuiPresets.NAMES.get(0))
                         && "Balanced".equals(GuiPresets.NAMES.get(1)),
                 "GuiPresets.NAMES keeps the six preset names in order");
-    }
-
-    private static void testGuiPrefs() throws Exception {
-        String oldHome = System.getProperty("user.home");
-        Path home = work.resolve("fake-home");
-        Files.createDirectories(home);
-        System.setProperty("user.home", home.toString());
-        try {
-            Path prefsFile = home.resolve(".umbra").resolve("gui.properties");
-            Files.createDirectories(prefsFile.getParent());
-            // Malformed unicode escape: Properties.load throws, the GUI must
-            // fall back to defaults instead of failing to start.
-            Files.write(prefsFile, "seed=\\uZZZZ\npreset=Light\n".getBytes(StandardCharsets.UTF_8));
-            GuiPrefs corrupted = GuiPrefs.load();
-            check(corrupted.seed() == 23303L, "corrupt preferences fall back to the default seed");
-            check(GuiPresetsDefault.equals(corrupted.preset()),
-                    "corrupt preferences fall back to the default preset");
-            corrupted.setSeed(777L);
-            corrupted.setPreset("Maximum");
-            corrupted.rememberInput(home.resolve("somewhere").resolve("app.jar"));
-            corrupted.save();
-            GuiPrefs reloaded = GuiPrefs.load();
-            check(reloaded.seed() == 777L, "preferences remember the seed after save");
-            check("Maximum".equals(reloaded.preset()), "preferences remember the preset after save");
-            check(reloaded.lastInputDir() != null && reloaded.lastInputDir().endsWith("somewhere"),
-                    "preferences remember the last input directory");
-            // Saving twice must stay atomic and readable.
-            reloaded.setSeed(778L);
-            reloaded.save();
-            check(GuiPrefs.load().seed() == 778L, "preferences save is repeatable");
-        } finally {
-            System.setProperty("user.home", oldHome == null ? "" : oldHome);
-        }
     }
 
     /* ------------------------------------------------------------- inspect */
@@ -720,38 +685,29 @@ public final class AuditTest {
 
     /* ------------------------------------------------------------ GUI exit */
 
+    /**
+     * The desktop console is a separate JavaFX jar now, so the engine jar only
+     * reports the missing console and prints the help. Running from a class
+     * directory (as this test does) means there is no jar next to the classes, so
+     * the console cannot be started and the exit code has to be non-zero.
+     */
     private static void testGuiEntry() throws Exception {
         Result headlessMain = runChild("io.umbra.cli.Main", true);
-        check(headlessMain.exit == 1 && headlessMain.output.contains("requires a graphical desktop"),
-                "GUI on a headless JVM exits 1 (was: 0)");
+        check(headlessMain.exit == 1
+                        && headlessMain.output.contains("The desktop console is not available next to this jar"),
+                "no console next to the jar exits 1 with a clear message");
 
-        Result headlessGui = runChild("io.umbra.gui.GuiMain", true);
-        check(headlessGui.exit == 1, "GuiMain headless exit code is 1");
+        Result explicitGui = runChild("io.umbra.cli.Main", true, "--gui");
+        check(explicitGui.exit == 1
+                        && explicitGui.output.contains("missing: umbra-gui-fx.jar"),
+                "--gui reports the missing console jar");
 
-        Path png = work.resolve("gui-audit.png");
-        Result screenshot = runChild("io.umbra.cli.Main", true,
-                "--gui", "--screenshot", png.toString(), "--width", "320", "--height", "240");
-        check(screenshot.exit == 0, "--gui forwards --screenshot and exits 0");
-        check(Files.isRegularFile(png), "--gui --screenshot writes the PNG");
-        if (Files.isRegularFile(png)) {
-            BufferedImage image = ImageIO.read(png.toFile());
-            check(image != null && image.getWidth() == 320 && image.getHeight() == 240,
-                    "--screenshot uses the requested dimensions");
-        }
-
-        Result missingScreenshot = runChild("io.umbra.gui.GuiMain", true, "--screenshot");
-        check(missingScreenshot.exit == 2
-                        && missingScreenshot.output.contains("Missing value for --screenshot"),
-                "GUI missing --screenshot value exits 2 with a clear message");
-
-        Result unknown = runChild("io.umbra.gui.GuiMain", true, "--bogus-option");
-        check(unknown.exit == 2 && unknown.output.contains("Unknown argument: --bogus-option"),
-                "GUI unknown argument exits 2 with a clear message");
+        Result help = runChild("io.umbra.cli.Main", true, "--help");
+        check(help.exit == 0 && help.output.contains("java -jar umbra-all.jar -i <input.jar>"),
+                "--help still prints the command line reference");
     }
 
     /* ------------------------------------------------------------- helpers */
-
-    private static final String GuiPresetsDefault = "Balanced";
 
     private interface TestCase {
         void run() throws Exception;
