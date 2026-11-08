@@ -77,9 +77,7 @@ public final class ParameterObfuscationPass implements Pass {
                 if (method.visibleParameterAnnotations != null || method.invisibleParameterAnnotations != null) {
                     continue;
                 }
-                // The appended parameter occupies the first slot after the
-                // existing arguments. Only methods whose locals already end
-                // there can be changed safely without shifting local indices.
+
                 if (method.maxLocals > argumentSlots(method)) {
                     continue;
                 }
@@ -95,7 +93,6 @@ public final class ParameterObfuscationPass implements Pass {
             return;
         }
 
-        // Count direct call sites and remember which candidates are actually used.
         Map<Change, Integer> callCounts = new HashMap<Change, Integer>();
         for (ClassNode node : context.classes().classes().values()) {
             for (MethodNode method : node.methods) {
@@ -157,7 +154,6 @@ public final class ParameterObfuscationPass implements Pass {
             }
         }
 
-        // Parameter descriptors changed; refresh hierarchy members for later passes.
         for (ClassNode node : context.classes().classes().values()) {
             if (!context.classes().isGenerated(node.name)) {
                 context.hierarchy().addInput(node);

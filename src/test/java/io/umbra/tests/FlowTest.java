@@ -116,9 +116,6 @@ public final class FlowTest {
         System.out.println("FlowTest: " + checks + " checks passed");
     }
 
-    // ------------------------------------------------------------ identities
-
-    /** Fails loudly instead of hanging forever if transformed code loops. */
     private static void startWatchdog() {
         final long timeout = Long.parseLong(System.getProperty("umbra.flowtest.watchdog", "60000"));
         Thread watchdog = new Thread(new Runnable() {
@@ -154,8 +151,8 @@ public final class FlowTest {
             check(((a & ~b) - (~a & b)) == a - b, "int sub identity");
             check(((a | b) - (a ^ b)) == (a & b), "int and identity");
             check(((a & b) + (a ^ b)) == (a | b), "int or identity");
-            check((((a * (a + 1)) & 1) == 0), "int parity identity");
-            check(((a | 1) != 0), "int or-one identity");
+
+            check((((a & 0x7FFFFFFF) | 8) > ((a & 0x7FFFFFFF) & 7)), "int interval predicate");
             long x = random.nextLong();
             long y = random.nextLong();
             check(((x | y) + (x & y)) == x + y, "long add identity");
@@ -163,11 +160,8 @@ public final class FlowTest {
             check(((x & ~y) - (~x & y)) == x - y, "long sub identity");
             check(((x | y) - (x ^ y)) == (x & y), "long and identity");
             check(((x & y) + (x ^ y)) == (x | y), "long or identity");
-            check((((x * (x + 1)) & 1L) == 0L), "long parity identity");
         }
     }
-
-    // ---------------------------------------------------------------- MBA pass
 
     private static void testMbaPass() throws Exception {
         ClassNode node = target();
@@ -186,9 +180,12 @@ public final class FlowTest {
         assertArithmetic(type);
         check(context.stats().snapshot().get("mba.expressions").longValue() > 0, "mba rewrote expressions");
         check(context.stats().snapshot().get("mba.constants").longValue() > 0, "mba rewrote constants");
-    }
 
-    // ------------------------------------------------------- flow obfuscation
+        check(context.stats().snapshot().get("mba.runtimeConstants").longValue() > 0,
+                "mba masked constants through the runtime table");
+        check(countArrayFields(node) > 0, "mba added the runtime int[] table");
+        check(!containsBannedShape(node), "mba emitted no cancelling constant shape");
+    }
 
     private static void testFlowObfuscation() throws Exception {
         ClassNode node = target();
@@ -201,6 +198,13 @@ public final class FlowTest {
         check(stats.snapshot().get("flow.predicates").longValue() > 0, "flow inserted predicates");
         check(stats.snapshot().get("flow.branches.inverted").longValue() > 0, "flow inverted branches");
         check(stats.snapshot().get("flow.junkBlocks").longValue() > 0, "flow inserted junk");
+
+        check(stats.snapshot().get("flow.runtimeTables").longValue() > 0,
+                "flow materialised runtime tables");
+        check(stats.snapshot().get("flow.maskedConstants").longValue() > 0,
+                "flow masked its constants");
+        check(countArrayFields(node) > 0, "flow added the runtime int[] table");
+        check(!containsBannedShape(node), "flow emitted no foldable predicate shape");
     }
 
     private static void testFlowReordering() throws Exception {
@@ -209,16 +213,13 @@ public final class FlowTest {
         PassContext context = context(original, node, 505L, false, true);
         new FlowObfuscationPass().run(context);
         Class<?> type = verifyAndLoad(serialize(node, context.hierarchy()), "reorder");
-        // The full behavioural matrix runs against the rescheduled bytecode: block
-        // scheduling must not change a single result.
+
         assertAll(type);
         Long moved = context.stats().snapshot().get("flow.reordered.blocks");
         check(moved != null && moved.longValue() > 0, "flow rescheduled basic blocks");
         check(context.stats().snapshot().get("flow.skipped").longValue() == 0,
                 "every rescheduled method still verified");
     }
-
-    // ------------------------------------------------------------ flattening
 
     private static void testFlattening() throws Exception {
         ClassNode node = target();
@@ -237,8 +238,12 @@ public final class FlowTest {
                 "skipped method with non-empty stack at a jump target");
         Long blockSkips = stats.snapshot().get("flow.flattened.skipped.blocks");
         check(blockSkips != null && blockSkips.longValue() > 0, "skipped trivial try/catch method");
-        // The flattening must actually make the dispatcher visible: at least one
-        // class must contain a tableswitch over the state variable.
+
+        check(stats.snapshot().get("cff.runtimeStates").longValue() > 0,
+                "flattening masked its states");
+        check(countArrayFields(node) > 0, "flattening added the runtime int[] table");
+        check(!containsBannedShape(node), "flattening emitted no foldable state shape");
+
         check(countSwitches(transformed) > 1, "flattened code contains dispatcher switches");
     }
 
@@ -261,11 +266,6 @@ public final class FlowTest {
         check(stats.snapshot().get("exceptions.fakeThrows").longValue() > 0, "exception pass added fake throws");
     }
 
-    /**
-     * Runs flow + flattening over every class of the real demo JAR and forces
-     * {@code COMPUTE_FRAMES} serialization. This surfaces ASM frame-computation
-     * crashes (including internal NPEs) in the test rather than in a full run.
-     */
     private static void testDemoClassesSerialize() throws Exception {
         Path root = findProjectRoot();
         if (root == null) {
@@ -388,7 +388,6 @@ public final class FlowTest {
         return false;
     }
 
-    /** Prints the method whose frames cannot be computed (diagnostic only). */
     private static void diagnoseFrames(ClassNode node) {
         Hierarchy hierarchy = new Hierarchy();
         hierarchy.addInput(node);
@@ -417,8 +416,6 @@ public final class FlowTest {
             }
         }
     }
-
-    // -------------------------------------------------------- expected values
 
     private static void assertArithmetic(Class<?> type) throws Exception {
         int[][] pairs = {
@@ -497,7 +494,6 @@ public final class FlowTest {
         }
     }
 
-    /** Method returns {@code long}; reference implementation. */
     private static long refLongMixLong(long a, long b) {
         long s = a + b;
         long d = a - b;
@@ -583,8 +579,6 @@ public final class FlowTest {
         return value;
     }
 
-    // ------------------------------------------------------------- demo jar
-
     private static void testDemoJar() throws Exception {
         Path root = findProjectRoot();
         if (root == null) {
@@ -636,7 +630,6 @@ public final class FlowTest {
         return output;
     }
 
-    /** Absolute classpath so subprocesses can run from a temp working directory. */
     private static String absoluteClasspath() {
         String raw = System.getProperty("java.class.path");
         StringBuilder result = new StringBuilder();
@@ -666,8 +659,6 @@ public final class FlowTest {
         }
         return null;
     }
-
-    // ------------------------------------------------------- class synthesis
 
     private static ClassNode target() {
         ClassNode node = new ClassNode();
@@ -962,8 +953,6 @@ public final class FlowTest {
         return method;
     }
 
-    // ------------------------------------------------------------ infrastructure
-
     private static PassContext context(byte[] originalBytes, ClassNode node, long seed, boolean flattening) {
         return context(originalBytes, node, seed, flattening, false);
     }
@@ -1039,6 +1028,74 @@ public final class FlowTest {
         } catch (ClassNotFoundException e) {
             throw new AssertionError("Cannot load transformed class", e);
         }
+    }
+
+    private static int countArrayFields(ClassNode node) {
+        int count = 0;
+        for (org.objectweb.asm.tree.FieldNode field : node.fields) {
+            if ("[I".equals(field.desc) && (field.access & Opcodes.ACC_STATIC) != 0) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private static boolean containsBannedShape(ClassNode node) {
+        for (MethodNode method : node.methods) {
+            AbstractInsnNode[] insns = method.instructions.toArray();
+            for (int i = 0; i < insns.length; i++) {
+                int opcode = insns[i].getOpcode();
+                if (opcode == Opcodes.ISUB && i >= 2
+                        && insns[i - 2].getOpcode() == Opcodes.ILOAD
+                        && insns[i - 1].getOpcode() == Opcodes.ILOAD
+                        && ((VarInsnNode) insns[i - 2]).var == ((VarInsnNode) insns[i - 1]).var) {
+                    return true;
+                }
+                if (opcode == Opcodes.IMUL && i >= 4
+                        && insns[i - 4].getOpcode() == Opcodes.ILOAD
+                        && insns[i - 3].getOpcode() == Opcodes.DUP
+                        && insns[i - 2].getOpcode() == Opcodes.ICONST_1
+                        && insns[i - 1].getOpcode() == Opcodes.IADD) {
+                    return true;
+                }
+                if (opcode == Opcodes.IAND && i >= 2
+                        && insns[i - 1].getOpcode() == Opcodes.ICONST_1
+                        && insns[i - 2].getOpcode() == Opcodes.IMUL) {
+                    return true;
+                }
+                if ((opcode == Opcodes.IFNE || opcode == Opcodes.IFEQ) && i >= 2
+                        && insns[i - 1].getOpcode() == Opcodes.IOR
+                        && isIntOne(insns[i - 2])) {
+                    return true;
+                }
+                if (opcode == Opcodes.IXOR && i >= 1 && insns[i - 1].getOpcode() == Opcodes.DUP) {
+                    return true;
+                }
+                if (opcode == Opcodes.IXOR && i >= 4
+                        && insns[i - 4].getOpcode() == Opcodes.ILOAD
+                        && insns[i - 3].getOpcode() == Opcodes.ILOAD
+                        && isIntPush(insns[i - 2])
+                        && insns[i - 1].getOpcode() == Opcodes.IXOR) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean isIntOne(AbstractInsnNode insn) {
+        return insn.getOpcode() == Opcodes.ICONST_1;
+    }
+
+    private static boolean isIntPush(AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        if (opcode >= Opcodes.ICONST_M1 && opcode <= Opcodes.ICONST_5) {
+            return true;
+        }
+        if (opcode == Opcodes.BIPUSH || opcode == Opcodes.SIPUSH) {
+            return true;
+        }
+        return insn instanceof LdcInsnNode && ((LdcInsnNode) insn).cst instanceof Integer;
     }
 
     private static int countSwitches(byte[] bytes) {

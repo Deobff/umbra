@@ -19,7 +19,6 @@ public final class Stats {
         add(key, 1L);
     }
 
-    /** Stores a small textual result (loader name, detected mod id, ...). */
     public synchronized void text(String key, String value) {
         if (key != null && value != null) {
             texts.put(key, value);

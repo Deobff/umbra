@@ -46,7 +46,6 @@ import java.util.zip.ZipFile;
  */
 public final class UmbraNativeLoader {
 
-    /** JAR entry that holds the compiled native library. */
     private static final String RESOURCE = "@@RESOURCE@@";
     private static final String ANTI_DUMP_FLAG = "@@ANTIDUMP@@";
     private static final String ANTI_BACKFILL_FLAG = "@@ANTIBACKFILL@@";
@@ -60,39 +59,290 @@ public final class UmbraNativeLoader {
     private static final long KEY = parseHexLong(KEY_HEX);
 
     private static final Object LOCK = new Object();
-    /** Neutral marker for stale-directory cleanup (no fixed file-name prefix). */
+
     private static final String MARKER = "9f2c7a4e1b8d6350a5c9e2f7b4d1863e";
     private static final String MARKER_FILE = "m";
     private static final String NAME_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789";
     private static final java.security.SecureRandom RANDOM = new java.security.SecureRandom();
 
+    private static final boolean DEBUG = Boolean.getBoolean("umbra.debug");
+
+    private static void say(String line) {
+        if (DEBUG) {
+            System.err.println(line);
+        }
+    }
+
     private static volatile int state;
     private static volatile String failure;
 
-    /** Keyed backfill challenge implemented by the generated native library. */
     private static native long verifyChallenge(int nonce);
 
-    /**
-     * Binds the native methods of one owning class.
-     *
-     * <p>Called from that class's own {@code <clinit>} with its build-time id and
-     * its {@code Class} literal. Registering from the owning class keeps the
-     * initialization order unchanged: {@code JNI_OnLoad} never {@code FindClass}es
-     * a business class.</p>
-     *
-     * @param classId build-time id the library uses to look up the binding table
-     * @param owner   the class declaring the native methods
-     * @return {@code 0} on success, a negative JNI error code otherwise
-     */
     public static native int register(int classId, Class<?> owner);
+
+    public static native int keyRoot(int slot, int sub, byte[] out);
+
+    public static native int keyRoot2(int slot, int sub, byte[] nonce, byte[] out);
+
+    public static native int installCodeLibrary(String path, Class<?> loaderClass);
+
+    public static native int bindNames(int version, String[] names);
+
+    public static native int verifyLoader(byte[] loaderBytes);
+
+    public static native int verifyLoader(byte[] loaderBytes, byte[] bridgeBytes);
+
+    public static native int verifyLoader(String loaderSha, String bridgeSha);
+
+    public static final int BIND_NAMES_VERSION = 2;
+
+    public static boolean bindOwnNames(Class<?> owner) {
+        if (owner == null) {
+            return false;
+        }
+        try {
+            if (!ensureLoaded()) {
+                return false;
+            }
+            String[] names = new String[] {
+                    nameFor(owner, "(II[B[B)I"),
+                    nameFor(owner, "([J)I"),
+                    nameFor(owner, "(J[B)I"),
+                    nameFor(owner, "(I[B)I"),
+                    nameFor(owner, "(Ljava/lang/String;Ljava/lang/Class;)I"),
+                    nameFor(owner, "(ILjava/lang/Class;)I"),
+                    nameFor(owner, "(I)J"),
+
+                    firstNonEmpty(nameFor(owner, "(Ljava/lang/String;Ljava/lang/String;)I"),
+                            nameFor(owner, "([B[B)I"),
+                            nameFor(owner, "([B)I")),
+            };
+            if (names[0].isEmpty() || names[5].isEmpty()) {
+                say("[umbra-diag] owner=" + owner.getName()
+                        + " keyRoot2=[] register=[] - descriptors do not match");
+                return false;
+            }
+
+            for (java.lang.reflect.Method method : owner.getDeclaredMethods()) {
+                if (method.getName().equals(names[0]) || method.getName().equals(names[5])) {
+                    if (!java.lang.reflect.Modifier.isNative(method.getModifiers())) {
+                        say("[umbra-diag] not-native " + method.getName()
+                                + " modifiers=0x" + Integer.toHexString(method.getModifiers()));
+                    }
+                }
+            }
+            int rc = bindNames(BIND_NAMES_VERSION, names);
+            if (rc != 0) {
+                say("[umbra-diag] bindNames rc=" + rc + " owner=" + owner.getName());
+            }
+            return rc == 0;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    public static boolean bindOwnNames() {
+        try {
+            boolean loaded = ensureLoaded();
+            say("[umbra-diag] bindOwnNames enter loaded=" + loaded);
+            if (!loaded) {
+                return false;
+            }
+
+            Class<?> self = new Object() {
+            }.getClass().getEnclosingClass();
+            if (self == null) {
+                say("[umbra-diag] no caller class; call bindOwnNames(Class)");
+                return false;
+            }
+            String[] names = new String[] {
+                    nameFor(self, "(II[B[B)I"),
+                    nameFor(self, "([J)I"),
+                    nameFor(self, "(J[B)I"),
+                    nameFor(self, "(I[B)I"),
+                    nameFor(self, "(Ljava/lang/String;Ljava/lang/Class;)I"),
+                    nameFor(self, "(ILjava/lang/Class;)I"),
+                    nameFor(self, "(I)J"),
+            };
+
+            if (names[0] == null || names[0].isEmpty() || names[5] == null || names[5].isEmpty()) {
+                say("[umbra-diag] self=" + self.getName() + " declared="
+                        + self.getDeclaredMethods().length + " keyRoot2=[" + names[0]
+                        + "] register=[" + names[5] + "]");
+                return false;
+            }
+            for (int i = 0; i < names.length; i++) {
+                if (names[i] == null) {
+                    names[i] = "";
+                }
+            }
+            int rc = bindNames(BIND_NAMES_VERSION, names);
+            if (rc != 0) {
+                say("[umbra-diag] bindNames rc=" + rc + " self=" + self.getName()
+                        + " keyRoot2=[" + names[0] + "] register=[" + names[5] + "]");
+            }
+            return rc == 0;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static String firstNonEmpty(String... candidates) {
+        for (String candidate : candidates) {
+            if (candidate != null && !candidate.isEmpty()) {
+                return candidate;
+            }
+        }
+        return "";
+    }
+
+    private static String nameFor(Class<?> owner, String descriptor) {
+        for (java.lang.reflect.Method method : owner.getDeclaredMethods()) {
+
+            if ((method.getModifiers() & java.lang.reflect.Modifier.NATIVE) == 0) {
+                continue;
+            }
+            if (descriptor.equals(describe(method))) {
+                return method.getName();
+            }
+        }
+        return "";
+    }
+
+    private static String describe(java.lang.reflect.Method method) {
+        StringBuilder out = new StringBuilder();
+        out.append('(');
+        for (Class<?> type : method.getParameterTypes()) {
+            out.append(typeName(type));
+        }
+        out.append(')').append(typeName(method.getReturnType()));
+        return out.toString();
+    }
+
+    private static String typeName(Class<?> type) {
+        if (type == void.class) {
+            return "V";
+        }
+        if (type == int.class) {
+            return "I";
+        }
+        if (type == long.class) {
+            return "J";
+        }
+        if (type == boolean.class) {
+            return "Z";
+        }
+        if (type == byte.class) {
+            return "B";
+        }
+        if (type == char.class) {
+            return "C";
+        }
+        if (type == short.class) {
+            return "S";
+        }
+        if (type == float.class) {
+            return "F";
+        }
+        if (type == double.class) {
+            return "D";
+        }
+        if (type.isArray()) {
+            return "[" + typeName(type.getComponentType());
+        }
+        return "L" + type.getName().replace('.', '/') + ";";
+    }
+
+    public static native int gateChallenge(long[] out);
+
+    public static native int gateAttest(long nonce, byte[] response);
+
+    public static native int gateTick(int index, byte[] out);
+
+    public static byte[] tick(int index) {
+        try {
+            if (!ensureLoaded()) {
+                return null;
+            }
+            byte[] out = new byte[32];
+            return gateTick(index, out) == 0 ? out : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    public static long challenge() {
+        try {
+            if (!ensureLoaded()) {
+                return 0L;
+            }
+            long[] out = new long[1];
+            return gateChallenge(out) == 0 ? out[0] : 0L;
+        } catch (Throwable ignored) {
+            return 0L;
+        }
+    }
+
+    public static boolean attest(long nonce, byte[] response) {
+        try {
+            if (!ensureLoaded()) {
+                return false;
+            }
+            return gateAttest(nonce, response) == 0;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static volatile byte[] handshake;
+
+    public static void setHandshake(byte[] value) {
+        handshake = value == null ? null : value.clone();
+    }
+
+    public static byte[] deriveKey(int slot, int sub) {
+        byte[] nonce = handshake;
+        if (nonce == null) {
+
+            return null;
+        }
+        try {
+            if (!ensureLoaded()) {
+                return null;
+            }
+            byte[] out = new byte[32];
+            if (keyRoot2(slot, sub, nonce, out) == 0) {
+                return out;
+            }
+        } catch (Throwable ignored) {
+
+        }
+        return null;
+    }
+
     private UmbraNativeLoader() {
     }
 
-    /**
-     * Loads the embedded native library once.
-     *
-     * @return {@code true} when the library is loaded and registered
-     */
+    public static boolean install(java.io.File library) {
+        if (library == null) {
+            return false;
+        }
+        synchronized (LOCK) {
+            if (state == 1) {
+                return true;
+            }
+            try {
+                System.load(library.getAbsolutePath());
+                state = 1;
+                return true;
+            } catch (Throwable error) {
+                failure = describe(error);
+                state = 2;
+                return false;
+            }
+        }
+    }
+
     public static boolean ensureLoaded() {
         int current = state;
         if (current == 1) {
@@ -118,10 +368,10 @@ public final class UmbraNativeLoader {
                 String message = String.valueOf(error.getMessage());
                 if (message.indexOf("rejected") >= 0 || message.indexOf("mismatch") >= 0
                         || message.indexOf("refused") >= 0) {
-                    System.err.println("[Umbra] native library refused ("
+                    say("[Umbra] native library refused ("
                             + RESOURCE + "): " + failure);
                 } else {
-                    System.err.println("[Umbra] native library could not be loaded ("
+                    say("[Umbra] native library could not be loaded ("
                             + RESOURCE + "): " + failure);
                 }
                 return false;
@@ -129,12 +379,10 @@ public final class UmbraNativeLoader {
         }
     }
 
-    /** True when the native library has been loaded successfully. */
     public static boolean isLoaded() {
         return state == 1;
     }
 
-    /** Diagnostic message for the failed load attempt, or {@code null}. */
     public static String failureReason() {
         return failure;
     }
@@ -165,30 +413,74 @@ public final class UmbraNativeLoader {
         }
     }
 
-    /**
-     * Refuses a library whose bytes do not match the fingerprint embedded at
-     * protection time: dumped, rebuilt, patched or replaced native payloads all
-     * change the SHA-256 digest.
-     */
     private static void verifyFingerprint(byte[] data) throws IOException {
         String expected = FINGERPRINT_0 + FINGERPRINT_1 + FINGERPRINT_2;
         if (expected.length() != 64) {
             throw new IOException("native library fingerprint is missing");
         }
-        String actual = sha256Hex(data);
+        String actual = fingerprintWithoutDigestSlot(data);
         if (actual == null) {
             throw new IOException("native library fingerprint could not be computed");
         }
         if (!actual.equalsIgnoreCase(expected)) {
+            say("umbra-fp-mismatch actual=" + actual.substring(0, 16)
+                    + " expected=" + expected.substring(0, 16) + " len=" + data.length);
             throw new IOException("native library fingerprint mismatch (dumped or rebuilt payload)");
         }
     }
 
-    /**
-     * Keyed challenge: the loaded library must return the mix of the per-program
-     * key and the caller nonce. A library built for another program (or one
-     * rebuilt without the embedded key) cannot answer it.
-     */
+    private static int indexOfBytes(byte[] haystack, byte[] needle, int from) {
+        outer:
+        for (int i = Math.max(0, from); i + needle.length <= haystack.length; i++) {
+            for (int j = 0; j < needle.length; j++) {
+                if (haystack[i + j] != needle[j]) {
+                    continue outer;
+                }
+            }
+            return i;
+        }
+        return -1;
+    }
+
+    private static String fingerprintWithoutDigestSlot(byte[] data) {
+        byte[] magic1 = {'U', 'M', 'B', 'R', 'A', 'D', 'G', '1'};
+        byte[] magic2 = {'U', 'M', 'B', 'R', 'A', 'D', 'G', '2'};
+        try {
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            int cursor = 0;
+            int skipped = 0;
+            while (true) {
+                int at1 = indexOfBytes(data, magic1, cursor);
+                int at2 = indexOfBytes(data, magic2, cursor);
+                int at = at1 < 0 ? at2 : (at2 < 0 ? at1 : Math.min(at1, at2));
+                if (at < 0) {
+                    break;
+                }
+                int from = at + magic1.length;
+                int to = from + 32;
+                if (to > data.length) {
+                    break;
+                }
+                digest.update(data, cursor, from - cursor);
+                cursor = to;
+                skipped++;
+            }
+            if (skipped == 0) {
+                return sha256Hex(data);
+            }
+            digest.update(data, cursor, data.length - cursor);
+            byte[] hash = digest.digest();
+            StringBuilder text = new StringBuilder(hash.length * 2);
+            for (byte value : hash) {
+                text.append(Character.forDigit((value >> 4) & 0xF, 16));
+                text.append(Character.forDigit(value & 0xF, 16));
+            }
+            return text.toString();
+        } catch (java.security.NoSuchAlgorithmException missing) {
+            return sha256Hex(data);
+        }
+    }
+
     private static void verifyChallenge() throws IOException {
         int nonce = challengeNonce();
         long expected = mixChallenge(nonce);
@@ -204,7 +496,6 @@ public final class UmbraNativeLoader {
         }
     }
 
-    /** Fresh per-load nonce (time + identity, then folded to 32 bits). */
     private static int challengeNonce() {
         long value = System.nanoTime()
                 ^ (System.currentTimeMillis() * 0x9E3779B97F4A7C15L)
@@ -212,7 +503,6 @@ public final class UmbraNativeLoader {
         return (int) (value ^ (value >>> 32));
     }
 
-    /** Mirrors {@code umbra_mix} in the generated C library. */
     private static long mixChallenge(int nonce) {
         long hash = 0xcbf29ce484222325L ^ KEY ^ (((long) nonce) & 0xFFFFFFFFL);
         hash *= 0x100000001b3L;
@@ -222,7 +512,6 @@ public final class UmbraNativeLoader {
         return hash;
     }
 
-    /** Lower-case SHA-256 hex, or {@code null} when the digest is unavailable. */
     private static String sha256Hex(byte[] data) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
@@ -259,8 +548,7 @@ public final class UmbraNativeLoader {
         }
         writeMarker(directory);
         file.deleteOnExit();
-        // The marker intentionally survives: after this process exits the cleanup
-        // of the next run needs it to identify the leftover directory.
+
         directory.deleteOnExit();
         return file;
     }
@@ -274,7 +562,7 @@ public final class UmbraNativeLoader {
                 out.close();
             }
         } catch (IOException ignored) {
-            // deleteOnExit remains the fallback
+
         }
     }
 
@@ -286,11 +574,6 @@ public final class UmbraNativeLoader {
         return name.toString();
     }
 
-    /**
-     * Removes the mapped library file after it was loaded. POSIX allows unlinking
-     * a mapped library; Windows locks a mapped image against delete/write, so the
-     * directory is removed by the marker-based stale cleanup of a later run.
-     */
     private static void disposeAfterLoad(File file) {
         File directory = file.getParentFile();
         if (!isWindows()) {
@@ -317,11 +600,6 @@ public final class UmbraNativeLoader {
         }
     }
 
-    /**
-     * Best-effort cleanup of native library directories left by earlier runs.
-     * Only old directories carrying the neutral marker are considered; no file
-     * name prefix is matched and libraries locked by a live process are skipped.
-     */
     private static void cleanupStaleLibraries() {
         try {
             File root = new File(System.getProperty("java.io.tmpdir", "."));
@@ -340,7 +618,7 @@ public final class UmbraNativeLoader {
                 deleteTree(child);
             }
         } catch (Throwable ignored) {
-            // cleanup must never break loading
+
         }
     }
 
@@ -383,7 +661,7 @@ public final class UmbraNativeLoader {
         String os = System.getProperty("os.name", "");
         return os.toLowerCase(java.util.Locale.ROOT).indexOf("win") >= 0;
     }
-    /** Parses the 16-hex-digit per-program key (unsigned, no sign extension). */
+
     private static long parseHexLong(String value) {
         if (value == null || value.length() != 16) {
             return 0L;
@@ -411,7 +689,6 @@ public final class UmbraNativeLoader {
         return ".so";
     }
 
-    /** Reads the library bytes from the first available location. */
     private static byte[] readResource() {
         byte[] data = readStream(UmbraNativeLoader.class.getResourceAsStream("/" + RESOURCE));
         if (data != null && data.length > 0) {
@@ -440,11 +717,6 @@ public final class UmbraNativeLoader {
         return null;
     }
 
-    /**
-     * Last resort: read the entry straight out of the JAR the class was loaded
-     * from. This also works when a custom loader (encrypted-class loader) does not
-     * implement resource lookups.
-     */
     private static byte[] readFromCodeSource() {
         try {
             CodeSource source = UmbraNativeLoader.class.getProtectionDomain().getCodeSource();
@@ -504,7 +776,7 @@ public final class UmbraNativeLoader {
             try {
                 in.close();
             } catch (IOException ignored) {
-                // best effort
+
             }
         }
     }

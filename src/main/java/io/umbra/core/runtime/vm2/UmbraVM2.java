@@ -49,20 +49,21 @@ public final class UmbraVM2 {
     private UmbraVM2() {
     }
 
-    // ---- wire format (kept in sync with Vm2Format) ----
-    /** Legacy payload version: shared opcode map, no rolling opcode key. */
     private static final int FORMAT = 3;
-    /** Current payload version: adds the rolling opcode-key layer. */
+
     private static final int ROLLING_FORMAT = 4;
 
     private static final int FLAG_ENCRYPT = 1;
     private static final int FLAG_NESTED = 2;
     private static final int FLAG_OPCODES = 4;
 
+    private static final int FLAG_KEYED_PERM = 16;
+
+    private static final int FLAG_SEMANTIC = 32;
+
     private static final int META_LEN = 8;
     private static final int HEADER = 10;
 
-    // ---- superinstructions (vm2.fusion), mirrored from Vm2Format ----
     private static final int SUPER_BASE = 202;
     private static final int SUPER_IADD_LL = 202;
     private static final int SUPER_ISUB_LL = 203;
@@ -90,7 +91,9 @@ public final class UmbraVM2 {
     private static final int SUPER_LXOR_LL = 225;
     private static final int SUPER_ALOAD_GETFIELD = 226;
     private static final int SUPER_CONST_ISTORE = 227;
-    private static final int SUPER_LAST = 227;
+    private static final int SUPER_CALL = 228;
+    private static final int SUPER_CALL_LOCAL = 229;
+    private static final int SUPER_LAST = 229;
 
     private static final int KIND_UNUSED = 0;
     private static final int KIND_INT = 1;
@@ -113,9 +116,8 @@ public final class UmbraVM2 {
 
     private static final long GOLDEN = 0x9E3779B97F4A7C15L;
 
-    // ---- decoded state layout (Object[] so that no nested classes are needed) ----
     private static final int STATE_CODE = 0;
-    /** Pre-decoded real opcodes, one int per code slot (valid at opcode slots). */
+
     private static final int STATE_OPS = 1;
     private static final int STATE_CONSTS = 2;
     private static final int STATE_REFS = 3;
@@ -124,7 +126,10 @@ public final class UmbraVM2 {
     private static final int STATE_KINDS = 6;
     private static final int STATE_REF_CACHE = 7;
 
-    // ---- resolved call-site bundle layout (Object[]) ----
+    private static final int STATE_SEMANTICS = 8;
+
+    private static final int STACK_PAD = 8;
+
     private static final int INFO_KIND = 0;
     private static final int INFO_METHOD = 1;
     private static final int INFO_CTOR = 2;
@@ -135,7 +140,6 @@ public final class UmbraVM2 {
 
     private static final Object[] NO_ARGS = new Object[0];
 
-    // ---- reusable thread-local frame layout ----
     private static final int FRAME_NS = 0;
     private static final int FRAME_RS = 1;
     private static final int FRAME_WS = 2;
@@ -143,7 +147,6 @@ public final class UmbraVM2 {
     private static final int FRAME_RL = 4;
     private static final int FRAME_NEXT = 5;
 
-    /** Decoded payload cache, keyed by the holder's meta array identity. */
     private static final ConcurrentHashMap<Object, Object> STATES =
             new ConcurrentHashMap<Object, Object>();
     private static final ConcurrentHashMap<String, Object> TYPES =
@@ -159,28 +162,8 @@ public final class UmbraVM2 {
     private static final ConcurrentHashMap<String, Object> ARGUMENTS =
             new ConcurrentHashMap<String, Object>();
 
-    /** Free frame chain for the current thread. */
     private static final ThreadLocal FRAMES = new ThreadLocal();
 
-    // ==================================================================
-    // Entry point
-    // ==================================================================
-
-    /**
-     * Bootstrap of a virtualized call site.
-     *
-     * <p>A virtualized method body contains exactly one {@code invokedynamic}:
-     * its descriptor only carries the boxed locals array, its name is random and
-     * its single static argument is the payload id. The interpreter entry is
-     * resolved here, once per call site, through its signature - so neither the
-     * entry name nor the holder classes are referenced as strings by the caller,
-     * and the linked call site is a constant method handle.</p>
-     *
-     * @param caller    lookup of the class containing the call site (unused)
-     * @param name      random call-site name (unused)
-     * @param type      call-site type, {@code (Object[])Object}
-     * @param payloadId payload bound to this call site
-     */
     public static CallSite bootstrap(MethodHandles.Lookup caller, String name, MethodType type,
                                      int payloadId) throws Throwable {
         MethodHandles.Lookup lookup = MethodHandles.lookup();
@@ -203,17 +186,6 @@ public final class UmbraVM2 {
         throw new IllegalStateException("VM2 interpreter entry is missing");
     }
 
-    /**
-     * Executes one virtualized method body.
-     *
-     * @param meta   header built by the holder class initializer
-     * @param map    shared per-program opcode permutation table ({@code encoded ->
-     *               real opcode}), or {@code null} when permutation is disabled
-     * @param blocks encrypted payload blocks (first one is the outer program
-     *               when the payload is nested)
-     * @param locals boxed arguments; slot 0 holds {@code this} for instance methods
-     * @return boxed return value, or {@code null} for {@code void}
-     */
     public static Object run(int[] meta, int[] map, int[][] blocks, Object[] locals) {
         Object[] state = stateFor(meta, map, blocks);
         int[] code = (int[]) state[STATE_CODE];
@@ -224,11 +196,17 @@ public final class UmbraVM2 {
         int[] info = (int[]) state[STATE_INFO];
         int[] kinds = (int[]) state[STATE_KINDS];
         Object[] refCache = (Object[]) state[STATE_REF_CACHE];
+        int[] semantics = (int[]) state[STATE_SEMANTICS];
         int maxLocals = info[0];
         int argSlots = info[1];
         int stackHint = info[2];
 
-        Object[] frame = acquireFrame(stackHint, maxLocals);
+        int stackBase = (int) ((info[4] ^ (System.identityHashCode(locals) >>> 3)) & (STACK_PAD - 1));
+
+        int relocationPeriod = 24 + ((info[4] >>> 8) & 0x1F);
+        int relocationTick = 0;
+
+        Object[] frame = acquireFrame(stackHint + STACK_PAD, maxLocals);
         long[] ns = (long[]) frame[FRAME_NS];
         Object[] rs = (Object[]) frame[FRAME_RS];
         byte[] ws = (byte[]) frame[FRAME_WS];
@@ -250,7 +228,7 @@ public final class UmbraVM2 {
             }
         }
 
-        int sp = 0;
+        int sp = stackBase;
         int pc = 0;
         try {
             while (true) {
@@ -261,12 +239,22 @@ public final class UmbraVM2 {
                             throw new IllegalStateException("Umbra VM2 pc out of range: " + p
                                     + " of " + code.length);
                         }
-                        // Opcodes are decoded once at payload load time (format 3:
-                        // permutation table only; format 4: rolling key + table),
-                        // so the hot loop is a plain array read.
-                        int op = ops[p++];
-                        // Fused superinstructions execute a whole opcode run with
-                        // one dispatch; their target/next pc is returned packed.
+                        if (++relocationTick >= relocationPeriod) {
+                            relocationTick = 0;
+                            int depth = sp - stackBase;
+                            int nextBase = (int) ((((long) depth + 1) * 0x9E3779B1L ^ p) >>> 5)
+                                    & (STACK_PAD - 1);
+                            if (depth > 0 && nextBase != stackBase) {
+                                System.arraycopy(ns, stackBase, ns, nextBase, depth);
+                                System.arraycopy(rs, stackBase, rs, nextBase, depth);
+                                System.arraycopy(ws, stackBase, ws, nextBase, depth);
+                                sp = nextBase + depth;
+                                stackBase = nextBase;
+                            }
+                        }
+
+                        int op = semantics[ops[p++]];
+
                         if (op >= SUPER_BASE && op <= SUPER_LAST) {
                             long packed = vmSuper(op, code, p, ns, rs, ws, nl, rl, refs,
                                     refCache, sp);
@@ -274,8 +262,7 @@ public final class UmbraVM2 {
                             pc = (int) (packed >>> 32);
                             continue;
                         }
-                        // Computed dispatch over opcode families keeps the main
-                        // switch below HotSpot's HugeMethodLimit.
+
                         if (op >= 87 && op <= 95) {
                             sp = vmStack(op, ns, rs, ws, sp);
                             pc = p;
@@ -297,47 +284,47 @@ public final class UmbraVM2 {
                             continue;
                         }
                         switch (op) {
-                            case 0: // NOP
+                            case 0:
                                 pc = p;
                                 break;
-                            case 1: // ACONST_NULL
+                            case 1:
                                 rs[sp] = null;
                                 ws[sp] = 1;
                                 sp++;
                                 pc = p;
                                 break;
                             case 2: case 3: case 4: case 5: case 6: case 7: case 8:
-                                // ICONST_M1 .. ICONST_5
+
                                 ns[sp] = op - 3;
                                 ws[sp] = 1;
                                 sp++;
                                 pc = p;
                                 break;
-                            case 9: case 10: // LCONST_0, LCONST_1
+                            case 9: case 10:
                                 ns[sp] = op - 9;
                                 ws[sp] = 2;
                                 sp++;
                                 pc = p;
                                 break;
-                            case 11: case 12: case 13: // FCONST_0..2
+                            case 11: case 12: case 13:
                                 ns[sp] = Float.floatToRawIntBits(op - 11);
                                 ws[sp] = 1;
                                 sp++;
                                 pc = p;
                                 break;
-                            case 14: case 15: // DCONST_0, DCONST_1
+                            case 14: case 15:
                                 ns[sp] = Double.doubleToRawLongBits(op - 14);
                                 ws[sp] = 2;
                                 sp++;
                                 pc = p;
                                 break;
-                            case 16: case 17: // BIPUSH, SIPUSH
+                            case 16: case 17:
                                 ns[sp] = code[p++];
                                 ws[sp] = 1;
                                 sp++;
                                 pc = p;
                                 break;
-                            case 18: { // LDC
+                            case 18: {
                                 Object value = consts[code[p++]];
                                 if (value instanceof String[]) {
                                     String[] marker = (String[]) value;
@@ -365,133 +352,133 @@ public final class UmbraVM2 {
                                 pc = p;
                                 break;
                             }
-                            case 21: // ILOAD
+                            case 21:
                                 ns[sp] = nl[code[p++]];
                                 ws[sp] = 1;
                                 sp++;
                                 pc = p;
                                 break;
-                            case 22: // LLOAD
+                            case 22:
                                 ns[sp] = nl[code[p++]];
                                 ws[sp] = 2;
                                 sp++;
                                 pc = p;
                                 break;
-                            case 23: // FLOAD
+                            case 23:
                                 ns[sp] = (int) nl[code[p++]];
                                 ws[sp] = 1;
                                 sp++;
                                 pc = p;
                                 break;
-                            case 24: // DLOAD
+                            case 24:
                                 ns[sp] = nl[code[p++]];
                                 ws[sp] = 2;
                                 sp++;
                                 pc = p;
                                 break;
-                            case 25: // ALOAD
+                            case 25:
                                 rs[sp] = rl[code[p++]];
                                 ws[sp] = 1;
                                 sp++;
                                 pc = p;
                                 break;
-                            case 54: // ISTORE
+                            case 54:
                                 nl[code[p++]] = ns[--sp];
                                 pc = p;
                                 break;
-                            case 55: // LSTORE
+                            case 55:
                                 nl[code[p++]] = ns[--sp];
                                 pc = p;
                                 break;
-                            case 56: // FSTORE
+                            case 56:
                                 nl[code[p++]] = (int) ns[--sp];
                                 pc = p;
                                 break;
-                            case 57: // DSTORE
+                            case 57:
                                 nl[code[p++]] = ns[--sp];
                                 pc = p;
                                 break;
-                            case 58: // ASTORE
+                            case 58:
                                 rl[code[p++]] = rs[--sp];
                                 pc = p;
                                 break;
-                            case 132: { // IINC
+                            case 132: {
                                 int var = code[p++];
                                 int delta = code[p++];
                                 nl[var] = (int) nl[var] + delta;
                                 pc = p;
                                 break;
                             }
-                            case 153: // IFEQ
+                            case 153:
                                 pc = ((int) ns[--sp]) == 0 ? code[p] : p + 1;
                                 break;
-                            case 154: // IFNE
+                            case 154:
                                 pc = ((int) ns[--sp]) != 0 ? code[p] : p + 1;
                                 break;
-                            case 155: // IFLT
+                            case 155:
                                 pc = ((int) ns[--sp]) < 0 ? code[p] : p + 1;
                                 break;
-                            case 156: // IFGE
+                            case 156:
                                 pc = ((int) ns[--sp]) >= 0 ? code[p] : p + 1;
                                 break;
-                            case 157: // IFGT
+                            case 157:
                                 pc = ((int) ns[--sp]) > 0 ? code[p] : p + 1;
                                 break;
-                            case 158: // IFLE
+                            case 158:
                                 pc = ((int) ns[--sp]) <= 0 ? code[p] : p + 1;
                                 break;
-                            case 159: { // IF_ICMPEQ
+                            case 159: {
                                 int b = (int) ns[--sp];
                                 int a = (int) ns[--sp];
                                 pc = a == b ? code[p] : p + 1;
                                 break;
                             }
-                            case 160: { // IF_ICMPNE
+                            case 160: {
                                 int b = (int) ns[--sp];
                                 int a = (int) ns[--sp];
                                 pc = a != b ? code[p] : p + 1;
                                 break;
                             }
-                            case 161: { // IF_ICMPLT
+                            case 161: {
                                 int b = (int) ns[--sp];
                                 int a = (int) ns[--sp];
                                 pc = a < b ? code[p] : p + 1;
                                 break;
                             }
-                            case 162: { // IF_ICMPGE
+                            case 162: {
                                 int b = (int) ns[--sp];
                                 int a = (int) ns[--sp];
                                 pc = a >= b ? code[p] : p + 1;
                                 break;
                             }
-                            case 163: { // IF_ICMPGT
+                            case 163: {
                                 int b = (int) ns[--sp];
                                 int a = (int) ns[--sp];
                                 pc = a > b ? code[p] : p + 1;
                                 break;
                             }
-                            case 164: { // IF_ICMPLE
+                            case 164: {
                                 int b = (int) ns[--sp];
                                 int a = (int) ns[--sp];
                                 pc = a <= b ? code[p] : p + 1;
                                 break;
                             }
-                            case 165: { // IF_ACMPEQ
+                            case 165: {
                                 Object b = rs[--sp];
                                 Object a = rs[--sp];
                                 pc = a == b ? code[p] : p + 1;
                                 break;
                             }
-                            case 166: { // IF_ACMPNE
+                            case 166: {
                                 Object b = rs[--sp];
                                 Object a = rs[--sp];
                                 pc = a != b ? code[p] : p + 1;
                                 break;
                             }
-                            case 167: // GOTO
+                            case 167:
                                 pc = code[p];
                                 break;
-                            case 170: { // TABLESWITCH
+                            case 170: {
                                 int dflt = code[p++];
                                 int low = code[p++];
                                 int high = code[p++];
@@ -503,7 +490,7 @@ public final class UmbraVM2 {
                                 }
                                 break;
                             }
-                            case 171: { // LOOKUPSWITCH
+                            case 171: {
                                 int dflt = code[p++];
                                 int pairs = code[p++];
                                 int key = (int) ns[--sp];
@@ -522,19 +509,19 @@ public final class UmbraVM2 {
                                 pc = found;
                                 break;
                             }
-                            case 172: // IRETURN
+                            case 172:
                                 return Integer.valueOf((int) ns[--sp]);
-                            case 173: // LRETURN
+                            case 173:
                                 return Long.valueOf(ns[--sp]);
-                            case 174: // FRETURN
+                            case 174:
                                 return Float.valueOf(Float.intBitsToFloat((int) ns[--sp]));
-                            case 175: // DRETURN
+                            case 175:
                                 return Double.valueOf(Double.longBitsToDouble(ns[--sp]));
-                            case 176: // ARETURN
+                            case 176:
                                 return rs[--sp];
-                            case 177: // RETURN
+                            case 177:
                                 return null;
-                            case 178: { // GETSTATIC
+                            case 178: {
                                 Object[] holder = fieldFor(refs[code[p++]]);
                                 Field field = (Field) holder[0];
                                 char sort = ((Character) holder[1]).charValue();
@@ -543,7 +530,7 @@ public final class UmbraVM2 {
                                 pc = p;
                                 break;
                             }
-                            case 179: { // PUTSTATIC
+                            case 179: {
                                 Object[] holder = fieldFor(refs[code[p++]]);
                                 Field field = (Field) holder[0];
                                 char sort = ((Character) holder[1]).charValue();
@@ -551,7 +538,7 @@ public final class UmbraVM2 {
                                 pc = p;
                                 break;
                             }
-                            case 180: { // GETFIELD
+                            case 180: {
                                 Object[] holder = fieldFor(refs[code[p++]]);
                                 Field field = (Field) holder[0];
                                 char sort = ((Character) holder[1]).charValue();
@@ -561,7 +548,7 @@ public final class UmbraVM2 {
                                 pc = p;
                                 break;
                             }
-                            case 181: { // PUTFIELD
+                            case 181: {
                                 Object[] holder = fieldFor(refs[code[p++]]);
                                 Field field = (Field) holder[0];
                                 char sort = ((Character) holder[1]).charValue();
@@ -575,9 +562,9 @@ public final class UmbraVM2 {
                                 sp = invoke(refs, refCache, code[p++], op, ns, rs, ws, sp, rl);
                                 pc = p;
                                 break;
-                            case 186: // INVOKEDYNAMIC
+                            case 186:
                                 throw new IllegalStateException("Umbra VM2: invokedynamic is not supported");
-                            case 187: { // NEW (vm2.news only)
+                            case 187: {
                                 String token = typeTokenFromRef(refs[code[p++]]);
                                 Object[] marker = new Object[] { resolveInternal(token) };
                                 rs[sp] = marker;
@@ -586,7 +573,7 @@ public final class UmbraVM2 {
                                 pc = p;
                                 break;
                             }
-                            case 188: { // NEWARRAY
+                            case 188: {
                                 int type = code[p++];
                                 int length = (int) ns[--sp];
                                 rs[sp] = newArray(type, length);
@@ -595,7 +582,7 @@ public final class UmbraVM2 {
                                 pc = p;
                                 break;
                             }
-                            case 189: { // ANEWARRAY
+                            case 189: {
                                 String token = typeTokenFromRef(refs[code[p++]]);
                                 int length = (int) ns[--sp];
                                 rs[sp] = Array.newInstance(resolveInternal(token), length);
@@ -604,7 +591,7 @@ public final class UmbraVM2 {
                                 pc = p;
                                 break;
                             }
-                            case 190: { // ARRAYLENGTH
+                            case 190: {
                                 Object array = rs[sp - 1];
                                 rs[sp - 1] = null;
                                 ns[sp - 1] = Array.getLength(array);
@@ -612,7 +599,7 @@ public final class UmbraVM2 {
                                 pc = p;
                                 break;
                             }
-                            case 191: { // ATHROW
+                            case 191: {
                                 Object throwable = rs[--sp];
                                 if (throwable == null) {
                                     throw new NullPointerException();
@@ -621,7 +608,7 @@ public final class UmbraVM2 {
                                 pc = p;
                                 break;
                             }
-                            case 192: { // CHECKCAST
+                            case 192: {
                                 String token = typeTokenFromRef(refs[code[p++]]);
                                 Object value = rs[sp - 1];
                                 if (value != null && !resolveInternal(token).isInstance(value)) {
@@ -631,7 +618,7 @@ public final class UmbraVM2 {
                                 pc = p;
                                 break;
                             }
-                            case 193: { // INSTANCEOF
+                            case 193: {
                                 String token = typeTokenFromRef(refs[code[p++]]);
                                 Object value = rs[--sp];
                                 rs[sp] = null;
@@ -641,10 +628,10 @@ public final class UmbraVM2 {
                                 pc = p;
                                 break;
                             }
-                            case 194: case 195: // MONITORENTER, MONITOREXIT
+                            case 194: case 195:
                                 throw new IllegalStateException(
                                         "Umbra VM2: monitor instructions are not supported");
-                            case 197: { // MULTIANEWARRAY
+                            case 197: {
                                 String token = typeTokenFromRef(refs[code[p++]]);
                                 int dims = code[p++];
                                 int[] sizes = new int[dims];
@@ -657,10 +644,10 @@ public final class UmbraVM2 {
                                 pc = p;
                                 break;
                             }
-                            case 198: // IFNULL
+                            case 198:
                                 pc = rs[--sp] == null ? code[p] : p + 1;
                                 break;
-                            case 199: // IFNONNULL
+                            case 199:
                                 pc = rs[--sp] != null ? code[p] : p + 1;
                                 break;
                             default:
@@ -685,9 +672,9 @@ public final class UmbraVM2 {
                         sneakyThrow(thrown);
                         return null;
                     }
-                    sp = 1;
-                    rs[0] = thrown;
-                    ws[0] = 1;
+                    sp = stackBase + 1;
+                    rs[stackBase] = thrown;
+                    ws[stackBase] = 1;
                     pc = target;
                 }
             }
@@ -696,29 +683,18 @@ public final class UmbraVM2 {
         }
     }
 
-    // ==================================================================
-    // Dispatch families
-    //
-    // The opcode families below are executed by small static methods instead
-    // of being inlined into the main dispatch switch. Two reasons: the switch
-    // stays well below HotSpot's HugeMethodLimit so the interpreter loop is
-    // actually JIT compiled, and the family entry point is a set of computed
-    // range checks rather than one giant lookup chain.
-    // ==================================================================
-
-    /** POP/DUP/SWAP family (opcodes 87..95). */
     private static int vmStack(int op, long[] ns, Object[] rs, byte[] ws, int sp) {
         switch (op) {
-            case 87: // POP
+            case 87:
                 return sp - 1;
-            case 88: // POP2
+            case 88:
                 return sp - (ws[sp - 1] == 2 ? 1 : 2);
-            case 89: // DUP
+            case 89:
                 ns[sp] = ns[sp - 1];
                 rs[sp] = rs[sp - 1];
                 ws[sp] = ws[sp - 1];
                 return sp + 1;
-            case 90: { // DUP_X1: v2,v1 -> v1,v2,v1
+            case 90: {
                 long n1 = ns[sp - 1];
                 Object r1 = rs[sp - 1];
                 byte w1 = ws[sp - 1];
@@ -733,7 +709,7 @@ public final class UmbraVM2 {
                 ws[sp - 2] = w1;
                 return sp + 1;
             }
-            case 91: { // DUP_X2
+            case 91: {
                 long n1 = ns[sp - 1];
                 Object r1 = rs[sp - 1];
                 byte w1 = ws[sp - 1];
@@ -766,7 +742,7 @@ public final class UmbraVM2 {
                 }
                 return sp + 1;
             }
-            case 92: // DUP2
+            case 92:
                 if (ws[sp - 1] == 2) {
                     ns[sp] = ns[sp - 1];
                     rs[sp] = rs[sp - 1];
@@ -780,7 +756,7 @@ public final class UmbraVM2 {
                 rs[sp + 1] = rs[sp - 1];
                 ws[sp + 1] = ws[sp - 1];
                 return sp + 2;
-            case 93: // DUP2_X1
+            case 93:
                 if (ws[sp - 1] == 2) {
                     long n1 = ns[sp - 1];
                     Object r1 = rs[sp - 1];
@@ -819,7 +795,7 @@ public final class UmbraVM2 {
                     ws[sp - 3] = w2;
                     return sp + 2;
                 }
-            case 94: // DUP2_X2
+            case 94:
                 if (ws[sp - 1] == 2 && ws[sp - 2] == 2) {
                     long n1 = ns[sp - 1];
                     Object r1 = rs[sp - 1];
@@ -893,7 +869,7 @@ public final class UmbraVM2 {
                     ws[sp - 4] = w2;
                     return sp + 2;
                 }
-            default: { // SWAP
+            default: {
                 long n1 = ns[sp - 1];
                 Object r1 = rs[sp - 1];
                 byte w1 = ws[sp - 1];
@@ -908,197 +884,196 @@ public final class UmbraVM2 {
         }
     }
 
-    /** Arithmetic, conversion and comparison family (opcodes 96..152). */
     private static int vmNumeric(int op, long[] ns, byte[] ws, int sp) {
         switch (op) {
-            case 96: // IADD
+            case 96:
                 ns[sp - 2] = (int) ns[sp - 2] + (int) ns[sp - 1];
                 return sp - 1;
-            case 97: // LADD
+            case 97:
                 ns[sp - 2] = ns[sp - 2] + ns[sp - 1];
                 return sp - 1;
-            case 98: // FADD
+            case 98:
                 ns[sp - 2] = Float.floatToRawIntBits(
                         Float.intBitsToFloat((int) ns[sp - 2]) + Float.intBitsToFloat((int) ns[sp - 1]));
                 return sp - 1;
-            case 99: // DADD
+            case 99:
                 ns[sp - 2] = Double.doubleToRawLongBits(
                         Double.longBitsToDouble(ns[sp - 2]) + Double.longBitsToDouble(ns[sp - 1]));
                 return sp - 1;
-            case 100: // ISUB
+            case 100:
                 ns[sp - 2] = (int) ns[sp - 2] - (int) ns[sp - 1];
                 return sp - 1;
-            case 101: // LSUB
+            case 101:
                 ns[sp - 2] = ns[sp - 2] - ns[sp - 1];
                 return sp - 1;
-            case 102: // FSUB
+            case 102:
                 ns[sp - 2] = Float.floatToRawIntBits(
                         Float.intBitsToFloat((int) ns[sp - 2]) - Float.intBitsToFloat((int) ns[sp - 1]));
                 return sp - 1;
-            case 103: // DSUB
+            case 103:
                 ns[sp - 2] = Double.doubleToRawLongBits(
                         Double.longBitsToDouble(ns[sp - 2]) - Double.longBitsToDouble(ns[sp - 1]));
                 return sp - 1;
-            case 104: // IMUL
+            case 104:
                 ns[sp - 2] = (int) ns[sp - 2] * (int) ns[sp - 1];
                 return sp - 1;
-            case 105: // LMUL
+            case 105:
                 ns[sp - 2] = ns[sp - 2] * ns[sp - 1];
                 return sp - 1;
-            case 106: // FMUL
+            case 106:
                 ns[sp - 2] = Float.floatToRawIntBits(
                         Float.intBitsToFloat((int) ns[sp - 2]) * Float.intBitsToFloat((int) ns[sp - 1]));
                 return sp - 1;
-            case 107: // DMUL
+            case 107:
                 ns[sp - 2] = Double.doubleToRawLongBits(
                         Double.longBitsToDouble(ns[sp - 2]) * Double.longBitsToDouble(ns[sp - 1]));
                 return sp - 1;
-            case 108: // IDIV
+            case 108:
                 ns[sp - 2] = (int) ns[sp - 2] / (int) ns[sp - 1];
                 return sp - 1;
-            case 109: // LDIV
+            case 109:
                 ns[sp - 2] = ns[sp - 2] / ns[sp - 1];
                 return sp - 1;
-            case 110: // FDIV
+            case 110:
                 ns[sp - 2] = Float.floatToRawIntBits(
                         Float.intBitsToFloat((int) ns[sp - 2]) / Float.intBitsToFloat((int) ns[sp - 1]));
                 return sp - 1;
-            case 111: // DDIV
+            case 111:
                 ns[sp - 2] = Double.doubleToRawLongBits(
                         Double.longBitsToDouble(ns[sp - 2]) / Double.longBitsToDouble(ns[sp - 1]));
                 return sp - 1;
-            case 112: // IREM
+            case 112:
                 ns[sp - 2] = (int) ns[sp - 2] % (int) ns[sp - 1];
                 return sp - 1;
-            case 113: // LREM
+            case 113:
                 ns[sp - 2] = ns[sp - 2] % ns[sp - 1];
                 return sp - 1;
-            case 114: // FREM
+            case 114:
                 ns[sp - 2] = Float.floatToRawIntBits(
                         Float.intBitsToFloat((int) ns[sp - 2]) % Float.intBitsToFloat((int) ns[sp - 1]));
                 return sp - 1;
-            case 115: // DREM
+            case 115:
                 ns[sp - 2] = Double.doubleToRawLongBits(
                         Double.longBitsToDouble(ns[sp - 2]) % Double.longBitsToDouble(ns[sp - 1]));
                 return sp - 1;
-            case 116: // INEG
+            case 116:
                 ns[sp - 1] = -(int) ns[sp - 1];
                 return sp;
-            case 117: // LNEG
+            case 117:
                 ns[sp - 1] = -ns[sp - 1];
                 return sp;
-            case 118: // FNEG
+            case 118:
                 ns[sp - 1] = Float.floatToRawIntBits(-Float.intBitsToFloat((int) ns[sp - 1]));
                 return sp;
-            case 119: // DNEG
+            case 119:
                 ns[sp - 1] = Double.doubleToRawLongBits(-Double.longBitsToDouble(ns[sp - 1]));
                 return sp;
-            case 120: // ISHL
+            case 120:
                 ns[sp - 2] = (int) ns[sp - 2] << (int) ns[sp - 1];
                 return sp - 1;
-            case 121: // LSHL
+            case 121:
                 ns[sp - 2] = ns[sp - 2] << (int) ns[sp - 1];
                 return sp - 1;
-            case 122: // ISHR
+            case 122:
                 ns[sp - 2] = (int) ns[sp - 2] >> (int) ns[sp - 1];
                 return sp - 1;
-            case 123: // LSHR
+            case 123:
                 ns[sp - 2] = ns[sp - 2] >> (int) ns[sp - 1];
                 return sp - 1;
-            case 124: // IUSHR
+            case 124:
                 ns[sp - 2] = (int) ns[sp - 2] >>> (int) ns[sp - 1];
                 return sp - 1;
-            case 125: // LUSHR
+            case 125:
                 ns[sp - 2] = ns[sp - 2] >>> (int) ns[sp - 1];
                 return sp - 1;
-            case 126: // IAND
+            case 126:
                 ns[sp - 2] = (int) ns[sp - 2] & (int) ns[sp - 1];
                 return sp - 1;
-            case 127: // LAND
+            case 127:
                 ns[sp - 2] = ns[sp - 2] & ns[sp - 1];
                 return sp - 1;
-            case 128: // IOR
+            case 128:
                 ns[sp - 2] = (int) ns[sp - 2] | (int) ns[sp - 1];
                 return sp - 1;
-            case 129: // LOR
+            case 129:
                 ns[sp - 2] = ns[sp - 2] | ns[sp - 1];
                 return sp - 1;
-            case 130: // IXOR
+            case 130:
                 ns[sp - 2] = (int) ns[sp - 2] ^ (int) ns[sp - 1];
                 return sp - 1;
-            case 131: // LXOR
+            case 131:
                 ns[sp - 2] = ns[sp - 2] ^ ns[sp - 1];
                 return sp - 1;
-            case 133: // I2L
+            case 133:
                 ns[sp - 1] = (long) (int) ns[sp - 1];
                 ws[sp - 1] = 2;
                 return sp;
-            case 134: // I2F
+            case 134:
                 ns[sp - 1] = Float.floatToRawIntBits((float) (int) ns[sp - 1]);
                 ws[sp - 1] = 1;
                 return sp;
-            case 135: // I2D
+            case 135:
                 ns[sp - 1] = Double.doubleToRawLongBits((double) (int) ns[sp - 1]);
                 ws[sp - 1] = 2;
                 return sp;
-            case 136: // L2I
+            case 136:
                 ns[sp - 1] = (int) ns[sp - 1];
                 ws[sp - 1] = 1;
                 return sp;
-            case 137: // L2F
+            case 137:
                 ns[sp - 1] = Float.floatToRawIntBits((float) ns[sp - 1]);
                 ws[sp - 1] = 1;
                 return sp;
-            case 138: // L2D
+            case 138:
                 ns[sp - 1] = Double.doubleToRawLongBits((double) ns[sp - 1]);
                 ws[sp - 1] = 2;
                 return sp;
-            case 139: // F2I
+            case 139:
                 ns[sp - 1] = (int) Float.intBitsToFloat((int) ns[sp - 1]);
                 ws[sp - 1] = 1;
                 return sp;
-            case 140: // F2L
+            case 140:
                 ns[sp - 1] = (long) Float.intBitsToFloat((int) ns[sp - 1]);
                 ws[sp - 1] = 2;
                 return sp;
-            case 141: // F2D
+            case 141:
                 ns[sp - 1] = Double.doubleToRawLongBits(
                         (double) Float.intBitsToFloat((int) ns[sp - 1]));
                 ws[sp - 1] = 2;
                 return sp;
-            case 142: // D2I
+            case 142:
                 ns[sp - 1] = (int) Double.longBitsToDouble(ns[sp - 1]);
                 ws[sp - 1] = 1;
                 return sp;
-            case 143: // D2L
+            case 143:
                 ns[sp - 1] = (long) Double.longBitsToDouble(ns[sp - 1]);
                 ws[sp - 1] = 2;
                 return sp;
-            case 144: // D2F
+            case 144:
                 ns[sp - 1] = Float.floatToRawIntBits(
                         (float) Double.longBitsToDouble(ns[sp - 1]));
                 ws[sp - 1] = 1;
                 return sp;
-            case 145: // I2B
+            case 145:
                 ns[sp - 1] = (byte) (int) ns[sp - 1];
                 ws[sp - 1] = 1;
                 return sp;
-            case 146: // I2C
+            case 146:
                 ns[sp - 1] = (char) (int) ns[sp - 1];
                 ws[sp - 1] = 1;
                 return sp;
-            case 147: // I2S
+            case 147:
                 ns[sp - 1] = (short) (int) ns[sp - 1];
                 ws[sp - 1] = 1;
                 return sp;
-            case 148: { // LCMP
+            case 148: {
                 long a = ns[sp - 2];
                 long b = ns[sp - 1];
                 ns[sp - 2] = a < b ? -1 : (a == b ? 0 : 1);
                 ws[sp - 2] = 1;
                 return sp - 1;
             }
-            case 149: { // FCMPL
+            case 149: {
                 float a = Float.intBitsToFloat((int) ns[sp - 2]);
                 float b = Float.intBitsToFloat((int) ns[sp - 1]);
                 ns[sp - 2] = Float.isNaN(a) || Float.isNaN(b) ? -1
@@ -1106,7 +1081,7 @@ public final class UmbraVM2 {
                 ws[sp - 2] = 1;
                 return sp - 1;
             }
-            case 150: { // FCMPG
+            case 150: {
                 float a = Float.intBitsToFloat((int) ns[sp - 2]);
                 float b = Float.intBitsToFloat((int) ns[sp - 1]);
                 ns[sp - 2] = Float.isNaN(a) || Float.isNaN(b) ? 1
@@ -1114,7 +1089,7 @@ public final class UmbraVM2 {
                 ws[sp - 2] = 1;
                 return sp - 1;
             }
-            case 151: { // DCMPL
+            case 151: {
                 double a = Double.longBitsToDouble(ns[sp - 2]);
                 double b = Double.longBitsToDouble(ns[sp - 1]);
                 ns[sp - 2] = Double.isNaN(a) || Double.isNaN(b) ? -1
@@ -1122,7 +1097,7 @@ public final class UmbraVM2 {
                 ws[sp - 2] = 1;
                 return sp - 1;
             }
-            default: { // DCMPG
+            default: {
                 double a = Double.longBitsToDouble(ns[sp - 2]);
                 double b = Double.longBitsToDouble(ns[sp - 1]);
                 ns[sp - 2] = Double.isNaN(a) || Double.isNaN(b) ? 1
@@ -1133,32 +1108,31 @@ public final class UmbraVM2 {
         }
     }
 
-    /** Array load family (opcodes 46..53). */
     private static int vmArrayLoad(int op, long[] ns, Object[] rs, byte[] ws, int sp) {
         int index = (int) ns[--sp];
         Object array = rs[--sp];
         switch (op) {
-            case 46: // IALOAD
+            case 46:
                 ns[sp] = Array.getInt(array, index);
                 ws[sp] = 1;
                 break;
-            case 47: // LALOAD
+            case 47:
                 ns[sp] = Array.getLong(array, index);
                 ws[sp] = 2;
                 break;
-            case 48: // FALOAD
+            case 48:
                 ns[sp] = Float.floatToRawIntBits(Array.getFloat(array, index));
                 ws[sp] = 1;
                 break;
-            case 49: // DALOAD
+            case 49:
                 ns[sp] = Double.doubleToRawLongBits(Array.getDouble(array, index));
                 ws[sp] = 2;
                 break;
-            case 50: // AALOAD
+            case 50:
                 rs[sp] = Array.get(array, index);
                 ws[sp] = 1;
                 break;
-            case 51: // BALOAD
+            case 51:
                 if (array instanceof boolean[]) {
                     ns[sp] = Array.getBoolean(array, index) ? 1 : 0;
                 } else {
@@ -1166,11 +1140,11 @@ public final class UmbraVM2 {
                 }
                 ws[sp] = 1;
                 break;
-            case 52: // CALOAD
+            case 52:
                 ns[sp] = Array.getChar(array, index);
                 ws[sp] = 1;
                 break;
-            default: // SALOAD
+            default:
                 ns[sp] = Array.getShort(array, index);
                 ws[sp] = 1;
                 break;
@@ -1178,7 +1152,6 @@ public final class UmbraVM2 {
         return sp + 1;
     }
 
-    /** Array store family (opcodes 79..86). */
     private static int vmArrayStore(int op, long[] ns, Object[] rs, int sp) {
         long bits;
         Object ref = null;
@@ -1191,47 +1164,37 @@ public final class UmbraVM2 {
         int index = (int) ns[--sp];
         Object array = rs[--sp];
         switch (op) {
-            case 79: // IASTORE
+            case 79:
                 Array.setInt(array, index, (int) bits);
                 break;
-            case 80: // LASTORE
+            case 80:
                 Array.setLong(array, index, bits);
                 break;
-            case 81: // FASTORE
+            case 81:
                 Array.setFloat(array, index, Float.intBitsToFloat((int) bits));
                 break;
-            case 82: // DASTORE
+            case 82:
                 Array.setDouble(array, index, Double.longBitsToDouble(bits));
                 break;
-            case 83: // AASTORE
+            case 83:
                 Array.set(array, index, ref);
                 break;
-            case 84: // BASTORE
+            case 84:
                 if (array instanceof boolean[]) {
                     Array.setBoolean(array, index, (int) bits != 0);
                 } else {
                     Array.setByte(array, index, (byte) bits);
                 }
                 break;
-            case 85: // CASTORE
+            case 85:
                 Array.setChar(array, index, (char) bits);
                 break;
-            default: // SASTORE
+            default:
                 Array.setShort(array, index, (short) bits);
                 break;
         }
         return sp;
     }
-
-    // ==================================================================
-    // Superinstructions (vm2.fusion)
-    //
-    // A fused instruction has the same observable effect as the opcode run it
-    // replaced; the translator only fuses runs that are adjacent in the
-    // instruction list and never contain a branch target or handler boundary.
-    // The helper returns {@code (nextPc << 32) | sp}, so the dispatch loop pays
-    // one call per fused run instead of one dispatch per original opcode.
-    // ==================================================================
 
     private static long vmSuper(int op, int[] code, int p, long[] ns, Object[] rs, byte[] ws,
                                 long[] nl, Object[] rl, String[] refs, Object[] refCache, int sp) {
@@ -1312,6 +1275,26 @@ public final class UmbraVM2 {
             case SUPER_CONST_ISTORE:
                 nl[code[p + 1]] = code[p];
                 return pack(sp, p + 2);
+            case SUPER_CALL: {
+
+                int id = (int) ns[--sp];
+                if (id < 0 || id >= refs.length) {
+                    throw new IllegalStateException(
+                            "Umbra VM2: call id out of range (" + id + ")");
+                }
+                int next = invoke(refs, refCache, id, code[p], ns, rs, ws, sp, rl);
+                return pack(next, p + 1);
+            }
+            case SUPER_CALL_LOCAL: {
+
+                int id = (int) nl[code[p + 1]];
+                if (id < 0 || id >= refs.length) {
+                    throw new IllegalStateException(
+                            "Umbra VM2: call id out of range (" + id + ")");
+                }
+                int next = invoke(refs, refCache, id, code[p], ns, rs, ws, sp, rl);
+                return pack(next, p + 2);
+            }
             default:
                 throw new IllegalStateException(
                         "Umbra VM2: unsupported superinstruction " + op);
@@ -1344,10 +1327,6 @@ public final class UmbraVM2 {
         return (((long) pc) << 32) | (sp & 0xFFFFFFFFL);
     }
 
-    /**
-     * Operand count of one instruction; mirrors {@code Vm2Format.operandSlots}
-     * and is used to validate/decode the code stream before execution.
-     */
     private static int operandSlots(int opcode, int[] code, int opcodeSlot) {
         switch (opcode) {
             case SUPER_IADD_LL:
@@ -1371,6 +1350,10 @@ public final class UmbraVM2 {
             case SUPER_ALOAD_GETFIELD:
             case SUPER_CONST_ISTORE:
                 return 2;
+            case SUPER_CALL:
+                return 1;
+            case SUPER_CALL_LOCAL:
+                return 2;
             case SUPER_IF_ICMPEQ_LL:
             case SUPER_IF_ICMPNE_LL:
             case SUPER_IF_ICMPLT_LL:
@@ -1378,30 +1361,30 @@ public final class UmbraVM2 {
             case SUPER_IF_ICMPGT_LL:
             case SUPER_IF_ICMPLE_LL:
                 return 3;
-            case 16: case 17: case 18: // BIPUSH, SIPUSH, LDC
-            case 21: case 22: case 23: case 24: case 25: // xLOAD
-            case 54: case 55: case 56: case 57: case 58: // xSTORE
-            case 169: // RET
-            case 188: // NEWARRAY
-            case 178: case 179: case 180: case 181: // xFIELD
-            case 182: case 183: case 184: case 185: // INVOKEx
-            case 187: // NEW
-            case 189: case 192: case 193: // ANEWARRAY, CHECKCAST, INSTANCEOF
-            case 167: // GOTO
-            case 198: case 199: // IFNULL, IFNONNULL
+            case 16: case 17: case 18:
+            case 21: case 22: case 23: case 24: case 25:
+            case 54: case 55: case 56: case 57: case 58:
+            case 169:
+            case 188:
+            case 178: case 179: case 180: case 181:
+            case 182: case 183: case 184: case 185:
+            case 187:
+            case 189: case 192: case 193:
+            case 167:
+            case 198: case 199:
             case 153: case 154: case 155: case 156: case 157: case 158:
             case 159: case 160: case 161: case 162: case 163: case 164:
             case 165: case 166:
                 return 1;
-            case 132: // IINC
-            case 197: // MULTIANEWARRAY
+            case 132:
+            case 197:
                 return 2;
-            case 170: { // TABLESWITCH
+            case 170: {
                 int high = code[opcodeSlot + 3];
                 int low = code[opcodeSlot + 2];
                 return 3 + (high - low + 1);
             }
-            case 171: { // LOOKUPSWITCH
+            case 171: {
                 int pairs = code[opcodeSlot + 2];
                 return 2 + 2 * pairs;
             }
@@ -1410,7 +1393,6 @@ public final class UmbraVM2 {
         }
     }
 
-    /** Initial rolling opcode-key state (mirrors {@code Vm2Format.rollSeed}). */
     private static long rollSeed(long key) {
         long roll = key ^ 0x243F6A8885A308D3L;
         roll ^= roll << 13;
@@ -1424,37 +1406,77 @@ public final class UmbraVM2 {
         return roll;
     }
 
-    /** Advances the rolling opcode-key state (mirrors {@code Vm2Format.rollStep}). */
     private static long rollStep(long roll, int encodedOpcode) {
         return roll * 0x9E3779B97F4A7C15L ^ (((long) encodedOpcode) + 1L);
     }
 
-    // ==================================================================
-    // Payload decoding
-    // ==================================================================
+    private static final int PERMUTATION_ROUNDS = 6;
+    private static final long PERM_ROUND = 0x9E3779B97F4A7C15L;
+    private static final long PERM_HALF = 0x2545F4914F6CDD1DL;
 
-    /**
-     * Decoded payloads kept at once.
-     *
-     * <p>Every parsed payload holds its plaintext instruction stream, so an
-     * unbounded cache means a heap dump taken after warm-up contains the whole
-     * protected program. The cache is therefore capacity- and time-bounded: the
-     * oldest payload is dropped when the cap is reached, and payloads expire after
-     * {@link #STATE_TTL_NANOS}.</p>
-     */
+    private static int permutationRound(long key, int round, int half) {
+        long h = key + (round + 1) * PERM_ROUND + half * PERM_HALF;
+        h ^= h >>> 33;
+        h *= 0xFF51AFD7ED558CCDL;
+        h ^= h >>> 33;
+        h *= 0xC4CEB9FE1A85EC53L;
+        h ^= h >>> 33;
+        return (int) (h >>> 60) & 0xF;
+    }
+
+    private static int unpermuteOpcode(long key, int encoded) {
+        int left = (encoded >>> 4) & 0xF;
+        int right = encoded & 0xF;
+        for (int round = PERMUTATION_ROUNDS - 1; round >= 0; round--) {
+
+            int roundInput = left;
+            left = right ^ permutationRound(key, round, roundInput);
+            right = roundInput;
+        }
+        return ((left << 4) | right) & 0xFF;
+    }
+
+    private static int[] keyedDecodeTable(long key) {
+        int[] table = new int[256];
+        for (int encoded = 0; encoded < 256; encoded++) {
+            table[encoded] = unpermuteOpcode(key, encoded);
+        }
+        return table;
+    }
+
+    private static final long SEMANTIC_SALT = 0x5E4D414E54494353L;
+
+    private static final int[] IDENTITY_SEMANTICS = identitySemantics();
+
+    private static int[] identitySemantics() {
+        int[] table = new int[256];
+        for (int code = 0; code < 256; code++) {
+            table[code] = code;
+        }
+        return table;
+    }
+
+    private static int[] semanticDecoder(long key) {
+        long semanticKey = key ^ SEMANTIC_SALT;
+        int[] table = new int[256];
+        for (int semantic = 0; semantic < 256; semantic++) {
+            table[semantic] = unpermuteOpcode(semanticKey, semantic);
+        }
+        return table;
+    }
+
     private static final int STATE_CACHE_MAX = 128;
-    /** Age after which a decoded payload is dropped even if the program keeps running. */
+
     private static final long STATE_TTL_NANOS = 5_000_000_000L;
-    /** Minimum gap between expiry sweeps (bounds the cost of the bookkeeping). */
+
     private static final long STATE_SWEEP_NANOS = 250_000_000L;
-    /** Decode timestamp per cached payload, used for the age check. */
+
     private static final java.util.concurrent.ConcurrentHashMap<Object, Long> STATE_STAMPS =
             new java.util.concurrent.ConcurrentHashMap<Object, Long>();
     private static volatile long stateSweptAt;
 
     private static Object[] stateFor(int[] meta, int[] map, int[][] blocks) {
-        // The block array is assembled by the call site on every invocation, so
-        // it cannot identify a payload; the meta array is the stable holder.
+
         Object key = meta != null ? meta : blocks;
         Object existing = STATES.get(key);
         if (existing != null) {
@@ -1474,13 +1496,6 @@ public final class UmbraVM2 {
         }
     }
 
-    /**
-     * Drops payloads older than {@link #STATE_TTL_NANOS}.
-     *
-     * <p>References are only removed, never zeroed: another thread may still be
-     * executing the array it obtained before the sweep, so clearing the contents
-     * would corrupt a live dispatch.</p>
-     */
     private static void expireStates() {
         long now = System.nanoTime();
         if (now - stateSweptAt < STATE_SWEEP_NANOS) {
@@ -1496,7 +1511,6 @@ public final class UmbraVM2 {
         }
     }
 
-    /** Evicts the oldest decoded payload once the cap is exceeded. */
     private static void trimStates() {
         int size = STATES.size();
         if (size <= STATE_CACHE_MAX) {
@@ -1539,6 +1553,7 @@ public final class UmbraVM2 {
         }
         long key = metaKey(meta);
         int flags = meta[6] & 0xFFFF;
+        boolean keyedPermutation = (flags & FLAG_KEYED_PERM) != 0;
         boolean encrypted = (flags & FLAG_ENCRYPT) != 0;
         boolean nested = (flags & FLAG_NESTED) != 0 && encrypted;
         int payloadBlocks = meta[4];
@@ -1557,8 +1572,7 @@ public final class UmbraVM2 {
             crypt(outer, key);
             stage = runOuterProgram(outer, key, meta[7], plainLen, payloadBlocks);
             if (stage == 0L) {
-                // The writer applies the same fallback when a generated outer
-                // program happens to fold to zero.
+
                 stage = key ^ 0x5DEECE66DL;
             }
         }
@@ -1608,26 +1622,26 @@ public final class UmbraVM2 {
         for (int i = 0; i < constCount; i++) {
             int tag = plain[cursor++];
             switch (tag) {
-                case 1: // int
+                case 1:
                     consts[i] = Integer.valueOf(plain[cursor++]);
                     break;
-                case 2: { // long
+                case 2: {
                     long lo = plain[cursor++];
                     long hi = plain[cursor++];
                     consts[i] = Long.valueOf((hi << 32) ^ (lo & 0xFFFFFFFFL));
                     break;
                 }
-                case 3: // float
+                case 3:
                     consts[i] = Float.valueOf(Float.intBitsToFloat(plain[cursor++]));
                     break;
-                case 4: { // double
+                case 4: {
                     long lo = plain[cursor++];
                     long hi = plain[cursor++];
                     consts[i] = Double.valueOf(
                             Double.longBitsToDouble((hi << 32) ^ (lo & 0xFFFFFFFFL)));
                     break;
                 }
-                case 5: { // string
+                case 5: {
                     int length = plain[cursor++];
                     if (length < 0 || cursor + length > plain.length) {
                         throw tampered("string length");
@@ -1639,7 +1653,7 @@ public final class UmbraVM2 {
                     consts[i] = new String(chars);
                     break;
                 }
-                case 6: { // class literal
+                case 6: {
                     int length = plain[cursor++];
                     if (length < 0 || cursor + length > plain.length) {
                         throw tampered("class descriptor");
@@ -1648,9 +1662,7 @@ public final class UmbraVM2 {
                     for (int c = 0; c < length; c++) {
                         chars[c] = (char) plain[cursor++];
                     }
-                    // Lazy: keep the descriptor and resolve the class at first
-                    // execution, so payload parsing never needs the program class
-                    // loader (nested container layouts, arbitrary first caller thread).
+
                     consts[i] = new String[] { "C", new String(chars) };
                     break;
                 }
@@ -1686,8 +1698,7 @@ public final class UmbraVM2 {
             throw tampered("code length");
         }
         int codeStart = cursor;
-        // Operand masking always uses the first-stage key (the one derived
-        // directly from meta); the second stage only encrypts the payload.
+
         for (int i = 0; i < codeLen; i++) {
             plain[codeStart + i] ^= mask(key, i);
         }
@@ -1696,31 +1707,35 @@ public final class UmbraVM2 {
         }
         int[] code = new int[codeLen];
         System.arraycopy(plain, codeStart, code, 0, codeLen);
-        // Decode the instruction stream once, before the first execution.
-        // Format 4 additionally XORs every opcode slot with an 8-bit mask from
-        // a rolling state that is chained over the preceding opcodes; format 3
-        // payloads only need the (shared) permutation table. Walking the stream
-        // also validates operand counts, so a malformed payload is rejected at
-        // load time instead of corrupting the interpreter later.
+
         boolean rolling = format >= ROLLING_FORMAT;
         long roll = rolling ? rollSeed(key) : 0L;
+
+        int[] decoder = keyedPermutation ? keyedDecodeTable(key) : map;
+
+        boolean semantic = (flags & FLAG_SEMANTIC) != 0;
+        int[] semantics = semantic ? semanticDecoder(key) : IDENTITY_SEMANTICS;
+        int[] semanticOfReal = new int[256];
+        for (int semanticIndex = 0; semanticIndex < 256; semanticIndex++) {
+            semanticOfReal[semantics[semanticIndex]] = semanticIndex;
+        }
         int[] ops = new int[codeLen];
         int scan = 0;
         while (scan < codeLen) {
             int stored = code[scan];
             int encoded = rolling ? (stored ^ (int) (roll >>> 56)) : stored;
             int op;
-            if (map == null) {
+            if (decoder == null) {
                 op = encoded;
-            } else if (encoded < 0 || encoded >= map.length) {
+            } else if (encoded < 0 || encoded >= decoder.length) {
                 throw tampered("opcode range at " + scan);
             } else {
-                op = map[encoded];
+                op = decoder[encoded];
             }
             if (op < 0 || op > 255) {
                 throw tampered("opcode at " + scan);
             }
-            ops[scan] = op;
+            ops[scan] = semanticOfReal[op];
             if (rolling) {
                 roll = rollStep(roll, encoded);
             }
@@ -1730,15 +1745,17 @@ public final class UmbraVM2 {
             }
             scan += 1 + operands;
         }
-        Object[] state = new Object[8];
+        Object[] state = new Object[9];
         state[STATE_CODE] = code;
         state[STATE_OPS] = ops;
         state[STATE_CONSTS] = consts;
         state[STATE_REFS] = refs;
         state[STATE_HANDLERS] = handlers;
-        state[STATE_INFO] = new int[] { maxLocals, argSlots, stackHint, flags };
+        state[STATE_INFO] = new int[] { maxLocals, argSlots, stackHint, flags,
+                (int) (key >>> 40) };
         state[STATE_KINDS] = kinds;
         state[STATE_REF_CACHE] = new Object[refCount];
+        state[STATE_SEMANTICS] = semantics;
         return state;
     }
 
@@ -1755,12 +1772,10 @@ public final class UmbraVM2 {
         return key;
     }
 
-    /** Mirrors {@code Vm2Format.magicFor}: per-payload marker, no fixed literal. */
     private static int magicFor(int[] meta) {
         return (int) (metaKey(meta) >>> 32) ^ meta[7] ^ 0x2B;
     }
 
-    /** Mirrors {@code Vm2Format.payloadMagic}: payload marker derived from the key. */
     private static int payloadMagic(long key) {
         long mixed = key ^ (key >>> 32) ^ 0x2B;
         mixed *= GOLDEN;
@@ -1883,10 +1898,6 @@ public final class UmbraVM2 {
         return stack[sp - 1];
     }
 
-    // ==================================================================
-    // Frames (per thread, pooled across re-entrant calls too)
-    // ==================================================================
-
     private static Object[] acquireFrame(int stackHint, int maxLocals) {
         Object[] frame = (Object[]) FRAMES.get();
         if (frame == null) {
@@ -1926,10 +1937,6 @@ public final class UmbraVM2 {
         };
     }
 
-    // ==================================================================
-    // Invocation
-    // ==================================================================
-
     private static int invoke(String[] refs, Object[] refCache, int refIndex, int opcode,
                               long[] ns, Object[] rs, byte[] ws, int sp, Object[] rl) {
         Object[] info = invokeInfo(refs, refCache, refIndex, opcode);
@@ -1968,8 +1975,7 @@ public final class UmbraVM2 {
                 return sp;
             }
             Method method = (Method) info[INFO_METHOD];
-            // Array clone() is a JVM intrinsic: Object.clone is not invokable
-            // from an unnamed module on JDK 9+, so emulate it.
+
             if (receiver != null && receiver.getClass().isArray()
                     && "clone".equals(info[INFO_NAME]) && argumentCount == 0) {
                 Object copy = arrayClone(receiver);
@@ -1995,13 +2001,6 @@ public final class UmbraVM2 {
         }
     }
 
-
-
-    /**
-     * Resolves and caches one call site: reflection target, argument kinds and
-     * return kind. The cache lives in the decoded payload state, so repeated
-     * calls never parse the reference string again.
-     */
     private static Object[] invokeInfo(String[] refs, Object[] refCache, int refIndex, int opcode) {
         Object cached = refCache[refIndex];
         if (cached != null) {
@@ -2056,7 +2055,7 @@ public final class UmbraVM2 {
                     break;
                 }
             } catch (NoSuchFieldException ignored) {
-                // continue with the superclass
+
             }
             field = findInterfaceField(current, name, desc);
             if (field != null) {
@@ -2081,7 +2080,7 @@ public final class UmbraVM2 {
                     return candidate;
                 }
             } catch (NoSuchFieldException ignored) {
-                // continue with nested interfaces
+
             }
             Field nested = findInterfaceField(interfaces[i], name, desc);
             if (nested != null) {
@@ -2128,7 +2127,7 @@ public final class UmbraVM2 {
             try {
                 return current.getDeclaredMethod(name, parameters);
             } catch (NoSuchMethodException ignored) {
-                // keep walking
+
             }
             Method fromInterface = findInInterfaces(current, name, parameters);
             if (fromInterface != null) {
@@ -2144,7 +2143,7 @@ public final class UmbraVM2 {
             try {
                 return interfaces[i].getDeclaredMethod(name, parameters);
             } catch (NoSuchMethodException ignored) {
-                // keep walking
+
             }
             Method nested = findInInterfaces(interfaces[i], name, parameters);
             if (nested != null) {
@@ -2237,10 +2236,6 @@ public final class UmbraVM2 {
         ARGUMENTS.put(desc, types);
         return types;
     }
-
-    // ==================================================================
-    // Values
-    // ==================================================================
 
     private static int pushValue(long[] ns, Object[] rs, byte[] ws, int sp, char sort, Object value) {
         switch (sort) {
@@ -2363,17 +2358,12 @@ public final class UmbraVM2 {
         }
     }
 
-    /** Emulates the JVM's array clone intrinsic (also works on JDK 9+). */
     private static Object arrayClone(Object array) {
         int length = Array.getLength(array);
         Object copy = Array.newInstance(array.getClass().getComponentType(), length);
         System.arraycopy(array, 0, copy, 0, length);
         return copy;
     }
-
-    // ==================================================================
-    // Types and coercion
-    // ==================================================================
 
     private static String typeTokenFromRef(String ref) {
         if (ref.startsWith("T|")) {
@@ -2382,12 +2372,6 @@ public final class UmbraVM2 {
         return ref;
     }
 
-    /**
-     * Resolves an internal class name or array descriptor (payload {@code T|}
-     * references, field/method owners). Renamed classes may legitimately be a
-     * single character long, so this must never interpret the token as a
-     * primitive descriptor.
-     */
     private static Class<?> resolveInternal(String token) {
         String key = "N:" + token;
         Object cached = TYPES.get(key);
@@ -2399,7 +2383,6 @@ public final class UmbraVM2 {
         return type;
     }
 
-    /** Resolves a field/method/type descriptor ({@code I}, {@code La;}, {@code [I}). */
     private static Class<?> resolveDescriptor(String token) {
         String key = "D:" + token;
         Object cached = TYPES.get(key);
@@ -2420,19 +2403,6 @@ public final class UmbraVM2 {
         return type;
     }
 
-    /**
-     * Loads a class through the class loader chain a protected program may be
-     * running under.
-     *
-     * <p>The interpreter helper itself is injected at the JAR root, but the
-     * program's classes may live in a nested container: for a Spring Boot fat
-     * JAR or a WAR they are loaded by the container loader (for example
-     * {@code LaunchedURLClassLoader}) which is installed as the thread context
-     * class loader. The helper's own loader (the system application loader)
-     * cannot see {@code BOOT-INF/classes}, so the context loader is tried first,
-     * then the helper's loader and finally the system loader. Flat JARs keep
-     * working because all three candidates are the same application loader.</p>
-     */
     private static Class<?> forName(String dottedName) {
         ClassNotFoundException failure = null;
         ClassLoader context = null;
@@ -2469,7 +2439,6 @@ public final class UmbraVM2 {
                 + ", helper loader " + (own == null ? "bootstrap" : own.getClass().getName())
                 + ")", failure);
     }
-
 
     private static Class<?> elementType(String descriptor) {
         int index = 0;
@@ -2561,15 +2530,10 @@ public final class UmbraVM2 {
         try {
             object.setAccessible(true);
         } catch (RuntimeException ignored) {
-            // public members of exported packages stay callable
+
         }
     }
 
-    /*
-     * The JVM stores boolean/byte/char/short values as sign/zero extended ints
-     * on the operand stack; reflection may hand back Boolean or Character
-     * boxes, so every numeric unboxing path accepts both representations.
-     */
     private static int toInt(Object value) {
         if (value instanceof Boolean) {
             return ((Boolean) value).booleanValue() ? 1 : 0;

@@ -21,7 +21,6 @@ final class GuardImports {
     private static final String KERNEL32 = "kernel32.dll";
     private static final String NTDLL = "ntdll.dll";
 
-    /** {@code api name}, {@code module}, {@code accessor suffix}. */
     private static final String[][] APIS = {
             {"CheckRemoteDebuggerPresent", KERNEL32, "check_remote_debugger_present"},
             {"CreateToolhelp32Snapshot", KERNEL32, "create_toolhelp32_snapshot"},
@@ -39,7 +38,6 @@ final class GuardImports {
         this.literals = literals;
     }
 
-    /** C accessor returning the resolved function pointer ({@code umbra_api_<suffix>()}). */
     String ref(String apiName) {
         return "umbra_api_" + suffixOf(apiName) + "()";
     }
@@ -53,7 +51,6 @@ final class GuardImports {
         throw new IllegalStateException("API is not in the guard import table: " + apiName);
     }
 
-    /** Emits the FNV-1a helper and one lazy hash-validated resolver per API. */
     void emit(StringBuilder out) {
         out.append("/* ---- P1-5.1: hash-resolved sensitive imports (LoadLibraryA +\n");
         out.append("   GetProcAddress on a decoded name; no plaintext API name in the PE) ---- */\n");

@@ -8,10 +8,10 @@
 
 | 项 | 值 |
 |---|---|
-| 版本 | **3.2.2**（`Main.VERSION` / `GuiConfig.VERSION` / `build.ps1` / `README.md` 四处一致） |
+| 版本 | **3.4.0**（`Main.VERSION` / `GuiConfig.VERSION` / `build.ps1` 三处一致） |
 | 工程根 | `C:\Users\Administrator\Desktop\MC\Umbra`（也可从 `E:\MC\Umbra` 访问，同一目录） |
 | 只读参考快照 | `E:\MC\Umbra-repo`（10/23 原始仓库，**不要修改**，用于恢复被改坏的测试文件） |
-| 参考实现库 | `C:\Users\Administrator\Desktop\MC\混淆器\`（7 个：ZKM、kbox、BytecodeVM、native-obfuscator、JNIC-Virtualization、PhantomShield、OpenYCP） |
+| 依赖 | 只用 vendored ASM 9.11，无外部依赖 |
 | JDK（构建） | Zulu 8 `1.8.0_502`（默认 `java`/`javac`） |
 | JDK（JavaFX GUI） | `C:\Users\Administrator\.jdks\corretto-1.8.0_462`（自带 `jfxrt.jar`） |
 | C 工具链 | `E:\1111\bin\gcc.exe`（TDM-GCC 10.3） |
@@ -103,19 +103,19 @@ GUI：截图均值 (19,24,35) → (28,33,37)，旧调色板占比 55.4% → 0%�
 
 ---
 
-## 4. 剩余待做（`docs/ROADMAP-PORTS.md` 有详细规格）
+## 4. 保护层实现状态
 
 | 项 | 内容 | 状态 |
 |---|---|---|
-| P0-1 尾部 | 方法级控制流重排（ZKM `MethodFlowAnalyzer`） | ✅ 已完成（3.2.2）：`flow.reorder` + `reorderBlocks`；CFR 结构化率 balanced 58%→42%、maximum 8%；`FlowTest.testFlowReordering` 覆盖语义 |
+| P0-1 尾部 | 方法级控制流重排 | ✅ 已完成（3.2.2）：`flow.reorder` + `reorderBlocks`；CFR 结构化率 balanced 58%→42%、maximum 8%；`FlowTest.testFlowReordering` 覆盖语义 |
 | **P0-2-a** | **K-OTP 运行时状态 + 方法入口推进** | ✅ 已完成（3.2.2） |
 | P0-2-b | 原生种子（DLL 暴露 `otp_next()`） | ✅ 已完成（3.2.2）：`GuardCodeGenerator` 生成 `umbra_native_otp` + `JNI_OnLoad` 注册 `nativeNext(J)J`，`UmbraOtp` 绑定失败自动回退 Java；`NativeOtpProbe` 实测 `nativeBound()==1` |
 | P0-2-c | 字符串/常量槽位按调用重加密 | ✅ 已完成（3.2.2）：双引擎密文 + `carrier()` 选择器；demo balanced `otp-slots=138/16`、体积 +0.85%；OTP 关/indy 回退单引擎 |
 | P0-3 | 二层方言虚拟化（外层 ChaCha20 + 不同 opcode 表） | ✅ 已完成（3.2.2 子集）：`cantrip.seal` = 每构建 opcode 置换表 + ChaCha20 封签；**未做**「密钥来自外程序运行期状态」与「不同栈模型」（见 ROADMAP P0-3） |
 | P0-4 | 调用图隐藏 | ✅ 已完成（跨类假边） |
 | P1-5 | 原生壳（段加密/导入表合成/函数级虚拟化） | ✅ 子集完成（3.2.2）：导入表 57→54、明文标记清零；**函数级虚拟化不做**（周级，与验收无关） |
-| P1-6 | 原生内存保护（先读 PhantomShield 的 33h/13cpp） | ✅ 完成（3.2.2）：代码段 CRC + 页保护轮换（实测稳态）+ `execWhitelist`；干净 JVM 零误报，SnakeGame level 3 存活 |
-| 排除 | 云端授权/在线吊销/指纹绑定；BytecodeVM、native-obfuscator（比我们弱）；JNIC-Virtualization（是破解工具，只用于喂 anti-dump） | — |
+| P1-6 | 原生内存保护 | ✅ 完成（3.2.2）：代码段 CRC + 页保护轮换（实测稳态）+ `execWhitelist`；干净 JVM 零误报，SnakeGame level 3 存活 |
+| 排除 | 云端授权 / 在线吊销 / 指纹绑定（与混淆器核心解耦，不并入） | — |
 
 ---
 
@@ -128,7 +128,7 @@ demo + balanced + classEncryption 关 + otp 开 + 块重排 : 6/8 (75%)   ← 3.
 demo + balanced + classEncryption 关 + otp 开（无重排）: 5/8 (62%)
 demo + balanced + classEncryption 关 + otp 关（无重排）: 4/8 (50%)
 demo + balanced（默认，classEncryption 开）           : 3/7 (43%)   ← OTP 行 N/A，剔除分母
-ZKM 27                                                : 未按新口径重测（旧 7 行口径是 5/7）
+
 ```
 
 CFR 行口径（3.2.2 起）：一个类只有被 CFR **完全结构化**（输出里没有 `Unable to fully structure code`）才算被反编译成功，判据 `<50%`。旧口径数的是输出里的 `public class` 字样，量到的是类修饰符（内部类/抽象类没有 `public`），会把「CFR 只能给 goto 兜底」的类误判成成功。明细里同时打印旧口径数字，便于和历史值对照。

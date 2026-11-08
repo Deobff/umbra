@@ -22,18 +22,12 @@ import java.util.Base64;
  */
 public final class UmbraStringDecryptor {
 
-    /**
-     * Literal domain separators (rewritten per build by template injection) and
-     * their mutable counterparts, set by the build side through
-     * {@link #applyDomainTags(java.util.Map)}.
-     */
     private static final String LIT_LEGACY_KEY = "io.umbra.cipher.legacy.key.v2";
     private static final String LIT_LEGACY_NONCE = "io.umbra.cipher.legacy.nonce.v2";
 
     private static String TAG_LEGACY_KEY = LIT_LEGACY_KEY;
     private static String TAG_LEGACY_NONCE = LIT_LEGACY_NONCE;
 
-    /** Build-side hook: installs the per-build separators (never called at runtime). */
     public static void applyDomainTags(java.util.Map<String, String> tags) {
         TAG_LEGACY_KEY = pick(tags, LIT_LEGACY_KEY);
         TAG_LEGACY_NONCE = pick(tags, LIT_LEGACY_NONCE);
@@ -47,19 +41,6 @@ public final class UmbraStringDecryptor {
     private UmbraStringDecryptor() {
     }
 
-    /**
-     * Decrypts a Base64 payload with the supplied 64-bit key.
-     *
-     * <p>The result is interned so that encrypted string literals keep the
-     * identity semantics of the original constants: {@code "x" == "x"} and
-     * {@code "x" == new String("x").intern()} must still hold in protected
-     * code (also matters for {@code synchronized("lock")} and
-     * identity-keyed caches).</p>
-     *
-     * @param payload encrypted string
-     * @param key     per-string 64-bit key embedded at the call site
-     * @return decrypted, interned UTF-8 string
-     */
     public static String d(String payload, long key) {
         byte[] data = Base64.getDecoder().decode(payload);
         byte[] derivedKey = sha256(concat(utf8(TAG_LEGACY_KEY), le64(key)));
@@ -72,10 +53,6 @@ public final class UmbraStringDecryptor {
             Arrays.fill(plain, (byte) 0);
         }
     }
-
-    // ------------------------------------------------------------------
-    // Self-contained crypto (mirrors io.umbra.core.util.Cipher)
-    // ------------------------------------------------------------------
 
     private static byte[] chacha20(byte[] key, byte[] nonce, int counter, byte[] data) {
         byte[] out = data.clone();

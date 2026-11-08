@@ -5,9 +5,13 @@ import io.umbra.core.config.UmbraConfig;
 import io.umbra.core.engine.EngineResult;
 import io.umbra.core.engine.UmbraEngine;
 import io.umbra.core.engine.UmbraVerifier;
+import io.umbra.core.runtime.crypto.NativeKeySupport;
+import io.umbra.core.runtime.crypto.UmbraCrypto;
+import io.umbra.core.runtime.crypto.UmbraStringCipher;
 import io.umbra.core.util.Cipher;
 import io.umbra.core.util.Log;
 import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
@@ -56,7 +60,6 @@ public final class CryptoTest {
 
     private static int checks;
 
-    /** Distinctive first line of the tiny test resource. */
     private static final String RESOURCE_SECRET = "resource-secret";
 
     private CryptoTest() {
@@ -70,14 +73,12 @@ public final class CryptoTest {
         testAesCtr();
         testSealedEnvelope();
         testSecurityHelpers();
+        testNativeKeyRoot();
+        testNativeGate();
         testStringEncryptionOnDemo();
         testClassEncryptionTinyJar();
         System.out.println("CryptoTest: " + checks + " checks passed");
     }
-
-    // ------------------------------------------------------------------
-    // Cipher primitives
-    // ------------------------------------------------------------------
 
     private static void testChaCha20KnownAnswer() {
         byte[] key = new byte[32];
@@ -207,9 +208,277 @@ public final class CryptoTest {
         check(Cipher.hex(new byte[] { 0x0f, (byte) 0xa0 }).equals("0fa0"), "hex encoding");
     }
 
-    // ------------------------------------------------------------------
-    // String encryption on the demo JAR
-    // ------------------------------------------------------------------
+    private static void testNativeKeyRoot() {
+        byte[] root = new byte[UmbraCrypto.ROOT_BYTES];
+        for (int i = 0; i < root.length; i++) {
+            root[i] = (byte) (i * 7 + 3);
+        }
+        byte[] comment = "zip-comment".getBytes(StandardCharsets.UTF_8);
+        byte[] nativeMaster = UmbraCrypto.masterFromRoot(root, comment, 42);
+        check(nativeMaster != null && nativeMaster.length == 32, "native master is 256 bits");
+        check(Arrays.equals(nativeMaster, UmbraCrypto.masterFromRoot(root, comment, 42)),
+                "native master is deterministic");
+        check(!Arrays.equals(nativeMaster, UmbraCrypto.masterFromSample(root, comment, 42)),
+                "native master uses its own domain separator");
+        check(!Arrays.equals(nativeMaster, UmbraCrypto.masterFromRoot(root, comment, 41)),
+                "native master is bound to the entry count");
+        byte[] otherRoot = root.clone();
+        otherRoot[0] ^= 0x01;
+        check(!Arrays.equals(nativeMaster, UmbraCrypto.masterFromRoot(otherRoot, comment, 42)),
+                "native master is bound to the key root");
+        check(UmbraCrypto.masterFromRoot(null, comment, 42) == null, "no root, no native master");
+
+        check(!Arrays.equals(UmbraCrypto.masterFromRoot(root, comment, 42),
+                        UmbraCrypto.masterFromRoot(root, "other-comment".getBytes(StandardCharsets.UTF_8), 42)),
+                "native master is bound to the comment as well");
+
+        byte[] digestKey = UmbraCrypto.subKey(root, UmbraCrypto.SLOT_DIGEST, 0);
+        byte[] stringKey = UmbraCrypto.subKey(root, UmbraCrypto.SLOT_STRING, 0);
+        check(digestKey != null && digestKey.length == 32, "layer sub-key is 256 bits");
+        check(!Arrays.equals(digestKey, stringKey), "two layers never share a sub-key");
+        check(!Arrays.equals(digestKey, UmbraCrypto.subKey(root, UmbraCrypto.SLOT_DIGEST, 1)),
+                "sub-key index changes the key");
+        check(UmbraCrypto.subKey((byte[]) null, UmbraCrypto.SLOT_DIGEST, 0) == null,
+                "no root, no sub-key");
+
+        UmbraCrypto.installKeyRoot(root);
+        check(Arrays.equals(root, UmbraCrypto.keyRoot()), "the published root is readable");
+        check(UmbraCrypto.hasKeyRoot(), "the published root is reported");
+        UmbraCrypto.installKeyRoot(null);
+        check(UmbraCrypto.keyRoot() == null, "the root can be cleared");
+
+        byte[] payloadSalt = "SALT1234".getBytes(StandardCharsets.UTF_8);
+        byte[] withRoot = UmbraStringCipher.siteKeyV4(root, 77L, 1234L, 5, payloadSalt);
+        byte[] withoutRoot = UmbraStringCipher.siteKeyV4(null, 77L, 1234L, 5, payloadSalt);
+        check(Arrays.equals(withRoot, UmbraStringCipher.siteKeyV4(root, 77L, 1234L, 5, payloadSalt)),
+                "v4 site key is deterministic");
+        check(!Arrays.equals(withRoot, withoutRoot), "v4 site key is bound to the native root");
+        byte[] otherSalt = "SALT5678".getBytes(StandardCharsets.UTF_8);
+        check(!Arrays.equals(withRoot, UmbraStringCipher.siteKeyV4(root, 77L, 1234L, 5, otherSalt)),
+                "v4 site key is bound to the payload salt");
+        check(!Arrays.equals(withRoot, UmbraStringCipher.siteKeyV4(root, 77L, 1234L, 6, payloadSalt)),
+                "v4 site key still separates call sites");
+
+        byte[] plain = "self-check failed: ".getBytes(StandardCharsets.UTF_8);
+        long siteSeed = 0x1122334455667788L;
+        byte[] key = UmbraStringCipher.siteKeyV4(root, 99L, siteSeed, 7, payloadSalt);
+        byte[] nonce = UmbraStringCipher.siteNonceV4(root, 99L, siteSeed, 7, payloadSalt);
+        long streamSeed = UmbraStringCipher.payloadStreamSeed(siteSeed, payloadSalt);
+        byte[] body = UmbraStringCipher.transform(UmbraStringCipher.CHACHA20, plain, key, nonce,
+                streamSeed);
+        byte[] payload = new byte[payloadSalt.length + body.length];
+        System.arraycopy(payloadSalt, 0, payload, 0, payloadSalt.length);
+        System.arraycopy(body, 0, payload, payloadSalt.length, body.length);
+        byte[] runtimeSalt = Arrays.copyOfRange(payload, 0, UmbraStringCipher.PAYLOAD_SALT_BYTES);
+        byte[] ciphertext = Arrays.copyOfRange(payload, UmbraStringCipher.PAYLOAD_SALT_BYTES,
+                payload.length);
+        byte[] runtimeKey = UmbraStringCipher.siteKeyV4(root, 99L, siteSeed, 7, runtimeSalt);
+        byte[] runtimeNonce = UmbraStringCipher.siteNonceV4(root, 99L, siteSeed, 7, runtimeSalt);
+        byte[] restored = UmbraStringCipher.transform(UmbraStringCipher.CHACHA20, ciphertext,
+                runtimeKey, runtimeNonce, UmbraStringCipher.payloadStreamSeed(siteSeed, runtimeSalt));
+        check(Arrays.equals(plain, restored), "payload v4 round-trips through the self-binding schedule");
+        byte[] tampered = payload.clone();
+        tampered[0] ^= 0x01;
+        byte[] tamperedSalt = Arrays.copyOfRange(tampered, 0, UmbraStringCipher.PAYLOAD_SALT_BYTES);
+        byte[] tamperedKey = UmbraStringCipher.siteKeyV4(root, 99L, siteSeed, 7, tamperedSalt);
+        check(!Arrays.equals(runtimeKey, tamperedKey),
+                "changing one payload byte changes the derived key");
+
+        check(!NativeKeySupport.declaresKeyRoot(null), "an absent loader class is not native-bound");
+        ClassNode withoutKeyRoot = new ClassNode();
+        withoutKeyRoot.methods = new ArrayList<MethodNode>();
+        withoutKeyRoot.methods.add(new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
+                "deriveKey", "(II)[B", null, null));
+        check(!NativeKeySupport.declaresKeyRoot(withoutKeyRoot),
+                "a loader without keyRoot is not native-bound");
+        ClassNode withKeyRoot = new ClassNode();
+        withKeyRoot.methods = new ArrayList<MethodNode>();
+        withKeyRoot.methods.add(new MethodNode(
+                Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_NATIVE,
+                "keyRoot", "(II[B)I", null, null));
+        check(NativeKeySupport.declaresKeyRoot(withKeyRoot),
+                "a loader that declares keyRoot is accepted");
+    }
+
+    private static void testNativeGate() throws Exception {
+        byte[] secret = new byte[32];
+        for (int i = 0; i < secret.length; i++) {
+            secret[i] = (byte) (0x40 + i);
+        }
+        long nonce = 0x1122334455667788L;
+
+        javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+        mac.init(new javax.crypto.spec.SecretKeySpec(secret, "HmacSHA256"));
+        mac.update("umbra.gate.v1".getBytes(StandardCharsets.UTF_8));
+        byte[] nonceBytes = new byte[8];
+        for (int i = 0; i < 8; i++) {
+            nonceBytes[i] = (byte) (nonce >>> (8 * i));
+        }
+        mac.update(nonceBytes);
+        byte[] expected = mac.doFinal();
+        check(Arrays.equals(expected, UmbraCrypto.gateAttest(secret, nonce)),
+                "gate attestation matches HMAC-SHA256(gateSecret, label | LE64(nonce))");
+        check(!Arrays.equals(UmbraCrypto.gateAttest(secret, nonce),
+                        UmbraCrypto.gateAttest(secret, nonce + 1)),
+                "the gate response depends on the nonce");
+        check(UmbraCrypto.gateAttest(null, nonce) == null, "no gate secret, no response");
+
+        byte[] rawRoot = new byte[32];
+        for (int i = 0; i < rawRoot.length; i++) {
+            rawRoot[i] = (byte) (0x70 + i);
+        }
+        javax.crypto.Mac mac2 = javax.crypto.Mac.getInstance("HmacSHA256");
+        mac2.init(new javax.crypto.spec.SecretKeySpec(rawRoot, "HmacSHA256"));
+        mac2.update("umbra.keyroot.v1".getBytes(StandardCharsets.UTF_8));
+        mac2.update(new byte[] { 2, 0, 0, 0 });
+        mac2.update(new byte[] { 0, 0, 0, 0 });
+        byte[] expectedRoot = mac2.doFinal();
+        check(Arrays.equals(expectedRoot, UmbraCrypto.payloadRoot(rawRoot)),
+                "payload root matches the library's slot-2 derivation");
+        check(!Arrays.equals(expectedRoot, UmbraCrypto.nativeKeyRoot(rawRoot, 1, 0)),
+                "the payload root differs from the bootstrap root");
+        check(UmbraCrypto.payloadRoot(null) == null, "no root, no payload root");
+
+        byte[] master = Cipher.sha256("gate-master".getBytes(StandardCharsets.UTF_8));
+        byte[] payloadNonce = Cipher.first(Cipher.sha256("nonce".getBytes(StandardCharsets.UTF_8)), 12);
+        byte[] plain = "class-bytes".getBytes(StandardCharsets.UTF_8);
+        byte[] bootstrapKey = UmbraCrypto.entryKey(master, "c:demo/A", payloadNonce);
+        byte[] gatedKey = UmbraCrypto.entryKey(master, "c:demo/A", payloadNonce, expectedRoot);
+        check(!Arrays.equals(bootstrapKey, gatedKey),
+                "the gated business key differs from the bootstrap key");
+        check(Arrays.equals(bootstrapKey, UmbraCrypto.entryKey(master, "c:demo/A", payloadNonce, null)),
+                "a null payload root keeps the bootstrap key");
+        check(!Arrays.equals(UmbraCrypto.keyedDigest(master, "d:c:demo/A", plain),
+                        UmbraCrypto.keyedDigest(master, "d:c:demo/A", plain, expectedRoot)),
+                "the gated digest is bound to the payload root");
+
+        ClassNode loader = new ClassNode();
+        loader.methods = new ArrayList<MethodNode>();
+        loader.methods.add(new MethodNode(Opcodes.ACC_STATIC | Opcodes.ACC_NATIVE,
+                "gateChallenge", "([J)I", null, null));
+        loader.methods.add(new MethodNode(Opcodes.ACC_STATIC | Opcodes.ACC_NATIVE,
+                "gateAttest", "(J[B)I", null, null));
+        check(NativeKeySupport.declaresGate(loader), "a loader with both gate entry points is accepted");
+        loader.methods.remove(1);
+        check(!NativeKeySupport.declaresGate(loader), "a loader without gateAttest is not gated");
+
+        ClassNode guard = new ClassNode();
+        guard.methods = new ArrayList<MethodNode>();
+        guard.methods.add(new MethodNode(Opcodes.ACC_STATIC | Opcodes.ACC_PUBLIC,
+                "attest", "(J)[B", null, null));
+        check(NativeKeySupport.declaresAttest(guard), "a guard with attest(long) is accepted");
+        guard.methods.clear();
+        check(!NativeKeySupport.declaresAttest(guard), "a guard without attest(long) is not gated");
+        check(NativeKeySupport.gateSecret(null) == null, "no context, no gate secret");
+
+        byte[] tickRoot = new byte[32];
+        for (int i = 0; i < tickRoot.length; i++) {
+            tickRoot[i] = (byte) (0x20 + i);
+        }
+        javax.crypto.Mac tickMac = javax.crypto.Mac.getInstance("HmacSHA256");
+        tickMac.init(new javax.crypto.spec.SecretKeySpec(tickRoot, "HmacSHA256"));
+        tickMac.update("umbra.tick.v1".getBytes(StandardCharsets.UTF_8));
+        tickMac.update(new byte[] { 5, 0, 0, 0 });
+        byte[] expectedTick = tickMac.doFinal();
+        check(Arrays.equals(expectedTick, UmbraCrypto.gateTick(tickRoot, 5)),
+                "gate tick matches HMAC(payloadRoot, 'umbra.tick.v1' | LE32(index))");
+        check(!Arrays.equals(UmbraCrypto.gateTick(tickRoot, 5), UmbraCrypto.gateTick(tickRoot, 6)),
+                "every class index derives its own tick");
+        check(UmbraCrypto.gateTick(null, 5) == null, "no payload root, no tick");
+
+        ClassNode loaderWithTick = new ClassNode();
+        loaderWithTick.methods = new ArrayList<MethodNode>();
+        check(!NativeKeySupport.declaresGateTick(loaderWithTick),
+                "a loader without gateTick keeps the single-shot root");
+        loaderWithTick.methods.add(new MethodNode(Opcodes.ACC_STATIC | Opcodes.ACC_NATIVE,
+                "gateTick", "(I[B)I", null, null));
+        check(NativeKeySupport.declaresGateTick(loaderWithTick),
+                "a loader declaring gateTick activates the per-class tick");
+
+        Class<?> clean = loadGuardVariant(secret, false);
+        clean.getMethod("check").invoke(null);
+        long challenge = 0x1122334455667788L;
+        Object answered = clean.getMethod("attest", long.class).invoke(null, challenge);
+        check(answered instanceof byte[], "a guard that ran check() answers the gate");
+        check(Arrays.equals((byte[]) answered, UmbraCrypto.gateAttest(secret, challenge)),
+                "the gate answer is HMAC(gateSecret, label | LE64(nonce))");
+
+        Class<?> blanked = loadGuardVariant(secret, true);
+        blanked.getMethod("check").invoke(null);
+        check(blanked.getMethod("attest", long.class).invoke(null, challenge) == null,
+                "a guard whose check() was blanked refuses to answer (patch3)");
+
+        Class<?> never = loadGuardVariant(secret, false);
+        check(never.getMethod("attest", long.class).invoke(null, challenge) == null,
+                "a guard that never ran check() refuses to answer");
+
+        javax.crypto.Mac evidence = javax.crypto.Mac.getInstance("HmacSHA256");
+        evidence.init(new javax.crypto.spec.SecretKeySpec(secret, "HmacSHA256"));
+        evidence.update("umbra.check.v1".getBytes(StandardCharsets.UTF_8));
+        byte[] counterBytes = new byte[8];
+        for (int i = 0; i < 8; i++) {
+            counterBytes[i] = (byte) (7L >>> (8 * i));
+        }
+        evidence.update(counterBytes);
+        evidence.update(new byte[] { 3, 0, 0, 0 });
+        check(Arrays.equals(evidence.doFinal(), UmbraCrypto.checkEvidence(secret, 7L, 3)),
+                "check evidence matches HMAC(gateSecret, 'umbra.check.v1' | LE64(counter) | LE32(mask))");
+    }
+
+    private static Class<?> loadGuardVariant(byte[] gateSecret, boolean blankCheck) throws Exception {
+        ClassNode node = io.umbra.core.runtime.TemplateInjector.read(
+                io.umbra.core.runtime.crypto.UmbraRuntimeGuard.class);
+        Map<String, String> replacements = new LinkedHashMap<String, String>();
+        replacements.put("@@GATESECRET@@", Cipher.base64(gateSecret));
+        replacements.put("@@LEVEL@@", "1");
+        replacements.put("@@THREAD@@", "false");
+        replacements.put("@@JVMTI@@", "false");
+        replacements.put("@@ATTACH@@", "false");
+        replacements.put("@@ATTACHWATCH@@", "false");
+        replacements.put("@@PORTPROBE@@", "false");
+        replacements.put("@@ENV@@", "false");
+        replacements.put("@@TIMING@@", "false");
+        replacements.put("@@ACTION@@", "log");
+        replacements.put("@@LOGTOKEN@@", "test");
+        io.umbra.core.runtime.crypto.CryptoSupport.replaceConstants(node, replacements);
+        if (blankCheck) {
+            for (MethodNode method : node.methods) {
+                if ("check".equals(method.name) && "()V".equals(method.desc)) {
+                    org.objectweb.asm.tree.InsnList body = new org.objectweb.asm.tree.InsnList();
+                    body.add(new org.objectweb.asm.tree.InsnNode(Opcodes.RETURN));
+                    method.instructions = body;
+                    method.tryCatchBlocks =
+                            new ArrayList<org.objectweb.asm.tree.TryCatchBlockNode>();
+                    if (method.localVariables != null) {
+                        method.localVariables.clear();
+                    }
+                }
+            }
+        }
+        org.objectweb.asm.ClassWriter writer =
+                new org.objectweb.asm.ClassWriter(org.objectweb.asm.ClassWriter.COMPUTE_MAXS);
+        node.accept(writer);
+        final byte[] bytes = writer.toByteArray();
+        final String name = node.name.replace('/', '.');
+        ClassLoader loader = new ClassLoader(CryptoTest.class.getClassLoader()) {
+            @Override
+            protected Class<?> loadClass(String requested, boolean resolve)
+                    throws ClassNotFoundException {
+                if (name.equals(requested)) {
+                    Class<?> defined = findLoadedClass(requested);
+                    if (defined == null) {
+                        defined = defineClass(requested, bytes, 0, bytes.length);
+                    }
+                    if (resolve) {
+                        resolveClass(defined);
+                    }
+                    return defined;
+                }
+                return super.loadClass(requested, resolve);
+            }
+        };
+        return Class.forName(name, true, loader);
+    }
 
     private static void testStringEncryptionOnDemo() throws Exception {
         Path demo = java.nio.file.Paths.get("demo", "demo.jar");
@@ -221,7 +490,9 @@ public final class CryptoTest {
         try {
             Path first = dir.resolve("strings-a.jar");
             Path second = dir.resolve("strings-b.jar");
-            EngineResult result = runEngine(config(demo, first, "string.strength", "3", "string.cache", "true"));
+
+            EngineResult result = runEngine(config(demo, first, "string.strength", "3", "string.cache", "true",
+                    "string.allowKeylessFallback", "true"));
             check(stat(result, "strings.encrypted") > 300, "string pass encrypted > 300 constants");
             check(stat(result, "strings.perClassKeys") > 0, "string pass used per-class keys");
             check(stat(result, "strings.splitSites") > 0, "string pass split payloads across constants");
@@ -247,17 +518,13 @@ public final class CryptoTest {
             check(!raw.contains("Hello, Umbra!"), "raw archive does not contain a greeting literal");
             check(!raw.contains("logic broken"), "raw archive does not contain the failure literal");
 
-            // Same seed must produce the same archive (deterministic protection).
-            runEngine(config(demo, second, "string.strength", "3", "string.cache", "true"));
+            runEngine(config(demo, second, "string.strength", "3", "string.cache", "true",
+                    "string.allowKeylessFallback", "true"));
             check(entryNames(first).equals(entryNames(second)), "string pass output is deterministic for a seed");
         } finally {
             deleteRecursively(dir);
         }
     }
-
-    // ------------------------------------------------------------------
-    // Class encryption on a tiny generated JAR
-    // ------------------------------------------------------------------
 
     private static void testClassEncryptionTinyJar() throws Exception {
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
@@ -328,6 +595,18 @@ public final class CryptoTest {
                     "resource encryption counted the plaintext bytes");
             check(Files.isRegularFile(output), "encrypted archive was written");
             check(UmbraVerifier.verify(output).isEmpty(), "encrypted archive passes bytecode verification");
+            check(stat(result, "classEncryption.indexVersion") == 7, "encrypted index is version 7");
+            check(stat(result, "classEncryption.buildSerial") != 0, "the index carries a build serial");
+            check(stat(result, "classEncryption.nativeGate") == 0,
+                    "no native gate secret without a native bridge");
+            check("fallback".equals(result.stats().text("classEncryption.nativeKey")),
+                    "an automatic native key fallback is reported as such in the stats");
+            check(stat(result, "classEncryption.nativeKeyFallback") == 1,
+                    "an automatic native key fallback is counted");
+            check(stat(result, "classEncryption.nativeGateTick") == 0,
+                    "no per-class tick without a native bridge");
+            check(stat(result, "classEncryption.nativeKey") == 0,
+                    "without a native library the master key uses the documented seed fallback");
 
             Map<String, byte[]> entries = readZip(output);
             int plaintextClasses = 0;
@@ -364,9 +643,6 @@ public final class CryptoTest {
             check(encryptedManifest.getMainAttributes().size() <= 2,
                     "manifest is minimized to Manifest-Version + Main-Class");
 
-            // Clean archive: load the loader through a URLClassLoader and invoke
-            // the original main; the tiny program writes a marker file that also
-            // contains the decrypted resource value.
             Path marker = dir.resolve("marker.txt");
             invokeLoader(output, loaderName, new String[] { marker.toAbsolutePath().toString() });
             check(Files.isRegularFile(marker), "encrypted program produced its output file");
@@ -374,8 +650,6 @@ public final class CryptoTest {
             check(("tiny-ok:util-value:" + RESOURCE_SECRET).equals(markerText),
                     "reflection, nested loading and decrypted resources work through the loader");
 
-            // Resource APIs: getResource/getResourceAsStream/getResources and a
-            // URL that decrypts lazily through the injected URLStreamHandler.
             URLClassLoader resourceLoader = new URLClassLoader(new URL[] { output.toUri().toURL() },
                     CryptoTest.class.getClassLoader());
             try {
@@ -409,8 +683,6 @@ public final class CryptoTest {
                 resourceLoader.close();
             }
 
-            // Tampered archive: the sealed index is the last entry; flipping its
-            // first byte must make the loader refuse to start.
             Path tampered = dir.resolve("tiny-tampered.jar");
             tamperLastEntry(output, tampered);
             boolean rejected = false;
@@ -422,10 +694,6 @@ public final class CryptoTest {
             }
             check(rejected, "tampered encrypted archive is rejected by the loader");
 
-            // Tampered resource payload: the resource is by far the largest
-            // plaintext input, so its sealed payload is the largest archive
-            // entry; reading it through the loader must fail (level 2 digest +
-            // HMAC authentication).
             Path tamperedResource = dir.resolve("tiny-resource-tampered.jar");
             tamperLargestEntry(output, tamperedResource);
             URLClassLoader tamperedLoader = new URLClassLoader(
@@ -446,7 +714,6 @@ public final class CryptoTest {
                 tamperedLoader.close();
             }
 
-            // Same seed must produce the same entry layout (deterministic naming).
             Path output2 = dir.resolve("tiny-encrypted-2.jar");
             runEngine(config(input, output2,
                     "classEncryption.enabled", "true",
@@ -457,8 +724,6 @@ public final class CryptoTest {
             check(entryNames(output).equals(entryNames(output2)),
                     "class-encryption entry naming is deterministic for a seed");
 
-            // classEncryption.resources=false compatibility: the resource stays
-            // a plaintext entry whose decompressed content is readable.
             Path plainOutput = dir.resolve("tiny-plain-resources.jar");
             runEngine(config(input, plainOutput,
                     "classEncryption.enabled", "true",
@@ -469,14 +734,39 @@ public final class CryptoTest {
                     "resources=false keeps the plaintext resource entry");
             check(contains(plainEntries.get("tiny/config.txt"), RESOURCE_SECRET.getBytes(StandardCharsets.UTF_8)),
                     "resources=false leaves the resource readable");
+
+            Path refused = dir.resolve("tiny-refused.jar");
+            boolean aborted = false;
+            try {
+                runEngine(config(input, refused,
+                        "classEncryption.enabled", "true",
+                        "classEncryption.nativeKey.fallback", "false",
+                        "string.strength", "3"));
+            } catch (Throwable expected) {
+                aborted = true;
+            }
+            check(aborted, "nativeKey.fallback=false refuses to build without a native key root");
+            check(!Files.exists(refused), "the refused build did not write an archive");
+
+            Path refusedNative = dir.resolve("tiny-native-refused.jar");
+            boolean abortedNative = false;
+            try {
+                runEngine(config(input, refusedNative,
+                        "classEncryption.enabled", "true",
+                        "classEncryption.nativeKey", "true",
+                        "classEncryption.nativeKey.fallback", "false",
+                        "string.strength", "3"));
+            } catch (Throwable expected) {
+                abortedNative = true;
+            }
+            check(abortedNative,
+                    "maximum-style nativeKey=true + fallback=false refuses without a bridge");
+            check(!Files.exists(refusedNative),
+                    "the refused native build did not write an archive");
         } finally {
             deleteRecursively(dir);
         }
     }
-
-    // ------------------------------------------------------------------
-    // Helpers
-    // ------------------------------------------------------------------
 
     private static UmbraConfig config(Path input, Path output, String... options) throws Exception {
         UmbraConfig.Builder builder = new UmbraConfig.Builder()
@@ -493,7 +783,7 @@ public final class CryptoTest {
         Log log = new Log(new Log.Sink() {
             @Override
             public void line(String level, String message) {
-                // Quiet test run.
+
             }
         }, false);
         return new UmbraEngine(log).run(config, ProgressListener.NONE);
@@ -583,9 +873,7 @@ public final class CryptoTest {
         String largest = null;
         int largestSize = -1;
         for (Map.Entry<String, byte[]> entry : entries.entrySet()) {
-            // Only encrypted payload entries (random names), never the plaintext
-            // loader/helpers: v3 archives keep ZIP-comment binding, and tampering a
-            // class file would fail before the loader even starts.
+
             if (entry.getKey().endsWith(".class") || entry.getKey().startsWith("META-INF/")) {
                 continue;
             }
@@ -625,7 +913,6 @@ public final class CryptoTest {
         }
     }
 
-    /** 20 KB resource so its sealed payload is unambiguous in tamper tests. */
     private static byte[] createResourceContent() {
         StringBuilder builder = new StringBuilder(RESOURCE_SECRET).append('\n');
         for (int i = 0; i < 20000; i++) {
@@ -655,7 +942,6 @@ public final class CryptoTest {
         }
     }
 
-    /** Collects string constants reachable from LDC, indy bootstrap args and fields. */
     private static List<String> constantPoolStrings(byte[] classBytes) {
         List<String> strings = new ArrayList<String>();
         try {
@@ -689,7 +975,7 @@ public final class CryptoTest {
                 }
             }
         } catch (RuntimeException malformed) {
-            // Ignore unparseable entries (resources that merely look like classes).
+
         }
         return strings;
     }
@@ -715,7 +1001,6 @@ public final class CryptoTest {
         return true;
     }
 
-    /** True when {@code needle} occurs in {@code haystack}. */
     private static boolean contains(byte[] haystack, byte[] needle) {
         if (haystack == null || needle == null || needle.length == 0) {
             return false;
@@ -753,11 +1038,11 @@ public final class CryptoTest {
                         try {
                             Files.deleteIfExists(p);
                         } catch (IOException ignored) {
-                            // best effort
+
                         }
                     });
         } catch (IOException ignored) {
-            // best effort
+
         }
     }
 }

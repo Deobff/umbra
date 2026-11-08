@@ -3,7 +3,6 @@ package io.umbra.core.util;
 /** Minimal logging facade shared by the engine, CLI and GUI. */
 public final class Log {
 
-    /** Receives formatted log lines. */
     public interface Sink {
         void line(String level, String message);
     }

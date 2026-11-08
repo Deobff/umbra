@@ -51,10 +51,6 @@ public final class NocturneVerifier {
         };
     }
 
-    /**
-     * @return true when the transformed class serializes with computed frames
-     *         and passes ASM's type checker
-     */
     public boolean verifyClass(ClassNode owner) {
         byte[] bytes;
         try {
@@ -92,7 +88,6 @@ public final class NocturneVerifier {
         return true;
     }
 
-    /** Debug helper: finds the method whose frames cannot be computed. */
     private void diagnose(ClassNode owner, Throwable failure) {
         System.err.println("NOCTURNE CLASS FAIL " + owner.name + " -> " + failure);
         for (org.objectweb.asm.tree.MethodNode method : owner.methods) {

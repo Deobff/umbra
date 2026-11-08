@@ -54,7 +54,6 @@ import java.util.Set;
  */
 public final class NativeMethodTranslator implements Opcodes {
 
-    /** Thrown when a method cannot be translated faithfully; the method stays Java. */
     public static final class UnsupportedException extends Exception {
         private static final long serialVersionUID = 1L;
 
@@ -144,9 +143,7 @@ public final class NativeMethodTranslator implements Opcodes {
             if (opcode == JSR || opcode == RET) {
                 throw new UnsupportedException("subroutines (jsr/ret) are not supported");
             }
-            if (opcode == MONITORENTER || opcode == MONITOREXIT) {
-                throw new UnsupportedException("monitor instructions are not supported");
-            }
+
             if (insn instanceof MethodInsnNode && opcode == INVOKESPECIAL
                     && ((MethodInsnNode) insn).itf) {
                 throw new UnsupportedException("invokespecial on an interface is not supported");
@@ -223,7 +220,7 @@ public final class NativeMethodTranslator implements Opcodes {
     private void emitBody() throws UnsupportedException {
         out.append("    /* translated from ").append(owner).append('#').append(method.name)
                 .append(method.desc).append(" */\n");
-        // Copy incoming arguments into the local variable slots.
+
         int slot = 0;
         if (!staticMethod) {
             out.append("    lc[0].l = (jobject)_self;\n");
@@ -258,11 +255,6 @@ public final class NativeMethodTranslator implements Opcodes {
         emitDispatchBlocks();
     }
 
-    /**
-     * Operand stack depth in JVM <em>slots</em>. ASM's frames count values
-     * (long/double are a single value there) while the generated C stack mirrors
-     * the JVM slot layout, so the two-slot values have to be expanded here.
-     */
     private static int stackSlots(Frame<BasicValue> frame) {
         int slots = 0;
         for (int i = 0; i < frame.getStackSize(); i++) {
@@ -299,10 +291,6 @@ public final class NativeMethodTranslator implements Opcodes {
             out.append("}\n");
         }
     }
-
-    // ------------------------------------------------------------------
-    // Instruction emission
-    // ------------------------------------------------------------------
 
     private void emitInstruction(AbstractInsnNode node, Frame<BasicValue> frame, int index)
             throws UnsupportedException {
@@ -604,8 +592,11 @@ public final class NativeMethodTranslator implements Opcodes {
                 emitThrow(index);
                 return;
             case MONITORENTER:
+                emitMonitor(index, true);
+                return;
             case MONITOREXIT:
-                throw new UnsupportedException("monitor instructions are not supported");
+                emitMonitor(index, false);
+                return;
             default:
                 throw new UnsupportedException("unsupported instruction opcode " + opcode);
         }
@@ -737,9 +728,7 @@ public final class NativeMethodTranslator implements Opcodes {
         String object = "_o" + tempCounter++;
         line("jclass " + clazz + " = umbra_class(env, " + classIndex + ");");
         line("if (" + clazz + " == NULL) " + branch);
-        // Force class initialization exactly like `new` does (GetMethodID triggers
-        // class initialization per the JNI specification). "toString" is inherited
-        // by every instantiable class, so it always resolves.
+
         String init = "_i" + tempCounter++;
         line("jmethodID " + init + " = (*env)->GetMethodID(env, " + clazz
                 + ", \"toString\", \"()Ljava/lang/String;\");");
@@ -1246,7 +1235,6 @@ public final class NativeMethodTranslator implements Opcodes {
         line("if ((*env)->ExceptionCheck(env)) " + branch);
     }
 
-    /** Pops one operand stack value of the kind required by an array store opcode. */
     private String popStackValue(int opcode) throws UnsupportedException {
         switch (opcode) {
             case IASTORE:
@@ -1272,6 +1260,17 @@ public final class NativeMethodTranslator implements Opcodes {
         line("jint _len = (*env)->GetArrayLength(env, (jarray)" + array + ");");
         line("if ((*env)->ExceptionCheck(env)) " + exceptionBranch(index));
         pushInt("_len");
+    }
+
+    private void emitMonitor(int index, boolean enter) {
+        String object = popRef();
+        String branch = exceptionBranch(index);
+        line("if (" + object + " == NULL) {");
+        line("    (*env)->ThrowNew(env, umbra_class(env, UMBRA_C_NPE), \"null\");");
+        line("} else {");
+        line("    (*env)->Monitor" + (enter ? "Enter" : "Exit") + "(env, " + object + ");");
+        line("}");
+        line("if ((*env)->ExceptionCheck(env)) " + branch);
     }
 
     private void emitThrow(int index) {
@@ -1322,10 +1321,6 @@ public final class NativeMethodTranslator implements Opcodes {
             pushInt(helper + "(" + a + ", " + b + ")");
         }
     }
-
-    // ------------------------------------------------------------------
-    // Arithmetic helpers
-    // ------------------------------------------------------------------
 
     private void binInt(String operator) {
         String b = popInt();
@@ -1415,10 +1410,6 @@ public final class NativeMethodTranslator implements Opcodes {
         pushDouble("(" + prefix + "(" + popDouble() + "))");
     }
 
-    // ------------------------------------------------------------------
-    // Stack / exception plumbing
-    // ------------------------------------------------------------------
-
     private void line(String text) {
         out.append("        ").append(text).append('\n');
     }
@@ -1454,7 +1445,7 @@ public final class NativeMethodTranslator implements Opcodes {
                 entries.add(entry);
             }
         }
-        // Drop duplicate handler/type pairs while keeping the original order.
+
         Set<String> seen = new LinkedHashSet<String>();
         List<HandlerEntry> unique = new ArrayList<HandlerEntry>();
         for (HandlerEntry entry : entries) {
@@ -1552,7 +1543,6 @@ public final class NativeMethodTranslator implements Opcodes {
         return name;
     }
 
-    /** Pops a value of the given descriptor type (returns the C variable name). */
     private String popByDescriptor(String descriptor) throws UnsupportedException {
         switch (descriptor.charAt(0)) {
             case 'Z':
@@ -1601,10 +1591,6 @@ public final class NativeMethodTranslator implements Opcodes {
                 throw new UnsupportedException("bad type descriptor " + descriptor);
         }
     }
-
-    // ------------------------------------------------------------------
-    // Type mapping
-    // ------------------------------------------------------------------
 
     static String cType(String descriptor) throws UnsupportedException {
         if (descriptor == null || descriptor.isEmpty()) {

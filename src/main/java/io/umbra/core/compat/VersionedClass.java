@@ -35,27 +35,22 @@ public final class VersionedClass {
         this.method = method;
     }
 
-    /** Full original entry name, used as the key of the retained resource bytes. */
     public String entryName() {
         return entryName;
     }
 
-    /** Prefix up to and including the version directory, e.g. {@code META-INF/versions/9/}. */
     public String versionDirectory() {
         return versionDirectory;
     }
 
-    /** Entry path after the version directory, e.g. {@code com/foo/Bar.class}. */
     public String relativePath() {
         return relativePath;
     }
 
-    /** Class root prefix of the layout this copy belongs to (empty for flat JARs). */
     public String classPrefix() {
         return classPrefix;
     }
 
-    /** Internal class name read from the class file itself; {@code null} for module-info. */
     public String internalName() {
         return internalName;
     }
@@ -64,7 +59,6 @@ public final class VersionedClass {
         return version;
     }
 
-    /** True when this versioned entry is a {@code module-info.class} descriptor. */
     public boolean moduleInfo() {
         return moduleInfo;
     }
@@ -77,12 +71,6 @@ public final class VersionedClass {
         return method;
     }
 
-    /**
-     * Computes the write path for a (possibly renamed) class.
-     *
-     * <p>The original relative path is preserved; only the class-name suffix is
-     * replaced so that nested layout prefixes and unusual paths survive.</p>
-     */
     public String outputEntryName(String newInternalName) {
         if (moduleInfo || internalName == null || newInternalName == null
                 || internalName.equals(newInternalName)) {

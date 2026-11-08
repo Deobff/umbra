@@ -47,45 +47,135 @@ import java.util.jar.JarFile;
  */
 public final class UmbraClassLoader extends ClassLoader {
 
-    // Substituted at injection time.
     private static final String INDEX_ENTRY = "@@INDEX@@";
     private static final String SITE_SEED = "@@SEED@@";
+
+    private static final String CODELIB = "@@CODELIB@@";
+
+    private static final String NATIVE_LOADER = "@@NATIVE@@";
+
+    private static final boolean STRICT_NATIVE_VERIFY =
+            Boolean.parseBoolean("@@STRICTVERIFY@@");
     private static final String ACTION = "@@ACTION@@";
+
+    private static final String GUARD_LOG = "@@GUARDLOG@@";
     private static final String LOG_TOKEN = "@@LOGTOKEN@@";
     private static final String WATCHDOG = "@@WATCHDOG@@";
     private static final String RUNTIME_GUARD = "@@GUARD@@";
+
+    private static final String NATIVE_GUARD = "@@NATIVEGUARD@@";
     private static final String WATCH_MS_TEXT = "@@WATCHMS@@";
 
     private static final int MAGIC = 0x554D4232;
-    /** Legacy index version (no constant-pool flag); still accepted for reading. */
+
     private static final int VERSION_LEGACY = 3;
-    /** Current index version (adds the constant-pool flag). */
-    private static final int VERSION = 4;
+
+    private static final int VERSION_CP = 4;
+
+    private static final int VERSION_V5 = 5;
+
+    private static final int VERSION_V6 = 6;
+
+    private static final int VERSION = 7;
     private static final int FLAG_INTEGRITY = 1;
     private static final int FLAG_ANTIDUMP = 2;
     private static final int FLAG_RESOURCE_INTEGRITY = 4;
-    /** Constant-pool payloads are stored with encrypted {@code CONSTANT_Utf8} data. */
+
     private static final int FLAG_CONSTANT_POOL = 32;
+
+    private static final int FLAG_NATIVE_ROOT = 64;
+
+    private static final int FLAG_NATIVE_GATE = 128;
     private static final int ALG_SHIFT = 3;
     private static final int ALG_MASK = 3;
 
     private static final int BINDING_SAMPLE = 0;
     private static final int BINDING_SEED = 1;
 
-    /** Maximum accepted UTF-8 string length in the sealed index (1 MiB). */
+    private static final int BINDING_NATIVE = 2;
+
+    private static final int BINDING_HOST = 3;
+
     private static final int MAX_STRING_BYTES = 1024 * 1024;
-    /** Maximum accepted class/resource index entries (sanity cap). */
+
     private static final int MAX_ENTRIES = 1_000_000;
-    /** Minimum bytes per index entry (two length-prefixed names + 32-byte digest). */
+
     private static final int MIN_CLASS_ENTRY_BYTES = 8 + 32;
 
-    /** Scheme of the decrypted-resource URLs served by the custom handler. */
     private static final String RESOURCE_PROTOCOL = "umbra";
 
     private final URL location;
     private final JarFile jar;
     private final ProtectionDomain protectionDomain;
-    private final byte[] masterKey;
+
+    private byte[] masterKey;
+
+    private byte[] digestKey;
+
+    private int indexVersion = VERSION_LEGACY;
+
+    private boolean nativeBound;
+
+    private int buildSerial;
+
+    private boolean gateBound;
+
+    private boolean gateOpen;
+
+    private static volatile byte[] rootNonce;
+
+    private static final java.util.concurrent.atomic.AtomicBoolean ROOT_CLAIM =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
+    private static final java.util.concurrent.atomic.AtomicBoolean PAYLOAD_CLAIM =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
+    static {
+        try {
+            byte[] fresh = new byte[UmbraCrypto.ROOT_BYTES];
+            new java.security.SecureRandom().nextBytes(fresh);
+            rootNonce = fresh;
+            if (NATIVE_LOADER == null || NATIVE_LOADER.isEmpty()
+                    || NATIVE_LOADER.charAt(0) == '@') {
+                java.util.Arrays.fill(fresh, (byte) 0);
+                rootNonce = null;
+            } else {
+                Class<?> type = Class.forName(NATIVE_LOADER, true,
+                        UmbraClassLoader.class.getClassLoader());
+
+                bindNativeNames(type);
+
+                java.lang.reflect.Method setHandshake =
+                        type.getMethod("setHandshake", byte[].class);
+                setHandshake.invoke(null, (Object) fresh);
+                try {
+                    java.lang.reflect.Method derive = type.getMethod("keyRoot2", int.class,
+                            int.class, byte[].class, byte[].class);
+                    if (derive == null) {
+                        java.util.Arrays.fill(fresh, (byte) 0);
+                        rootNonce = null;
+                    }
+                } catch (NoSuchMethodException olderBridge) {
+
+                    java.util.Arrays.fill(fresh, (byte) 0);
+                    rootNonce = null;
+                }
+            }
+        } catch (Throwable unavailable) {
+
+            rootNonce = null;
+        }
+    }
+
+    private static volatile byte[] hostRoot;
+
+    private byte[] payloadRoot;
+
+    private final Set<String> gateFreeClasses = new LinkedHashSet<String>();
+
+    private final Set<String> tickClasses = new LinkedHashSet<String>();
+
+    private final Map<String, Integer> classIndex = new LinkedHashMap<String, Integer>();
     private final Map<String, String> classEntries = new LinkedHashMap<String, String>();
     private final Map<String, byte[]> classDigests = new LinkedHashMap<String, byte[]>();
     private final Map<String, String> resourceEntries = new LinkedHashMap<String, String>();
@@ -116,12 +206,13 @@ public final class UmbraClassLoader extends ClassLoader {
             throw new IllegalStateException("Encrypted archive is missing");
         }
         this.jar = new JarFile(file);
+
+        verifyOwnClassBytes();
         this.protectionDomain = new ProtectionDomain(
                 new CodeSource(location, (Certificate[]) null), null, this, null);
-        this.masterKey = deriveMasterKey();
-
         byte[] sealedIndex = readEntry(INDEX_ENTRY);
-        byte[] index = UmbraCrypto.unseal(sealedIndex, masterKey, UmbraCrypto.ALG_CHACHA20);
+        byte[] index = openIndex(sealedIndex);
+        say(logToken() + " openIndex ok");
         UmbraCrypto.wipe(sealedIndex);
 
         ByteBuffer buffer = ByteBuffer.wrap(index);
@@ -129,14 +220,31 @@ public final class UmbraClassLoader extends ClassLoader {
             throw silent("Encrypted archive index is not valid");
         }
         int version = buffer.get() & 0xFF;
-        if (version != VERSION && version != VERSION_LEGACY) {
+        if (version != VERSION && version != VERSION_V6 && version != VERSION_CP
+                && version != VERSION_LEGACY && version != VERSION_V5) {
             throw silent("Unsupported encrypted archive version");
         }
+        this.indexVersion = version;
         byte flags = buffer.get();
         int level = buffer.get() & 0xFF;
         int binding = buffer.get() & 0xFF;
         if (binding != bindingUsed) {
             throw silent("Encrypted archive binding mismatch");
+        }
+        if (version >= VERSION_V5) {
+            boolean flagged = (flags & FLAG_NATIVE_ROOT) != 0;
+
+            boolean rootBound = binding == BINDING_NATIVE || binding == BINDING_HOST;
+            if (flagged != rootBound) {
+                throw silent("Encrypted archive binding flags disagree");
+            }
+            this.nativeBound = flagged;
+        }
+        if (version >= VERSION) {
+            this.gateBound = (flags & FLAG_NATIVE_GATE) != 0;
+            if (gateBound && !nativeBound) {
+                throw silent("Encrypted archive gate flag without the native binding");
+            }
         }
         this.integrityEnabled = (flags & FLAG_INTEGRITY) != 0;
         this.antiDump = (flags & FLAG_ANTIDUMP) != 0;
@@ -168,9 +276,20 @@ public final class UmbraClassLoader extends ClassLoader {
             String name = readString(buffer);
             String entry = readString(buffer);
             byte[] digest = readBytes(buffer, 32);
+            if (version >= VERSION_V6) {
+
+                int gateFlag = buffer.get() & 0xFF;
+                if (gateFlag == 1) {
+                    gateFreeClasses.add(name);
+                } else if (gateFlag == 2 && version >= VERSION) {
+                    tickClasses.add(name);
+                }
+            }
             if (name.isEmpty() || entry.isEmpty() || classEntries.put(name, entry) != null) {
                 throw silent("Encrypted archive index class map is invalid");
             }
+
+            classIndex.put(name, Integer.valueOf(i));
             classDigests.put(name, digest);
             payloadEntries.add(entry);
         }
@@ -191,13 +310,32 @@ public final class UmbraClassLoader extends ClassLoader {
             resourceSizes.put(name, Integer.valueOf(size));
             payloadEntries.add(entry);
         }
+        if (version >= VERSION_V5) {
+
+            if (buffer.remaining() < 4 + 32) {
+                throw silent("Encrypted archive index is truncated");
+            }
+            this.buildSerial = readInt(buffer);
+            byte[] serialTag = readBytes(buffer, 32);
+            byte[] expectedTag = UmbraCrypto.keyedDigest(digestKey, "d:serial",
+                    UmbraCrypto.le32(buildSerial));
+            boolean serialValid = buildSerial != 0
+                    && UmbraCrypto.constantTimeEquals(serialTag, expectedTag);
+            UmbraCrypto.wipe(expectedTag);
+            UmbraCrypto.wipe(serialTag);
+            if (!serialValid) {
+                throw silent("Encrypted archive serial is invalid");
+            }
+        }
         UmbraCrypto.wipe(index);
 
-        // The class map is ready now, so the unified runtime guard (itself an
-        // encrypted payload) can be loaded and consulted before the first program
-        // class is decrypted/defined; if an instrumentation signal is active the
-        // loader refuses to start even with action=log.
         runGuardCheck();
+
+        if (gateBound) {
+            openGate();
+        }
+
+        installCodeLibrary();
 
         if (integrityEnabled) {
             verifySelfBytes();
@@ -216,7 +354,217 @@ public final class UmbraClassLoader extends ClassLoader {
         }
     }
 
-    /** JVM entry point: load and run the original main class. */
+    private void openGate() {
+
+        try {
+            if (guardCheckMethod != null) {
+                guardCheckMethod.invoke(null);
+            }
+        } catch (Throwable unavailable) {
+
+        }
+
+        int nativeMask = nativeGuardMask();
+        if (nativeMask != 0) {
+            if (DEBUG) {
+                say(logToken() + " the native guard reports a detection mask: 0x"
+                        + Integer.toHexString(nativeMask));
+            }
+            fail("Native gate detection signal");
+            return;
+        }
+        long nonce = nativeChallenge();
+        if (nonce == 0L) {
+            if (DEBUG) {
+                say(logToken() + " native gate challenge is unavailable");
+            }
+            fail("Native gate challenge failed");
+            return;
+        }
+        byte[] response = guardAttest(nonce);
+        if (response == null) {
+            if (DEBUG) {
+                say(logToken() + " the runtime guard returned no gate "
+                        + "attestation response");
+            }
+            fail("Native gate attestation failed");
+            return;
+        }
+        if (!nativeAttest(nonce, response)) {
+            if (DEBUG) {
+                say(logToken() + " the native library refused the gate "
+                        + "attestation");
+            }
+            fail("Native gate attestation failed");
+            return;
+        }
+        byte[] root = claimPayloadRoot();
+        if (root == null) {
+            if (DEBUG) {
+                say(logToken() + " native gate did not release the payload root");
+            }
+            fail("Native gate payload root is unavailable");
+            return;
+        }
+        this.payloadRoot = root;
+        this.gateOpen = true;
+    }
+
+    private int nativeGuardMask() {
+        String guard = NATIVE_GUARD;
+        if (guard == null || guard.isEmpty() || guard.charAt(0) == '@') {
+            if (DEBUG) {
+                say(logToken() + " no injected native guard is configured");
+            }
+            return -1;
+        }
+        try {
+
+            Class<?> type = Class.forName(guard, true, this);
+            try {
+                java.lang.reflect.Method check = type.getDeclaredMethod("check");
+                check.setAccessible(true);
+                check.invoke(null);
+            } catch (Throwable ignored) {
+
+            }
+            java.lang.reflect.Method nativeCheck = type.getDeclaredMethod("nativeCheck");
+            nativeCheck.setAccessible(true);
+            Object value = nativeCheck.invoke(null);
+            return value instanceof Integer ? ((Integer) value).intValue() : -1;
+        } catch (Throwable unavailable) {
+            if (DEBUG) {
+                say(logToken() + " native guard unavailable: " + unavailable);
+            }
+            return -1;
+        }
+    }
+
+    private static long nativeChallenge() {
+        Object value = invokeNative("challenge");
+        return value instanceof Long ? ((Long) value).longValue() : 0L;
+    }
+
+    private static boolean nativeAttest(long nonce, byte[] response) {
+        try {
+            Class<?> type = nativeLoaderClass();
+            if (type == null) {
+                return false;
+            }
+            java.lang.reflect.Method attest =
+                    type.getMethod("attest", long.class, byte[].class);
+            Object result = attest.invoke(null, Long.valueOf(nonce), response);
+            return Boolean.TRUE.equals(result);
+        } catch (Throwable unavailable) {
+            return false;
+        }
+    }
+
+    private static byte[] nonceRoot(int slot, int sub) {
+        try {
+            Class<?> type = nativeLoaderClass();
+            if (type == null) {
+                return null;
+            }
+            java.lang.reflect.Method derive = type.getMethod("keyRoot2", int.class, int.class,
+                    byte[].class, byte[].class);
+            byte[] nonce = rootNonce;
+            if (nonce == null) {
+                return null;
+            }
+            byte[] out = new byte[UmbraCrypto.ROOT_BYTES];
+            Object rc = derive.invoke(null, Integer.valueOf(slot), Integer.valueOf(sub),
+                    nonce, out);
+            if (rc instanceof Integer && ((Integer) rc).intValue() == 0) {
+                return out;
+            }
+        } catch (Throwable unavailable) {
+
+            Throwable cause = unavailable.getCause();
+            say(logToken() + " nonce key root unavailable: " + unavailable
+                    + (cause == null ? "" : " cause=" + cause)
+                    + " handshakeInstalled=" + String.valueOf(rootNonce != null));
+        }
+        return null;
+    }
+
+    private static byte[] claimPayloadRoot() {
+        if (!PAYLOAD_CLAIM.compareAndSet(false, true)) {
+            if (DEBUG) {
+                say(logToken() + " payload root already consumed");
+            }
+            return null;
+        }
+        byte[] nonced = nonceRoot(UmbraCrypto.SLOT_PAYLOAD, 0);
+        if (nonced != null) {
+            return nonced;
+        }
+        try {
+            Class<?> type = nativeLoaderClass();
+            if (type == null) {
+                return null;
+            }
+            java.lang.reflect.Method derive =
+                    type.getMethod("deriveKey", int.class, int.class);
+            Object value = derive.invoke(null, Integer.valueOf(UmbraCrypto.SLOT_PAYLOAD),
+                    Integer.valueOf(0));
+            if (value instanceof byte[]) {
+                byte[] root = (byte[]) value;
+                if (root.length == UmbraCrypto.ROOT_BYTES) {
+                    return root;
+                }
+            }
+        } catch (Throwable unavailable) {
+
+        }
+        return null;
+    }
+
+    private byte[] guardAttest(long nonce) {
+        String guard = RUNTIME_GUARD;
+        if (guard == null || guard.isEmpty() || guard.charAt(0) == '@') {
+            return null;
+        }
+        try {
+            Class<?> type = Class.forName(guard, true, this);
+            java.lang.reflect.Method attest = type.getDeclaredMethod("attest", long.class);
+            attest.setAccessible(true);
+            Object value = attest.invoke(null, Long.valueOf(nonce));
+            if (value instanceof byte[]) {
+                return (byte[]) value;
+            }
+            if (DEBUG) {
+                say(logToken() + " the runtime guard attested with no payload");
+            }
+            return null;
+        } catch (Throwable unavailable) {
+            if (DEBUG) {
+                say(logToken() + " guard attest failed: " + unavailable);
+            }
+            return null;
+        }
+    }
+
+    private static Object invokeNative(String method) {
+        try {
+            Class<?> type = nativeLoaderClass();
+            return type == null ? null : type.getMethod(method).invoke(null);
+        } catch (Throwable unavailable) {
+            return null;
+        }
+    }
+
+    private static Class<?> nativeLoaderClass() {
+        if (NATIVE_LOADER == null || NATIVE_LOADER.isEmpty() || NATIVE_LOADER.charAt(0) == '@') {
+            return null;
+        }
+        try {
+            return Class.forName(NATIVE_LOADER, true, UmbraClassLoader.class.getClassLoader());
+        } catch (Throwable unavailable) {
+            return null;
+        }
+    }
+
     public static void main(String[] args) {
         try {
             run(args);
@@ -253,13 +601,6 @@ public final class UmbraClassLoader extends ClassLoader {
         }
     }
 
-    /**
-     * Watchdog tick: samples a random slice of the payload index (full pass every
-     * 20th tick at level 3) and refreshes the heartbeat that the decrypt path
-     * checks, so a suspended watchdog thread is detectable. A failure halts
-     * silently from this background thread (a thrown exception would print a
-     * stack trace); it never returns a diagnostic to the program.
-     */
     public static void watch() {
         UmbraClassLoader loader = ACTIVE;
         if (loader == null) {
@@ -276,6 +617,12 @@ public final class UmbraClassLoader extends ClassLoader {
 
     private static volatile UmbraClassLoader ACTIVE;
     private static final boolean DEBUG = Boolean.getBoolean("umbra.debug");
+
+    private static void say(String line) {
+        if (DEBUG) {
+            System.err.println(line);
+        }
+    }
     private static volatile boolean watchdogStarted;
     private static volatile long WATCHDOG_HEARTBEAT;
     private static volatile long LAST_WATCHDOG_NANOS;
@@ -290,7 +637,7 @@ public final class UmbraClassLoader extends ClassLoader {
             watchdogStarted = true;
             ((Thread) watchdog).start();
         } catch (Throwable ignored) {
-            // A missing watchdog must not break the program.
+
         }
     }
 
@@ -306,10 +653,6 @@ public final class UmbraClassLoader extends ClassLoader {
         }
     }
 
-    /**
-     * Detects a watchdog thread that stopped ticking (for example suspended with a
-     * debugger): the next decrypt/define fails closed.
-     */
     private void checkWatchdogHeartbeat() {
         if (!watchdogStarted || !integrityEnabled || integrityLevel < 2) {
             return;
@@ -325,32 +668,112 @@ public final class UmbraClassLoader extends ClassLoader {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Unified runtime guard (anti-dump / anti-decrypt gate)
-    // ------------------------------------------------------------------
-
-    // Per-instance: a JVM may construct several loaders (tests, containers) and
-    // each archive has its own seed-derived guard class name.
-    // Volatile publication for the double-checked resolution below: without it a
-    // second thread could observe guardResolved==true before the Method fields
-    // (an unsafe-publication window that would silently skip the guard check).
     private volatile boolean guardResolved;
     private volatile boolean guardResolving;
     private volatile java.lang.reflect.Method guardCheckMethod;
     private volatile java.lang.reflect.Method guardDetectedMethod;
 
-    /** True when the pass injected and named the unified runtime guard. */
     private static boolean guardConfigured() {
         return RUNTIME_GUARD != null && RUNTIME_GUARD.length() > 1
                 && RUNTIME_GUARD.charAt(0) != '@';
     }
 
-    /**
-     * Runs the full guard check once, before any class payload is decrypted or
-     * defined. The guard class is itself an encrypted payload, so it is loaded
-     * through this loader; a reentrant resolution (the guard class decryption
-     * asking whether a guard is present) is skipped instead of recursing.
-     */
+    private void installCodeLibrary() {
+
+        say(logToken() + " installCodeLibrary enter");
+        String name = CODELIB;
+        if (name == null || name.isEmpty() || name.charAt(0) == '@') {
+
+            name = findSealedCodeLibrary();
+        }
+        if (DEBUG) {
+            say(logToken() + " code library entry = \"" + name + "\"");
+        }
+        if (name == null || name.isEmpty() || name.charAt(0) == '@') {
+            if (DEBUG) {
+                say(logToken() + " no code library in this archive; skipping");
+            }
+            return;
+        }
+        if (NATIVE_LOADER == null || NATIVE_LOADER.isEmpty()
+                || NATIVE_LOADER.charAt(0) == '@') {
+            return;
+        }
+        java.io.InputStream stream = null;
+        try {
+            stream = getResourceAsStream(name);
+            if (DEBUG) {
+                say(logToken() + " code library resource " + name + " -> "
+                        + (stream == null ? "null" : "stream"));
+            }
+            if (stream == null) {
+                return;
+            }
+            byte[] library = readAll(stream);
+            if (DEBUG) {
+                say(logToken() + " code library bytes = " + library.length);
+            }
+            java.io.File temp = java.io.File.createTempFile("ums", ".tmp");
+            temp.deleteOnExit();
+            java.nio.file.Files.write(temp.toPath(), library);
+            java.util.Arrays.fill(library, (byte) 0);
+            Class<?> type = Class.forName(NATIVE_LOADER, true,
+                    UmbraClassLoader.class.getClassLoader());
+
+            try {
+                java.lang.reflect.Method ensure = type.getMethod("ensureLoaded");
+                Object loaded = ensure.invoke(null);
+                if (DEBUG) {
+                    say(logToken() + " bridge ensureLoaded() -> "
+                            + String.valueOf(loaded));
+                }
+            } catch (NoSuchMethodException noEnsure) {
+
+            }
+
+            java.lang.reflect.Method install = type.getMethod("installCodeLibrary",
+                    String.class, Class.class);
+            Object installed = install.invoke(null, temp.getAbsolutePath(),
+                    UmbraClassLoader.this.getClass());
+            int rc = installed instanceof Integer ? ((Integer) installed).intValue() : -1;
+            if (DEBUG) {
+                say(logToken() + " installCodeLibrary(" + temp + ") -> " + rc);
+            }
+            if (rc != 0) {
+                throw silent("Native code library could not be bound");
+            }
+        } catch (Throwable unavailable) {
+
+            say(logToken() + " install exception: " + unavailable);
+            Throwable cause = unavailable.getCause();
+            if (cause != null) {
+                say(logToken() + " install cause: " + cause);
+            }
+            unavailable.printStackTrace();
+
+            throw silent("Native code library could not be installed");
+        } finally {
+            if (stream != null) {
+                try {
+                    stream.close();
+                } catch (Throwable ignored) {
+
+                }
+            }
+        }
+    }
+
+    private static byte[] readAll(java.io.InputStream stream) throws java.io.IOException {
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        byte[] buffer = new byte[8192];
+        int read;
+        while ((read = stream.read(buffer)) > 0) {
+            out.write(buffer, 0, read);
+        }
+        java.util.Arrays.fill(buffer, (byte) 0);
+        return out.toByteArray();
+    }
+
     private void runGuardCheck() {
         if (!guardConfigured()) {
             return;
@@ -364,14 +787,10 @@ public final class UmbraClassLoader extends ClassLoader {
         } catch (java.lang.reflect.InvocationTargetException failure) {
             rethrowGuardCause(failure);
         } catch (Throwable unavailable) {
-            // Guard infrastructure is best effort; digest checks still run.
+
         }
     }
 
-    /**
-     * Cheap fail-closed signal query used before every decrypt/define. When the
-     * guard reports a signal the loader refuses to produce plaintext class bytes.
-     */
     private boolean guardSignal() {
         if (!guardConfigured()) {
             return false;
@@ -409,7 +828,7 @@ public final class UmbraClassLoader extends ClassLoader {
                 guardCheckMethod = check;
                 guardDetectedMethod = detected;
             } catch (Throwable unavailable) {
-                // Leave the methods null; the loader stays functional.
+
             } finally {
                 guardResolving = false;
                 guardResolved = true;
@@ -430,21 +849,20 @@ public final class UmbraClassLoader extends ClassLoader {
         }
     }
 
-    /**
-     * Refuses decryption/define after a guard signal. The exception carries no
-     * message and an empty stack trace; diagnostics are only printed when
-     * {@code -Dumbra.debug=true}.
-     */
     private static void guardRefuse(String what) {
         if (DEBUG) {
-            System.err.println(logToken() + " guard: " + what);
+            say(logToken() + " guard: " + what);
+        }
+        if ("true".equals(GUARD_LOG)) {
+
+            return;
         }
         throw silent("Runtime guard signal active");
     }
 
-    // ------------------------------------------------------------------
-    // Class loading
-    // ------------------------------------------------------------------
+    public static void installHostRoot(byte[] root) {
+        hostRoot = root == null ? null : root.clone();
+    }
 
     @Override
     protected Class<?> findClass(String name) throws ClassNotFoundException {
@@ -455,54 +873,38 @@ public final class UmbraClassLoader extends ClassLoader {
         byte[] bytes = loadClassPayload(name, entry);
         try {
             definePackageFor(name);
-            if (constantPoolEncrypted) {
-                // Patch the constant pool only on the define path, so the bytes a
-                // reflective attacker can obtain from loadClassPayload stay encrypted.
-                byte[] sealed = null;
-                byte[] key = null;
-                try {
-                    sealed = readEntry(entry);
-                    key = payloadKey("c:" + name, sealed);
+            byte[] key = null;
+            try {
+                if (constantPoolEncrypted) {
+
+                    byte[] sealed = readEntry(entry);
+                    try {
+                        key = payloadKey("c:" + name, sealed, classRoot(name));
+                    } finally {
+                        UmbraCrypto.wipe(sealed);
+                    }
                     if (!cryptConstantPool(bytes, key)) {
                         fail("Class payload constant pool is invalid");
                     }
-                } catch (SecurityException e) {
-                    throw e;
-                } catch (Exception e) {
-                    throw new ClassNotFoundException(name);
-                } finally {
-                    UmbraCrypto.wipe(key);
-                    UmbraCrypto.wipe(sealed);
                 }
+
+                if (integrityEnabled && integrityLevel >= 2 && !verifyClassDigest(name, bytes)) {
+                    fail("Class payload integrity check failed");
+                }
+                String declared = classNameOf(bytes);
+                if (declared == null || !name.equals(declared)) {
+                    fail("Class payload name mismatch");
+                }
+            } catch (SecurityException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new ClassNotFoundException(name);
+            } finally {
+                UmbraCrypto.wipe(key);
             }
             return defineClass(name, bytes, 0, bytes.length, protectionDomain);
         } finally {
             UmbraCrypto.wipe(bytes);
-        }
-    }
-
-    /**
-     * Verifies the class name a payload declares.
-     *
-     * <p>With constant-pool encryption the declared name is unreadable in the
-     * payload itself, so the check runs against a decrypted copy that is wiped
-     * immediately; the payload the caller holds is left untouched.</p>
-     */
-    private void checkPayloadName(String className, byte[] plain, byte[] key) {
-        if (!constantPoolEncrypted) {
-            if (!className.equals(classNameOf(plain))) {
-                fail("Class payload name mismatch");
-            }
-            return;
-        }
-        byte[] probe = new byte[plain.length];
-        System.arraycopy(plain, 0, probe, 0, plain.length);
-        try {
-            if (!cryptConstantPool(probe, key) || !className.equals(classNameOf(probe))) {
-                fail("Class payload name mismatch");
-            }
-        } finally {
-            UmbraCrypto.wipe(probe);
         }
     }
 
@@ -518,7 +920,7 @@ public final class UmbraClassLoader extends ClassLoader {
         try {
             definePackage(packageName, null, null, null, null, null, null, null);
         } catch (IllegalArgumentException alreadyDefined) {
-            // Another class of the same package won the race.
+
         }
     }
 
@@ -529,29 +931,15 @@ public final class UmbraClassLoader extends ClassLoader {
         checkWatchdogHeartbeat();
         try {
             byte[] sealed = readEntry(entryName);
-            byte[] key = payloadKey("c:" + className, sealed);
+            byte[] key = payloadKey("c:" + className, sealed, classRoot(className));
             try {
                 byte[] plain = UmbraCrypto.unseal(sealed, key, payloadAlgorithm);
-                // The constant pool is still ciphertext here on purpose: whatever this
-                // method hands back is not decompilable. Only the define path patches it
-                // (see findClass), so a reflective caller gets an unusable payload.
-                // Re-check between decryption and define: an attach that happened
-                // while this payload was being processed still refuses the define.
+
                 if (guardSignal()) {
                     UmbraCrypto.wipe(plain);
                     guardRefuse("class define");
                 }
-                if (integrityEnabled && integrityLevel >= 2) {
-                    byte[] expected = classDigests.get(className);
-                    byte[] actual = UmbraCrypto.keyedDigest(masterKey, "d:c:" + className, plain);
-                    boolean valid = expected != null && UmbraCrypto.constantTimeEquals(expected, actual);
-                    UmbraCrypto.wipe(actual);
-                    if (!valid) {
-                        UmbraCrypto.wipe(plain);
-                        fail("Class payload integrity check failed");
-                    }
-                }
-                checkPayloadName(className, plain, key);
+
                 return plain;
             } finally {
                 UmbraCrypto.wipe(key);
@@ -564,31 +952,67 @@ public final class UmbraClassLoader extends ClassLoader {
         }
     }
 
-    private byte[] payloadKey(String label, byte[] sealed) {
+    private byte[] payloadKey(String label, byte[] sealed, byte[] root) {
         byte[] nonce = UmbraCrypto.nonceOf(sealed);
         try {
-            return UmbraCrypto.entryKey(masterKey, label, nonce);
+            return UmbraCrypto.entryKey(masterKey, label, nonce, root);
         } finally {
             UmbraCrypto.wipe(nonce);
         }
     }
 
-    /**
-     * Encrypts or decrypts the {@code CONSTANT_Utf8} payloads of one class file in
-     * place; the transform is its own inverse.
-     *
-     * <p>Only the bytes of each {@code CONSTANT_Utf8} entry are XORed with a key
-     * stream derived from the per-entry key and the constant-pool index. Every
-     * length field and every constant-pool reference stays untouched, so
-     * {@code StackMapTable} and the other attributes remain valid. A payload
-     * recovered from the loader (or from memory) therefore still has an
-     * unreadable constant pool — no class, method or field name — until it is
-     * patched, which only happens on the define path.</p>
-     *
-     * @param cls class file bytes, modified in place
-     * @param key per-entry payload key
-     * @return {@code true} when the class file was processed
-     */
+    private byte[] classRoot(String name) {
+        if (!gateBound || gateFreeClasses.contains(name)) {
+            return null;
+        }
+        if (!tickClasses.contains(name)) {
+            return payloadRoot;
+        }
+        if (!gateOpen) {
+
+            if (DEBUG) {
+                say(logToken() + " tick class requested before the gate opened: "
+                        + name);
+            }
+            return payloadRoot;
+        }
+        Integer index = classIndex.get(name);
+        byte[] tick = index == null ? null : nativeGateTick(index.intValue());
+        if (tick == null) {
+            if (DEBUG) {
+                say(logToken() + " native gate tick was refused for " + name
+                        + " (index " + index + ", gateOpen=" + gateOpen + ")");
+            }
+            fail("Native gate tick failed");
+            return null;
+        }
+        return tick;
+    }
+
+    private static byte[] nativeGateTick(int index) {
+        try {
+            Class<?> type = nativeLoaderClass();
+            if (type == null) {
+                return null;
+            }
+            java.lang.reflect.Method tick = type.getMethod("gateTick", int.class, byte[].class);
+            byte[] out = new byte[UmbraCrypto.ROOT_BYTES];
+            Object rc = tick.invoke(null, Integer.valueOf(index), out);
+            if (rc instanceof Integer && ((Integer) rc).intValue() == 0) {
+                return out;
+            }
+            if (DEBUG) {
+                say(logToken() + " native gate tick returned "
+                        + String.valueOf(rc) + " for class index " + index);
+            }
+        } catch (Throwable unavailable) {
+            if (DEBUG) {
+                say(logToken() + " native gate tick unavailable: " + unavailable);
+            }
+        }
+        return null;
+    }
+
     public static boolean cryptConstantPool(byte[] cls, byte[] key) {
         if (cls == null || key == null || key.length < 8 || cls.length < 10) {
             return false;
@@ -636,7 +1060,7 @@ public final class UmbraClassLoader extends ClassLoader {
                     break;
                 case 5:
                 case 6:
-                    // Eight-byte constants occupy two constant-pool slots.
+
                     pos += 8;
                     index++;
                     break;
@@ -672,17 +1096,6 @@ public final class UmbraClassLoader extends ClassLoader {
         return true;
     }
 
-    // ------------------------------------------------------------------
-    // Resources (decrypted through the custom URLStreamHandler)
-    // ------------------------------------------------------------------
-
-    /**
-     * Decrypts one resource payload. Called by the injected
-     * {@code UmbraResourceConnection} through the URL handler.
-     *
-     * @param encodedName URL path segment as produced by {@link #findResource}
-     * @return decrypted resource bytes (caller owns the array)
-     */
     public byte[] resourceContent(String encodedName) throws IOException {
         String name = decodeResourceName(encodedName);
         String entry = resourceEntries.get(name);
@@ -699,7 +1112,7 @@ public final class UmbraClassLoader extends ClassLoader {
         checkWatchdogHeartbeat();
         try {
             byte[] sealed = readEntry(entryName);
-            byte[] key = payloadKey("r:" + name, sealed);
+            byte[] key = payloadKey("r:" + name, sealed, (byte[]) null);
             try {
                 byte[] plain = UmbraCrypto.unseal(sealed, key, payloadAlgorithm);
                 if (guardSignal()) {
@@ -709,7 +1122,7 @@ public final class UmbraClassLoader extends ClassLoader {
                 if (integrityEnabled && resourceIntegrityEnabled && integrityLevel >= 2) {
                     byte[] expected = resourceDigests.get(name);
                     Integer size = resourceSizes.get(name);
-                    byte[] actual = UmbraCrypto.keyedDigest(masterKey, "d:r:" + name, plain);
+                    byte[] actual = UmbraCrypto.keyedDigest(digestKey, "d:r:" + name, plain);
                     boolean valid = expected != null && UmbraCrypto.constantTimeEquals(expected, actual)
                             && (size == null || size.intValue() == plain.length);
                     UmbraCrypto.wipe(actual);
@@ -769,11 +1182,6 @@ public final class UmbraClassLoader extends ClassLoader {
         }
     }
 
-    /**
-     * Percent-encodes a logical resource name for the URL path, keeping
-     * {@code '/'} so path-based framework checks still work. Decoding is the
-     * inverse of {@link #decodeResourceName(String)}.
-     */
     private static String encodeResourceName(String name) {
         byte[] bytes = name.getBytes(StandardCharsets.UTF_8);
         StringBuilder out = new StringBuilder(bytes.length + 16);
@@ -818,20 +1226,15 @@ public final class UmbraClassLoader extends ClassLoader {
         return new String(bytes.toByteArray(), StandardCharsets.UTF_8);
     }
 
-    // ------------------------------------------------------------------
-    // Integrity / anti-dump
-    // ------------------------------------------------------------------
-
     private void verifySelfBytes() {
         try {
             String selfEntry = UmbraClassLoader.class.getName().replace('.', '/') + ".class";
             byte[] self = readEntry(selfEntry);
-            byte[] digest = UmbraCrypto.keyedDigest(masterKey, "d:loader", self);
+            byte[] digest = UmbraCrypto.keyedDigest(digestKey, "d:loader", self);
             UmbraCrypto.wipe(self);
             boolean valid = UmbraCrypto.constantTimeEquals(digest, loaderDigest);
             UmbraCrypto.wipe(digest);
-            // The expected loader digest is not needed after the comparison; a
-            // memory dump cannot recover it to forge a rewritten loader.
+
             UmbraCrypto.wipe(loaderDigest);
             if (!valid) {
                 fail("Loader integrity check failed");
@@ -862,7 +1265,6 @@ public final class UmbraClassLoader extends ClassLoader {
         }
     }
 
-    /** Sampled watchdog verification: ~1/20 of the classes/resources per tick. */
     private void verifyWatchSample() {
         if (integrityLevel >= 3 && (WATCHDOG_HEARTBEAT % 20L) == 0L) {
             verifyAllPayloads();
@@ -901,6 +1303,18 @@ public final class UmbraClassLoader extends ClassLoader {
         }
     }
 
+    private boolean verifyClassDigest(String name, byte[] restored) {
+        byte[] expected = classDigests.get(name);
+        if (expected == null || restored == null) {
+            return false;
+        }
+        byte[] actual = UmbraCrypto.keyedDigest(digestKey, "d:c:" + name, restored,
+                classRoot(name));
+        boolean valid = UmbraCrypto.constantTimeEquals(expected, actual);
+        UmbraCrypto.wipe(actual);
+        return valid;
+    }
+
     private void verifyClassPayload(String name) {
         String entry = classEntries.get(name);
         if (entry == null) {
@@ -911,20 +1325,22 @@ public final class UmbraClassLoader extends ClassLoader {
         }
         try {
             byte[] sealed = readEntry(entry);
-            byte[] key = payloadKey("c:" + name, sealed);
+            byte[] key = payloadKey("c:" + name, sealed, classRoot(name));
             byte[] plain = null;
             try {
                 plain = UmbraCrypto.unseal(sealed, key, payloadAlgorithm);
-                if (integrityEnabled && integrityLevel >= 2) {
-                    byte[] expected = classDigests.get(name);
-                    byte[] actual = UmbraCrypto.keyedDigest(masterKey, "d:c:" + name, plain);
-                    boolean valid = expected != null && UmbraCrypto.constantTimeEquals(expected, actual);
-                    UmbraCrypto.wipe(actual);
-                    if (!valid) {
-                        fail("Class payload integrity check failed");
-                    }
+
+                if (constantPoolEncrypted && !cryptConstantPool(plain, key)) {
+                    fail("Class payload constant pool is invalid");
                 }
-                checkPayloadName(name, plain, key);
+                if (integrityEnabled && integrityLevel >= 2
+                        && !verifyClassDigest(name, plain)) {
+                    fail("Class payload integrity check failed");
+                }
+                String declared = classNameOf(plain);
+                if (declared == null || !name.equals(declared)) {
+                    fail("Class payload name mismatch");
+                }
             } finally {
                 UmbraCrypto.wipe(key);
                 UmbraCrypto.wipe(sealed);
@@ -937,31 +1353,35 @@ public final class UmbraClassLoader extends ClassLoader {
         }
     }
 
-    private void checkAntiDump() {
-        // When the unified runtime guard is present it already covers agent/JDWP
-        // command-line detection (with the full multi-signal policy); running the
-        // old argument heuristic here would duplicate it and mask the guard's
-        // configured action/logging. Keep the heuristic only for archives built
-        // without the guard (antiDebug.level=0).
-        if (!guardConfigured()) {
-            try {
-                java.lang.management.RuntimeMXBean bean =
-                        java.lang.management.ManagementFactory.getRuntimeMXBean();
-                List<String> arguments = bean.getInputArguments();
-                for (int i = 0; i < arguments.size(); i++) {
-                    String argument = arguments.get(i);
-                    String lower = argument.toLowerCase(Locale.ROOT);
-                    if (lower.contains("jdwp") || lower.contains("javaagent") || lower.contains("agentlib")
-                            || lower.contains("agentpath") || lower.contains("-xdebug")) {
-                        fail("A dump/debug agent is attached");
+    private void checkAgentArguments() {
+        try {
+            java.lang.management.RuntimeMXBean bean =
+                    java.lang.management.ManagementFactory.getRuntimeMXBean();
+            List<String> arguments = bean.getInputArguments();
+            for (int i = 0; i < arguments.size(); i++) {
+                String argument = arguments.get(i);
+                String lower = argument.toLowerCase(Locale.ROOT);
+                if (lower.contains("jdwp") || lower.contains("javaagent") || lower.contains("agentlib")
+                        || lower.contains("agentpath") || lower.contains("-xdebug")) {
+                    if ("log".equals(ACTION)) {
+                        if (DEBUG) {
+                            say(logToken() + " dump/debug agent is attached "
+                                    + "(log-only action)");
+                        }
+                        return;
                     }
+                    fail("A dump/debug agent is attached");
                 }
-            } catch (SecurityException e) {
-                throw e;
-            } catch (Throwable ignored) {
-                // Management API not available: ignore this heuristic.
             }
+        } catch (SecurityException e) {
+            throw e;
+        } catch (Throwable ignored) {
+
         }
+    }
+
+    private void checkAntiDump() {
+        checkAgentArguments();
         try {
             Set<String> seen = new LinkedHashSet<String>();
             Enumeration<JarEntry> entries = jar.entries();
@@ -976,9 +1396,14 @@ public final class UmbraClassLoader extends ClassLoader {
                 }
                 if (name.endsWith(".class")) {
                     byte[] bytes = readEntry(name);
-                    String binary = bytes == null ? null : classNameOf(bytes);
-                    if (binary == null || !plaintextClasses.contains(binary)) {
-                        fail("Unexpected plaintext class in encrypted archive");
+                    try {
+                        String binary = bytes == null ? null : classNameOf(bytes);
+                        if (binary == null || !plaintextClasses.contains(binary)) {
+                            fail("Unexpected plaintext class in encrypted archive");
+                        }
+                    } finally {
+
+                        UmbraCrypto.wipe(bytes);
                     }
                 }
             }
@@ -991,7 +1416,11 @@ public final class UmbraClassLoader extends ClassLoader {
 
     private static void fail(String message) {
         if (DEBUG) {
-            System.err.println(logToken() + " " + message);
+            say(logToken() + " " + message);
+        }
+        if ("log".equals(ACTION)) {
+
+            return;
         }
         if ("exit".equals(ACTION)) {
             Runtime.getRuntime().halt(1);
@@ -1002,10 +1431,9 @@ public final class UmbraClassLoader extends ClassLoader {
         throw silent(message);
     }
 
-    /** Background-thread failure: cannot throw into the program, so halt silently. */
     private void verifyFailure() {
         if (DEBUG) {
-            System.err.println(logToken() + " watchdog failure");
+            say(logToken() + " watchdog failure");
         }
         if ("corrupt".equals(ACTION)) {
             Runtime.getRuntime().halt(0);
@@ -1025,55 +1453,381 @@ public final class UmbraClassLoader extends ClassLoader {
                 ? "umbra" : LOG_TOKEN;
     }
 
-    // ------------------------------------------------------------------
-    // Archive helpers
-    // ------------------------------------------------------------------
+    private byte[] openIndex(byte[] sealedIndex) throws Exception {
 
-    /**
-     * Rebuilds the sample-bound master key (index v3). The binding mode is
-     * signalled by the ZIP comment: a base64 comment means the sample-bound mode
-     * (comment + entry count), an absent comment means the diagnostic seed mode.
-     * Editing the comment or adding/removing entries changes the master key, so
-     * decryption fails by design.
-     */
-    private byte[] deriveMasterKey() throws Exception {
-        byte[] siteSeed;
-        try {
-            siteSeed = UmbraCrypto.base64Decode(SITE_SEED.trim());
-        } catch (Throwable unreadable) {
-            throw silent("Archive seed is unreadable");
-        }
-        if (siteSeed.length != UmbraCrypto.KEY_BYTES) {
-            throw silent("Archive seed is invalid");
+        say(logToken() + " openIndex start");
+        byte[] commentBytes = null;
+        String comment = jar.getComment();
+        if (comment != null && !comment.trim().isEmpty()) {
+            try {
+                commentBytes = UmbraCrypto.base64Decode(comment.trim());
+            } catch (Throwable unreadable) {
+                throw silent("Archive comment is unreadable");
+            }
         }
         try {
-            String comment = jar.getComment();
-            byte[] master;
-            if (comment == null || comment.trim().isEmpty()) {
-                bindingUsed = BINDING_SEED;
-                master = UmbraCrypto.masterFromSeed(siteSeed);
-            } else {
-                byte[] commentBytes;
-                try {
-                    commentBytes = UmbraCrypto.base64Decode(comment.trim());
-                } catch (Throwable unreadable) {
-                    throw silent("Archive comment is unreadable");
-                }
-                try {
-                    bindingUsed = BINDING_SAMPLE;
-                    master = UmbraCrypto.masterFromSample(siteSeed, commentBytes, countEntries());
-                } finally {
-                    UmbraCrypto.wipe(commentBytes);
+            byte[] host = hostRoot;
+
+            hostRoot = null;
+            if (host != null) {
+
+                byte[] derived = UmbraCrypto.nativeKeyRoot(host,
+                        UmbraCrypto.ROOT_SLOT, UmbraCrypto.ROOT_SUB);
+                if (derived != null) {
+                    byte[] hostMaster = UmbraCrypto.masterFromRoot(derived, commentBytes,
+                            countEntries());
+                    UmbraCrypto.wipe(derived);
+                    if (hostMaster != null) {
+                        try {
+                            byte[] plain = UmbraCrypto.unseal(sealedIndex, hostMaster,
+                                    UmbraCrypto.ALG_CHACHA20);
+                            this.masterKey = hostMaster;
+                            byte[] digestRoot = UmbraCrypto.nativeKeyRoot(host,
+                                    UmbraCrypto.ROOT_SLOT, UmbraCrypto.ROOT_SUB);
+                            this.digestKey = UmbraCrypto.subKey(digestRoot,
+                                    UmbraCrypto.SLOT_DIGEST, 0);
+
+                            UmbraCrypto.installKeyRoot(digestRoot);
+                            UmbraCrypto.wipe(digestRoot);
+                            this.bindingUsed = BINDING_HOST;
+                            return plain;
+                        } catch (SecurityException wrongHostRoot) {
+                            UmbraCrypto.wipe(hostMaster);
+                        }
+                    }
                 }
             }
-            UmbraCrypto.wipe(siteSeed);
-            return master;
-        } catch (SecurityException failure) {
-            UmbraCrypto.wipe(siteSeed);
-            throw failure;
-        } catch (Throwable unreadable) {
-            UmbraCrypto.wipe(siteSeed);
+            byte[] root = nativeKeyRoot();
+            if (root == null && DEBUG) {
+                say(logToken() + " native key root is unavailable");
+            }
+            if (root != null) {
+                int entryCount = countEntries();
+                byte[] nativeMaster = UmbraCrypto.masterFromRoot(root, commentBytes, entryCount);
+                if (nativeMaster != null) {
+                    try {
+                        byte[] plain = UmbraCrypto.unseal(sealedIndex, nativeMaster,
+                                UmbraCrypto.ALG_CHACHA20);
+                        this.masterKey = nativeMaster;
+                        this.digestKey = UmbraCrypto.subKey(root,
+                                UmbraCrypto.SLOT_DIGEST, 0);
+
+                        UmbraCrypto.installKeyRoot(root);
+                        UmbraCrypto.wipe(root);
+                        if (this.digestKey == null) {
+                            throw silent("Archive digest key derivation failed");
+                        }
+                        this.bindingUsed = BINDING_NATIVE;
+                        return plain;
+                    } catch (SecurityException notNativeBound) {
+                        if (DEBUG) {
+                            say(logToken() + " native master key did not open the "
+                                    + "sealed index (root, comment or entry count differs from the "
+                                    + "build - compare the [diag] lines)");
+                        }
+                        UmbraCrypto.wipe(nativeMaster);
+                    }
+                }
+                UmbraCrypto.wipe(root);
+            }
+            return legacyIndex(sealedIndex, commentBytes);
+        } finally {
+            UmbraCrypto.wipe(commentBytes);
+        }
+    }
+
+    private byte[] legacyIndex(byte[] sealedIndex, byte[] commentBytes) throws Exception {
+        byte[] siteSeed = siteSeedConstant();
+        if (siteSeed == null) {
+            if (DEBUG) {
+                say(logToken() + " no embedded site seed in the loader "
+                        + "(the archive is native-bound and the native root failed)");
+            }
             throw silent("Archive master key derivation failed");
+        }
+        try {
+            int entryCount = countEntries();
+            int binding = commentBytes == null ? BINDING_SEED : BINDING_SAMPLE;
+            byte[] master = commentBytes == null
+                    ? UmbraCrypto.masterFromSeed(siteSeed)
+                    : UmbraCrypto.masterFromSample(siteSeed, commentBytes, entryCount);
+            try {
+                byte[] plain = UmbraCrypto.unseal(sealedIndex, master, UmbraCrypto.ALG_CHACHA20);
+                this.masterKey = master;
+                this.digestKey = master;
+                this.bindingUsed = binding;
+                return plain;
+            } catch (SecurityException wrongKey) {
+                if (DEBUG) {
+                    say(logToken() + " seed-bound master key did not open the "
+                            + "sealed index");
+                }
+                UmbraCrypto.wipe(master);
+                throw silent("Archive master key derivation failed");
+            }
+        } finally {
+            UmbraCrypto.wipe(siteSeed);
+        }
+    }
+
+    private static byte[] siteSeedConstant() {
+        String value = SITE_SEED == null ? "" : SITE_SEED.trim();
+        if (value.isEmpty() || value.charAt(0) == '@') {
+            return null;
+        }
+        try {
+            byte[] seed = UmbraCrypto.base64Decode(value);
+            return seed.length == UmbraCrypto.KEY_BYTES ? seed : null;
+        } catch (Throwable unreadable) {
+            return null;
+        }
+    }
+
+    private static byte[] nativeKeyRoot() {
+        if (NATIVE_LOADER == null || NATIVE_LOADER.isEmpty() || NATIVE_LOADER.charAt(0) == '@') {
+            return null;
+        }
+
+        if (!ROOT_CLAIM.compareAndSet(false, true)) {
+            if (DEBUG) {
+                say(logToken() + " native key root already consumed");
+            }
+            return null;
+        }
+        byte[] nonced = nonceRoot(UmbraCrypto.SLOT_CLASS_MASTER, 0);
+        if (nonced != null) {
+            return nonced;
+        }
+        try {
+            Class<?> type = Class.forName(NATIVE_LOADER, true,
+                    UmbraClassLoader.class.getClassLoader());
+            java.lang.reflect.Method derive =
+                    type.getMethod("deriveKey", int.class, int.class);
+            Object value = derive.invoke(null, Integer.valueOf(UmbraCrypto.SLOT_CLASS_MASTER),
+                    Integer.valueOf(0));
+            if (value instanceof byte[]) {
+                byte[] root = (byte[]) value;
+                if (root.length == UmbraCrypto.ROOT_BYTES) {
+                    return root;
+                }
+            }
+        } catch (Throwable unavailable) {
+            if (DEBUG) {
+                say(logToken() + " native key root unavailable: "
+                        + unavailable.getClass().getName());
+            }
+        }
+        return null;
+    }
+
+    private String findSealedCodeLibrary() {
+        for (String logical : resourceEntries.keySet()) {
+            if (logical.endsWith(".dat")) {
+                return logical;
+            }
+        }
+        return null;
+    }
+
+    private void verifyOwnClassBytes() {
+        if (NATIVE_LOADER == null || NATIVE_LOADER.isEmpty()
+                || NATIVE_LOADER.charAt(0) == '@') {
+            say(logToken() + " WARN no native bridge: loader self-verification "
+                    + "skipped (seed binding, integrity is the class-digest layer)");
+            return;
+        }
+        byte[] loaderBytes = null;
+        byte[] bridgeBytes = null;
+        try {
+            Class<?> nativeType = Class.forName(NATIVE_LOADER, true,
+                    UmbraClassLoader.class.getClassLoader());
+
+            String loaderName = UmbraClassLoader.class.getName().replace('.', '/') + ".class";
+            String bridgeName = NATIVE_LOADER.replace('.', '/') + ".class";
+            loaderBytes = readEntryBytes(loaderName);
+            bridgeBytes = readEntryBytes(bridgeName);
+            if (loaderBytes == null || bridgeBytes == null) {
+                say(logToken() + " loader self-verification could not read "
+                        + (loaderBytes == null ? loaderName : bridgeName));
+                System.exit(1);
+                return;
+            }
+
+            say(logToken() + " verifyLoader loader=" + loaderName
+                    + " len=" + loaderBytes.length + " sha=" + UmbraCrypto.sha256Hex(loaderBytes));
+            say(logToken() + " verifyLoader bridge=" + bridgeName
+                    + " len=" + bridgeBytes.length + " sha=" + UmbraCrypto.sha256Hex(bridgeBytes));
+
+            String loaderSha = UmbraCrypto.sha256Hex(loaderBytes);
+            String bridgeSha = UmbraCrypto.sha256Hex(bridgeBytes);
+            java.lang.reflect.Method bySha;
+            try {
+                bySha = nativeType.getMethod("verifyLoader", String.class, String.class);
+            } catch (NoSuchMethodException noShaForm) {
+                bySha = null;
+            }
+            java.lang.reflect.Method byBytes;
+            try {
+                byBytes = nativeType.getMethod("verifyLoader", byte[].class, byte[].class);
+            } catch (NoSuchMethodException noByteForm) {
+                byBytes = null;
+            }
+            int rc;
+
+            boolean maskSemantics = false;
+            boolean strictAnchors = false;
+            if (bySha != null) {
+
+                try {
+                    Object probe = bySha.invoke(null, "", "");
+                    int probeRc = probe instanceof Integer ? ((Integer) probe).intValue() : -1;
+                    maskSemantics = probeRc == 3;
+                } catch (Throwable probeFailed) {
+                    maskSemantics = false;
+                }
+                if (DEBUG) {
+                    say(logToken() + " verifyLoader semantics="
+                            + (maskSemantics ? "mask(1=loader,2=bridge)" : "legacy(single value)"));
+                }
+
+                String bogus = "0000000000000000000000000000000000000000000000000000000000000000";
+                boolean loaderSlotEnforced = false;
+                boolean bridgeSlotEnforced = false;
+                try {
+                    Object wrongLoader = bySha.invoke(null, bogus, bridgeSha);
+                    int wrongLoaderRc = wrongLoader instanceof Integer
+                            ? ((Integer) wrongLoader).intValue() : -1;
+                    loaderSlotEnforced = maskSemantics ? (wrongLoaderRc & 1) != 0 : wrongLoaderRc != 0;
+                    Object wrongBridge = bySha.invoke(null, loaderSha, bogus);
+                    int wrongBridgeRc = wrongBridge instanceof Integer
+                            ? ((Integer) wrongBridge).intValue() : -1;
+                    bridgeSlotEnforced = maskSemantics ? (wrongBridgeRc & 2) != 0 : wrongBridgeRc != 0;
+                } catch (Throwable probeFailed) {
+                    loaderSlotEnforced = false;
+                    bridgeSlotEnforced = false;
+                }
+
+                strictAnchors = loaderSlotEnforced && bridgeSlotEnforced;
+                say(logToken() + " verifyLoader anchor-health loader="
+                        + loaderSlotEnforced + " bridge=" + bridgeSlotEnforced
+                        + (strictAnchors ? " (anchors enforced: mismatches are fatal)"
+                                : " (anchor not enforced: mismatches are reported only)"));
+                if (!strictAnchors) {
+
+                    say(logToken() + " umbra-anchor-unhealthy=1 loader="
+                            + loaderSlotEnforced + " bridge=" + bridgeSlotEnforced);
+                }
+                Object answer = bySha.invoke(null, loaderSha, bridgeSha);
+                rc = answer instanceof Integer ? ((Integer) answer).intValue() : -1;
+            } else if (byBytes != null) {
+
+                say(logToken() + " WARN bridge has no verifyLoader(String,String): "
+                        + "falling back to the byte form");
+                Object answer = byBytes.invoke(null, loaderBytes, bridgeBytes);
+                rc = answer instanceof Integer ? ((Integer) answer).intValue() : -1;
+            } else {
+
+                say(logToken() + " WARN bridge has no two-argument verifyLoader: "
+                        + "falling back to the single-argument form, so the LOADER class is not "
+                        + "natively verified in this build");
+                java.lang.reflect.Method oneArg = nativeType.getMethod("verifyLoader", byte[].class);
+                Object answer = oneArg.invoke(null, bridgeBytes);
+                rc = answer instanceof Integer ? ((Integer) answer).intValue() : -1;
+            }
+            if (rc != 0) {
+                boolean loaderMismatch = maskSemantics && (rc & 1) != 0;
+                boolean bridgeMismatch = maskSemantics ? (rc & 2) != 0 : true;
+                if (loaderMismatch) {
+
+                    say(logToken() + " loader self-verification failed: the "
+                            + "loader class was modified (rc=" + rc + ")");
+                    System.exit(1);
+                }
+
+                if (bridgeMismatch && (STRICT_NATIVE_VERIFY || strictAnchors)) {
+                    say(logToken() + " loader self-verification failed (" + rc + ")");
+                    System.exit(1);
+                }
+
+                if (bridgeMismatch) {
+                    say(logToken() + " ERROR native self-check mismatch (rc=" + rc
+                            + "): the bridge anchor did not prove it enforces this slot, so the "
+                            + "mismatch is reported instead of aborting; the index digest still "
+                            + "covers the loader");
+                } else {
+                    say(logToken() + " WARN native self-check returned rc=" + rc
+                            + " with neither mismatch bit set");
+                }
+            }
+        } catch (Throwable failure) {
+
+            say(logToken() + " loader self-verification error: " + failure);
+            Throwable cause = failure.getCause();
+            if (cause != null) {
+                say(logToken() + " loader self-verification cause: " + cause);
+                cause.printStackTrace();
+            }
+            System.exit(1);
+        } finally {
+            if (loaderBytes != null) {
+                java.util.Arrays.fill(loaderBytes, (byte) 0);
+            }
+            if (bridgeBytes != null) {
+                java.util.Arrays.fill(bridgeBytes, (byte) 0);
+            }
+        }
+    }
+
+    private byte[] readEntryBytes(String entryName) {
+        java.util.zip.ZipEntry entry = jar.getJarEntry(entryName);
+        java.io.InputStream stream = null;
+        try {
+            if (entry != null) {
+                stream = jar.getInputStream(entry);
+            } else {
+                ClassLoader defining = UmbraClassLoader.class.getClassLoader();
+                if (defining != null) {
+                    stream = defining.getResourceAsStream(entryName);
+                }
+            }
+            return stream == null ? null : readAll(stream);
+        } catch (Throwable unreadable) {
+            return null;
+        } finally {
+            if (stream != null) {
+                try {
+                    stream.close();
+                } catch (Throwable ignored) {
+
+                }
+            }
+        }
+    }
+
+    private static void bindNativeNames(Class<?> type) {
+        try {
+
+            java.lang.reflect.Method bind;
+            Object bound;
+            try {
+                bind = type.getMethod("bindOwnNames", Class.class);
+                bound = bind.invoke(null, type);
+            } catch (NoSuchMethodException noOwnerArg) {
+                bind = type.getMethod("bindOwnNames");
+                bound = bind.invoke(null);
+            }
+            boolean ok = Boolean.TRUE.equals(bound);
+            if (!ok) {
+                say(logToken() + " bindOwnNames returned " + String.valueOf(bound)
+                        + "; native entry points stay unbound (keyRoot2 will report the cause)");
+            } else if (DEBUG) {
+                say(logToken() + " bindOwnNames -> true");
+            }
+        } catch (NoSuchMethodException olderBridge) {
+
+        } catch (Throwable unavailable) {
+            say(logToken() + " bindOwnNames failed: " + unavailable
+                    + (unavailable.getCause() == null ? "" : " cause=" + unavailable.getCause()));
         }
     }
 
@@ -1121,10 +1875,6 @@ public final class UmbraClassLoader extends ClassLoader {
             }
         }
     }
-
-    // ------------------------------------------------------------------
-    // Bounded index parsing
-    // ------------------------------------------------------------------
 
     private static int readInt(ByteBuffer buffer) {
         if (buffer.remaining() < 4) {
@@ -1178,7 +1928,6 @@ public final class UmbraClassLoader extends ClassLoader {
         return order;
     }
 
-    /** Reads the internal class name out of a class file without loading it. */
     private static String classNameOf(byte[] bytes) {
         try {
             int offset = 8;
@@ -1227,7 +1976,7 @@ public final class UmbraClassLoader extends ClassLoader {
                         return null;
                 }
             }
-            offset += 2; // access flags
+            offset += 2;
             int thisClass = readU2(bytes, offset);
             if (thisClass <= 0 || thisClass >= poolCount) {
                 return null;

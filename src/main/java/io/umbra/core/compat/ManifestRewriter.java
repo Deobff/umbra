@@ -32,7 +32,6 @@ import java.util.Map;
  */
 public final class ManifestRewriter {
 
-    /** Manifest entry name. */
     public static final String MANIFEST_ENTRY = "META-INF/MANIFEST.MF";
 
     private static final String[] CLASS_ATTRIBUTES = {
@@ -55,7 +54,6 @@ public final class ManifestRewriter {
     private ManifestRewriter() {
     }
 
-    /** Result of one manifest rewrite; {@code bytes} are the original array when unchanged. */
     public static final class Result {
         private final byte[] bytes;
         private final boolean changed;
@@ -77,7 +75,6 @@ public final class ManifestRewriter {
             return changed;
         }
 
-        /** Number of manifest attributes added, removed or rewritten. */
         public int attributesRewritten() {
             return attributesRewritten;
         }
@@ -87,15 +84,6 @@ public final class ManifestRewriter {
         }
     }
 
-    /**
-     * Rewrites the manifest if a mapping or layout decision requires it.
-     *
-     * @param manifestBytes       raw manifest bytes (may be {@code null})
-     * @param rename              class/member mapping
-     * @param preserveMultiRelease true when {@code META-INF/versions} is preserved
-     * @param versionedEntries    true when versioned entries remain in the archive
-     * @return rewrite result; the input bytes when nothing changed
-     */
     public static Result rewrite(byte[] manifestBytes, ClassRenameMap rename,
                                  boolean preserveMultiRelease, boolean versionedEntries) {
         List<String> warnings = new ArrayList<String>();
@@ -109,7 +97,6 @@ public final class ManifestRewriter {
         }
         int rewritten = 0;
 
-        // 1. Class attributes.
         if (rename != null && !rename.isEmpty()) {
             for (String attribute : CLASS_ATTRIBUTES) {
                 String value = parsed.main.get(attribute);
@@ -124,7 +111,6 @@ public final class ManifestRewriter {
             }
         }
 
-        // 2. OSGi package headers.
         if (rename != null && !rename.isEmpty()) {
             for (String header : PACKAGE_HEADERS) {
                 String value = parsed.main.get(header);
@@ -161,7 +147,6 @@ public final class ManifestRewriter {
             }
         }
 
-        // 3. Signature metadata must never survive a rewrite.
         List<String> signatureKeys = new ArrayList<String>();
         for (String key : parsed.main.keySet()) {
             if (isSignatureKey(key)) {
@@ -193,7 +178,6 @@ public final class ManifestRewriter {
             rewritten += emptySections.size();
         }
 
-        // 4. Multi-Release attribute follows the layout decision.
         String multiRelease = parsed.main.get("Multi-Release");
         if (!preserveMultiRelease) {
             if (multiRelease != null) {
@@ -220,7 +204,6 @@ public final class ManifestRewriter {
         return new Result(serialize(parsed), true, rewritten, warnings);
     }
 
-    /** Parses only the main attributes; used by inspection and detection code. */
     public static Map<String, String> parseMainAttributes(byte[] manifestBytes) {
         Parsed parsed = parse(manifestBytes);
         if (parsed == null) {
@@ -234,10 +217,6 @@ public final class ManifestRewriter {
         return "signature-version".equals(lower) || "magic".equals(lower)
                 || lower.endsWith("-digest") || lower.contains("-digest-");
     }
-
-    // ------------------------------------------------------------------
-    // Header rewriting
-    // ------------------------------------------------------------------
 
     private static String rewritePackageHeader(String value, ClassRenameMap rename) {
         List<String> segments = splitTopLevel(value, ',');
@@ -264,7 +243,7 @@ public final class ManifestRewriter {
     }
 
     private static String rewriteCapabilityHeader(String value, ClassRenameMap rename) {
-        // Capability headers contain class names and package names in quoted lists.
+
         return rewriteQuotedLists(rename.rewriteDottedNames(value), rename);
     }
 
@@ -294,7 +273,6 @@ public final class ManifestRewriter {
         return out.toString();
     }
 
-    /** Rewrites comma-separated package/class lists inside double-quoted directives. */
     private static String rewriteQuotedLists(String text, ClassRenameMap rename) {
         StringBuilder out = new StringBuilder(text.length() + 16);
         int index = 0;
@@ -367,10 +345,6 @@ public final class ManifestRewriter {
         return parts;
     }
 
-    // ------------------------------------------------------------------
-    // Manifest text parsing/serialization (sections preserved)
-    // ------------------------------------------------------------------
-
     private static final class Section {
         final String name;
         final Map<String, String> attributes = new LinkedHashMap<String, String>();
@@ -383,7 +357,7 @@ public final class ManifestRewriter {
     private static final class Parsed {
         Map<String, String> main = new LinkedHashMap<String, String>();
         final List<Section> sections = new ArrayList<Section>();
-        /** True when the input had to be sanitized (invalid lines/labels dropped). */
+
         boolean dirty;
     }
 
@@ -394,8 +368,7 @@ public final class ManifestRewriter {
         Parsed parsed = new Parsed();
         String text = new String(bytes, StandardCharsets.UTF_8);
         if (!text.isEmpty() && text.charAt(0) == '\uFEFF') {
-            // UTF-8 BOM before the first header is not part of the JAR manifest
-            // spec and makes java.util.jar.Manifest reject the file.
+
             text = text.substring(1);
             parsed.dirty = true;
         }
@@ -410,8 +383,7 @@ public final class ManifestRewriter {
                 flush(current, key, value);
                 key = null;
                 value = null;
-                // A blank line terminates the current section; the next header
-                // must start a new section (or be the trailing empty line).
+
                 current = null;
                 continue;
             }
@@ -419,7 +391,7 @@ public final class ManifestRewriter {
                 if (key != null && value != null) {
                     value.append(line.substring(1));
                 } else {
-                    // Continuation line without a preceding header.
+
                     parsed.dirty = true;
                 }
                 continue;
@@ -429,7 +401,7 @@ public final class ManifestRewriter {
             value = null;
             int colon = line.indexOf(':');
             if (colon < 0) {
-                // Not a header line; keeping it would make the manifest invalid.
+
                 parsed.dirty = true;
                 continue;
             }
@@ -487,10 +459,6 @@ public final class ManifestRewriter {
         return out.toByteArray();
     }
 
-    /**
-     * Writes one manifest attribute with 72-byte-safe UTF-8 continuation lines
-     * (never splits a multi-byte character).
-     */
     static void writeAttribute(ByteArrayOutputStream out, String name, String value) {
         byte[] bytes = (name + ": " + value).getBytes(StandardCharsets.UTF_8);
         int position = 0;

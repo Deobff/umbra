@@ -25,7 +25,6 @@ public final class JniNames {
     private JniNames() {
     }
 
-    /** Mangles a class name, method name or type descriptor into a symbol fragment. */
     public static String mangle(String value) {
         if (value == null) {
             throw new IllegalArgumentException("value");
@@ -55,21 +54,14 @@ public final class JniNames {
         return out.toString();
     }
 
-    /** Short JNI name, {@code Java_<mangled class>_<mangled method>}. */
     public static String shortName(String ownerInternalName, String methodName) {
         return "Java_" + mangle(ownerInternalName) + "_" + mangle(methodName);
     }
 
-    /**
-     * Long JNI name, {@code Java_<mangled class>_<mangled method>__<mangled args>}.
-     *
-     * @param descriptor method descriptor such as {@code (ILjava/lang/String;)V}
-     */
     public static String longName(String ownerInternalName, String methodName, String descriptor) {
         return shortName(ownerInternalName, methodName) + "__" + mangle(argumentSignature(descriptor));
     }
 
-    /** Returns the argument part of a method descriptor without the parentheses. */
     public static String argumentSignature(String descriptor) {
         if (descriptor == null || descriptor.length() < 3 || descriptor.charAt(0) != '(') {
             throw new IllegalArgumentException("not a method descriptor: " + descriptor);
@@ -81,7 +73,6 @@ public final class JniNames {
         return descriptor.substring(1, close);
     }
 
-    /** Returns the return type of a method descriptor, for example {@code V} or {@code [I}. */
     public static String returnType(String descriptor) {
         if (descriptor == null) {
             throw new IllegalArgumentException("descriptor");
@@ -93,17 +84,12 @@ public final class JniNames {
         return descriptor.substring(close + 1);
     }
 
-    /** Splits the descriptor into its argument types (in order). */
     public static List<String> argumentTypes(String descriptor) {
         List<String> all = splitTypes(descriptor);
         all.remove(all.size() - 1);
         return all;
     }
 
-    /**
-     * Splits a field or method descriptor into its Java types. For method
-     * descriptors the return type is the last element.
-     */
     public static List<String> splitTypes(String descriptor) {
         if (descriptor == null) {
             throw new IllegalArgumentException("descriptor");

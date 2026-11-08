@@ -21,13 +21,8 @@ import java.util.Map;
  */
 final class GuardLiterals {
 
-    /**
-     * Every literal the generated guard may reference. Order defines the emitted
-     * accessor numbering, so the generated C stays byte-identical for a given
-     * secret (build reproducibility).
-     */
     private static final String[] VALUES = {
-            // Windows instrumentation markers.
+
             "frida",
             "frida-",
             "gum-",
@@ -36,27 +31,27 @@ final class GuardLiterals {
             "gdbus",
             "gadget",
             "\\\\.\\pipe\\*",
-            // JDWP / agent modules.
+
             "jdwp",
             "dt_socket",
             "dt_shmem",
             "attach.dll",
             "instrument.dll",
-            // Module names used by the hash-resolved import resolver.
+
             "kernel32.dll",
             "ntdll.dll",
-            // Environment markers.
+
             "ld_preload",
             "dyld_insert_libraries",
             "java_tool_options",
             "_java_options",
             "jdk_java_options",
-            // Linux /proc markers (compiled out on Windows).
+
             "/proc/self/status",
             "/proc/self/maps",
             "TracerPid:",
             "gum-js",
-            // Sensitive imports resolved by FNV hash at runtime.
+
             "CheckRemoteDebuggerPresent",
             "CreateToolhelp32Snapshot",
             "GetFileAttributesA",
@@ -67,16 +62,10 @@ final class GuardLiterals {
             "NtQuerySystemInformation"
     };
 
-    /** Plaintext length of every registered literal. */
     private final Map<String, Integer> index = new LinkedHashMap<String, Integer>();
     private final List<String> values = new ArrayList<String>();
     private final int[] keys;
 
-    /**
-     * @param secret build secret (same value embedded in the Java guard)
-     * @param extra  additional literals (for example the configured
-     *               {@code antiDebug.execWhitelist} list)
-     */
     GuardLiterals(long secret, String... extra) {
         for (String value : VALUES) {
             register(value);
@@ -102,7 +91,6 @@ final class GuardLiterals {
         values.add(value);
     }
 
-    /** Per-literal XOR key: derived from the build secret and the slot index. */
     private static int key(long secret, int slot) {
         int fromSecret = (int) ((secret >>> ((slot % 8) * 8)) & 0xFFL);
         return (fromSecret ^ ((slot * 31 + 0x5A) & 0xFF)) & 0xFF;
@@ -116,31 +104,22 @@ final class GuardLiterals {
         return slot.intValue();
     }
 
-    /** C expression yielding the decoded literal ({@code umbra_lit_7()}). */
     String ref(String value) {
         return "umbra_lit_" + slotOf(value) + "()";
     }
 
-    /** C symbol of the sealed byte array ({@code umbra_sealed_7}). */
     String sealed(String value) {
         return "umbra_sealed_" + slotOf(value);
     }
 
-    /** Build-time XOR key of the literal, as emitted into the guard C. */
     int key(String value) {
         return keys[slotOf(value)];
     }
 
-    /** Plaintext byte length of the literal. */
     int length(String value) {
         return value.length();
     }
 
-    /**
-     * Emits the decoder, the sealed arrays and the first-use accessors. Must be
-     * called after the body was rendered (so only referenced literals appear) and
-     * before the body is appended to the translation unit.
-     */
     void emit(StringBuilder out) {
         if (values.isEmpty()) {
             return;
@@ -187,7 +166,6 @@ final class GuardLiterals {
         out.append("}\n");
     }
 
-    /** One sealed byte: {@code plain ^ (key + position * 7)} (mirrors the C decoder). */
     private static int seal(char plain, int key, int position) {
         return (plain ^ ((key + position * 7) & 0xFF)) & 0xFF;
     }

@@ -39,22 +39,18 @@ public final class MixinAnalysis {
                 : Collections.unmodifiableList(new java.util.ArrayList<String>(values));
     }
 
-    /** Internal names of classes carrying {@code @Mixin}. */
     public List<String> mixinClasses() {
         return mixinClasses;
     }
 
-    /** Internal names of classes referenced as mixin targets. */
     public List<String> targetClasses() {
         return targetClasses;
     }
 
-    /** Keep rules (class globs or {@code owner#name(desc)}) for mixin/target members. */
     public List<String> keepRules() {
         return keepRules;
     }
 
-    /** Class globs whose method bodies must not be rewritten. */
     public List<String> bodySkipGlobs() {
         return bodySkipGlobs;
     }

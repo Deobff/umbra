@@ -19,21 +19,11 @@ public final class YamlParser {
     private YamlParser() {
     }
 
-    /**
-     * Parses a YAML document into nested {@link Map} / {@link List} / scalar
-     * values.
-     *
-     * @param text YAML source
-     * @return root mapping
-     * @throws ConfigException if the document is malformed
-     */
     public static Map<String, Object> parse(String text) throws ConfigException {
         if (text == null) {
             text = "";
         }
-        // A UTF-8 BOM left by Windows editors would otherwise become part of
-        // the first key. ConfigLoader also strips it, but this parser is a
-        // public entry point (license files, plugins), so handle it here too.
+
         if (!text.isEmpty() && text.charAt(0) == '\uFEFF') {
             text = text.substring(1);
         }
@@ -44,9 +34,7 @@ public final class YamlParser {
             if (stripped.trim().isEmpty()) {
                 continue;
             }
-            // A tab counts as four columns for indentation comparisons, but it
-            // is still a single character: track the character offset
-            // separately so the content is not chopped when tabs are used.
+
             int indent = 0;
             int offset = 0;
             while (offset < stripped.length()) {
@@ -124,8 +112,7 @@ public final class YamlParser {
             if (rest.isEmpty()) {
                 if (index[0] < lines.size()) {
                     Line next = lines.get(index[0]);
-                    // Accept both indented and compact sequences:
-                    //   key:\n  - a        and        key:\n- a
+
                     if (next.indent > indent || (next.indent == indent && next.content.startsWith("-"))) {
                         map.put(key, parseBlock(lines, index, next.indent));
                     } else {
@@ -278,9 +265,7 @@ public final class YamlParser {
                 return unescape(value.substring(1, value.length() - 1));
             }
             if (first == '\'' && last == '\'') {
-                // YAML single-quoted scalars are literal: the only escape is
-                // '' for a single quote, backslashes are kept as-is (so a
-                // Windows path such as 'C:\new\file' is not mangled).
+
                 return value.substring(1, value.length() - 1).replace("''", "'");
             }
         }

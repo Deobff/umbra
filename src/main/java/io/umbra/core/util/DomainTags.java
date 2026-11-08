@@ -56,7 +56,6 @@ public final class DomainTags {
             V3_CLASS_NONCE, V3_ARTIFACT_SALT, V3_USER_SALT, RC4_KEY, SPECK_KEY
     };
 
-    /** Offset of each label inside {@link #LITERALS}. */
     public static final int I_LEGACY_KEY = 0;
     public static final int I_LEGACY_NONCE = 1;
     public static final int I_SITE_SEED = 2;
@@ -73,12 +72,6 @@ public final class DomainTags {
     private DomainTags() {
     }
 
-    /**
-     * Installs the separators for one build and pushes them into the runtime
-     * templates the passes call directly.
-     *
-     * @param seed run seed
-     */
     public static void install(long seed) {
         Map<String, String> tags = new LinkedHashMap<String, String>();
         for (int i = 0; i < LITERALS.length; i++) {
@@ -91,17 +84,11 @@ public final class DomainTags {
         UmbraStringDecryptor.applyDomainTags(tags);
     }
 
-    /** Current separator for one of the {@code I_*} indexes. */
     public static String tag(int index) {
         Map<String, String> tags = current;
         return tags == null ? LITERALS[index] : tags.get(LITERALS[index]);
     }
 
-    /**
-     * Literal-to-current mapping for template injection.
-     *
-     * @return a fresh map; callers may mutate it
-     */
     public static Map<String, String> replacements() {
         Map<String, String> tags = current;
         if (tags == null) {
@@ -110,7 +97,6 @@ public final class DomainTags {
         return new LinkedHashMap<String, String>(tags);
     }
 
-    /** A 16-character hex separator derived from the seed and the label index. */
     private static String derive(long seed, int index) {
         MessageDigest digest;
         try {

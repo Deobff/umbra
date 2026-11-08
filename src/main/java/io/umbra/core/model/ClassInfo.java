@@ -60,12 +60,10 @@ public final class ClassInfo {
         fieldAccess.put(name + ":" + desc, Integer.valueOf(access));
     }
 
-    /** Method access flags, or {@code null} when unknown. */
     public Integer methodAccess(String name, String desc) {
         return methodAccess.get(name + desc);
     }
 
-    /** Field access flags, or {@code null} when unknown. */
     public Integer fieldAccess(String name, String desc) {
         return fieldAccess.get(name + ":" + desc);
     }

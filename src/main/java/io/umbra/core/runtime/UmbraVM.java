@@ -33,15 +33,6 @@ public final class UmbraVM {
     private UmbraVM() {
     }
 
-    /**
-     * Executes one virtualized method body.
-     *
-     * @param code      bytecode in the reduced instruction set
-     * @param constants constant pool (boxed values and class literals)
-     * @param refs      method/field/type references
-     * @param locals    local variable slots; slot 0 holds {@code this} for instance methods
-     * @return the boxed return value, or {@code null} for {@code void}
-     */
     public static Object run(int[] code, Object[] constants, String[] refs, Object[] locals) {
         Object[] stack = new Object[Math.max(32, Math.min(512, code.length + 8))];
         int sp = 0;
@@ -54,41 +45,38 @@ public final class UmbraVM {
             }
             int op = code[pc++];
             switch (op) {
-                case 0: // NOP
+                case 0:
                     break;
-                case 1: // ACONST_NULL
+                case 1:
                     stack[sp++] = null;
                     break;
-                case 2: // ICONST_M1
-                case 3: case 4: case 5: case 6: case 7: case 8: // ICONST_0 .. ICONST_5
+                case 2:
+                case 3: case 4: case 5: case 6: case 7: case 8:
                     stack[sp++] = Integer.valueOf(op - 3);
                     break;
-                case 9: // LCONST_0
-                case 10: // LCONST_1
+                case 9:
+                case 10:
                     stack[sp++] = Long.valueOf(op - 9);
                     break;
-                case 11: // FCONST_0
-                case 12: // FCONST_1
-                case 13: // FCONST_2
+                case 11:
+                case 12:
+                case 13:
                     stack[sp++] = Float.valueOf(op - 11);
                     break;
-                case 14: // DCONST_0
-                case 15: // DCONST_1
+                case 14:
+                case 15:
                     stack[sp++] = Double.valueOf(op - 14);
                     break;
-                case 16: // BIPUSH
+                case 16:
                     stack[sp++] = Integer.valueOf(code[pc++]);
                     break;
-                case 17: // SIPUSH
+                case 17:
                     stack[sp++] = Integer.valueOf(code[pc++]);
                     break;
-                case 18: { // LDC
+                case 18: {
                     Object constant = constants[code[pc++]];
                     if (constant instanceof String[]) {
-                        // Lazy class constant marker { "C", descriptor }: resolved
-                        // here (at first execution) through the context class
-                        // loader chain instead of eagerly in the holder <clinit>,
-                        // because program classes may live in a nested container.
+
                         String[] marker = (String[]) constant;
                         if (marker.length == 2 && "C".equals(marker[0])) {
                             constant = type(marker[1]);
@@ -97,7 +85,7 @@ public final class UmbraVM {
                     stack[sp++] = constant;
                     break;
                 }
-                case 21: case 22: case 23: case 24: case 25: // ILOAD..ALOAD
+                case 21: case 22: case 23: case 24: case 25:
                     stack[sp++] = locals[code[pc++]];
                     break;
                 case 46: case 47: case 48: case 49: case 50: case 51: case 52: case 53: {
@@ -106,7 +94,7 @@ public final class UmbraVM {
                     stack[sp++] = arrayLoad(array, index, op);
                     break;
                 }
-                case 54: case 55: case 56: case 57: case 58: // ISTORE..ASTORE
+                case 54: case 55: case 56: case 57: case 58:
                     locals[code[pc++]] = stack[--sp];
                     break;
                 case 79: case 80: case 81: case 82: case 83: case 84: case 85: case 86: {
@@ -116,17 +104,17 @@ public final class UmbraVM {
                     arrayStore(array, index, value, op);
                     break;
                 }
-                case 87: // POP
+                case 87:
                     sp--;
                     break;
-                case 88: // POP2
+                case 88:
                     sp -= isWide(stack[sp - 1]) ? 1 : 2;
                     break;
-                case 89: // DUP
+                case 89:
                     stack[sp] = stack[sp - 1];
                     sp++;
                     break;
-                case 90: { // DUP_X1
+                case 90: {
                     Object v1 = stack[sp - 1];
                     Object v2 = stack[sp - 2];
                     stack[sp] = v1;
@@ -135,7 +123,7 @@ public final class UmbraVM {
                     sp++;
                     break;
                 }
-                case 91: { // DUP_X2
+                case 91: {
                     Object v1 = stack[sp - 1];
                     if (isWide(stack[sp - 2])) {
                         Object v2 = stack[sp - 2];
@@ -153,7 +141,7 @@ public final class UmbraVM {
                     sp++;
                     break;
                 }
-                case 92: // DUP2
+                case 92:
                     if (isWide(stack[sp - 1])) {
                         stack[sp] = stack[sp - 1];
                         sp++;
@@ -163,7 +151,7 @@ public final class UmbraVM {
                         sp += 2;
                     }
                     break;
-                case 93: { // DUP2_X1
+                case 93: {
                     if (isWide(stack[sp - 1])) {
                         Object v1 = stack[sp - 1];
                         Object v2 = stack[sp - 2];
@@ -184,7 +172,7 @@ public final class UmbraVM {
                     }
                     break;
                 }
-                case 94: { // DUP2_X2
+                case 94: {
                     if (isWide(stack[sp - 1]) && isWide(stack[sp - 2])) {
                         Object v1 = stack[sp - 1];
                         Object v2 = stack[sp - 2];
@@ -226,7 +214,7 @@ public final class UmbraVM {
                     }
                     break;
                 }
-                case 95: { // SWAP
+                case 95: {
                     Object value = stack[sp - 1];
                     stack[sp - 1] = stack[sp - 2];
                     stack[sp - 2] = value;
@@ -268,7 +256,7 @@ public final class UmbraVM {
                 case 129: stack[sp - 2] = boxL(l(stack[sp - 2]) | l(stack[sp - 1])); sp--; break;
                 case 130: stack[sp - 2] = boxI(i(stack[sp - 2]) ^ i(stack[sp - 1])); sp--; break;
                 case 131: stack[sp - 2] = boxL(l(stack[sp - 2]) ^ l(stack[sp - 1])); sp--; break;
-                case 132: { // IINC
+                case 132: {
                     int slot = code[pc++];
                     int delta = code[pc++];
                     locals[slot] = boxI(i(locals[slot]) + delta);
@@ -290,28 +278,28 @@ public final class UmbraVM {
                 case 146: stack[sp - 1] = boxI((char) i(stack[sp - 1])); break;
                 case 147: stack[sp - 1] = boxI((short) i(stack[sp - 1])); break;
                 case 148: stack[sp - 2] = boxI(Long.compare(l(stack[sp - 2]), l(stack[sp - 1]))); sp--; break;
-                case 149: { // FCMPL: NaN -> -1
+                case 149: {
                     float a = f(stack[sp - 2]);
                     float b = f(stack[sp - 1]);
                     stack[sp - 2] = boxI(Float.isNaN(a) || Float.isNaN(b) ? -1 : (a == b ? 0 : (a < b ? -1 : 1)));
                     sp--;
                     break;
                 }
-                case 150: { // FCMPG: NaN -> 1
+                case 150: {
                     float a = f(stack[sp - 2]);
                     float b = f(stack[sp - 1]);
                     stack[sp - 2] = boxI(Float.isNaN(a) || Float.isNaN(b) ? 1 : (a == b ? 0 : (a < b ? -1 : 1)));
                     sp--;
                     break;
                 }
-                case 151: { // DCMPL: NaN -> -1
+                case 151: {
                     double a = d(stack[sp - 2]);
                     double b = d(stack[sp - 1]);
                     stack[sp - 2] = boxI(Double.isNaN(a) || Double.isNaN(b) ? -1 : (a == b ? 0 : (a < b ? -1 : 1)));
                     sp--;
                     break;
                 }
-                case 152: { // DCMPG: NaN -> 1
+                case 152: {
                     double a = d(stack[sp - 2]);
                     double b = d(stack[sp - 1]);
                     stack[sp - 2] = boxI(Double.isNaN(a) || Double.isNaN(b) ? 1 : (a == b ? 0 : (a < b ? -1 : 1)));
@@ -333,7 +321,7 @@ public final class UmbraVM {
                 case 165: { Object b = stack[--sp]; Object a = stack[--sp]; if (a == b) pc = code[pc]; else pc++; break; }
                 case 166: { Object b = stack[--sp]; Object a = stack[--sp]; if (a != b) pc = code[pc]; else pc++; break; }
                 case 167: pc = code[pc]; break;
-                case 170: { // TABLESWITCH
+                case 170: {
                     int defaultPc = code[pc++];
                     int low = code[pc++];
                     int high = code[pc++];
@@ -345,7 +333,7 @@ public final class UmbraVM {
                     }
                     break;
                 }
-                case 171: { // LOOKUPSWITCH
+                case 171: {
                     int defaultPc = code[pc++];
                     int pairs = code[pc++];
                     int key = i(stack[--sp]);
@@ -361,22 +349,22 @@ public final class UmbraVM {
                     pc = target;
                     break;
                 }
-                case 172: case 173: case 174: case 175: case 176: // xRETURN
+                case 172: case 173: case 174: case 175: case 176:
                     return stack[--sp];
-                case 177: // RETURN
+                case 177:
                     return null;
-                case 178: // GETSTATIC
+                case 178:
                     stack[sp++] = fieldValue(refs[code[pc++]], null);
                     break;
-                case 179: // PUTSTATIC
+                case 179:
                     setField(refs[code[pc++]], null, stack[--sp]);
                     break;
-                case 180: { // GETFIELD
+                case 180: {
                     Object receiver = stack[--sp];
                     stack[sp++] = fieldValue(refs[code[pc++]], receiver);
                     break;
                 }
-                case 181: { // PUTFIELD
+                case 181: {
                     Object value = stack[--sp];
                     Object receiver = stack[--sp];
                     setField(refs[code[pc++]], receiver, value);
@@ -387,29 +375,29 @@ public final class UmbraVM {
                     break;
                 case 187:
                     throw new IllegalStateException("NEW is not supported by the Umbra VM");
-                case 188: { // NEWARRAY
+                case 188: {
                     int type = code[pc++];
                     int length = i(stack[--sp]);
                     stack[sp++] = newArray(type, length);
                     break;
                 }
-                case 189: { // ANEWARRAY
+                case 189: {
                     String desc = typeDescriptor(refs[code[pc++]]);
                     int length = i(stack[--sp]);
                     stack[sp++] = Array.newInstance(type(desc), length);
                     break;
                 }
-                case 190: { // ARRAYLENGTH
+                case 190: {
                     Object array = stack[sp - 1];
                     stack[sp - 1] = boxI(Array.getLength(array));
                     break;
                 }
-                case 191: { // ATHROW
+                case 191: {
                     Throwable throwable = (Throwable) stack[--sp];
                     sneakyThrow(throwable);
                     break;
                 }
-                case 192: { // CHECKCAST
+                case 192: {
                     String desc = typeDescriptor(refs[code[pc++]]);
                     Object value = stack[sp - 1];
                     if (value != null && !type(desc).isInstance(value)) {
@@ -417,7 +405,7 @@ public final class UmbraVM {
                     }
                     break;
                 }
-                case 193: { // INSTANCEOF
+                case 193: {
                     String desc = typeDescriptor(refs[code[pc++]]);
                     Object value = stack[--sp];
                     stack[sp++] = boxI(type(desc).isInstance(value) ? 1 : 0);
@@ -426,7 +414,7 @@ public final class UmbraVM {
                 case 194:
                 case 195:
                     throw new IllegalStateException("monitor instructions are not supported by the Umbra VM");
-                case 197: { // MULTIANEWARRAY
+                case 197: {
                     String desc = typeDescriptor(refs[code[pc++]]);
                     int dims = code[pc++];
                     int[] sizes = new int[dims];
@@ -436,11 +424,11 @@ public final class UmbraVM {
                     stack[sp++] = Array.newInstance(elementType(desc), sizes);
                     break;
                 }
-                case 198: { // IFNULL
+                case 198: {
                     if (stack[--sp] == null) pc = code[pc]; else pc++;
                     break;
                 }
-                case 199: { // IFNONNULL
+                case 199: {
                     if (stack[--sp] != null) pc = code[pc]; else pc++;
                     break;
                 }
@@ -464,9 +452,7 @@ public final class UmbraVM {
             args[i] = coerce(types[i], stack[--base]);
         }
         Object receiver = op == 184 ? null : stack[--base];
-        // Array clone() is a JVM intrinsic, not a reflectively invokable method:
-        // on JDK 9+ Object.clone is inaccessible from an unnamed module, so it
-        // is emulated with an explicit copy.
+
         if (receiver != null && receiver.getClass().isArray() && "clone".equals(name)
                 && types.length == 0) {
             Object copy = arrayClone(receiver);
@@ -500,8 +486,7 @@ public final class UmbraVM {
         Class<?>[] parameters = parameterTypes(desc);
         try {
             if (op == 182 || op == 185) {
-                // Use the static owner type so reflection keeps normal virtual
-                // dispatch, and so non-public implementation classes work.
+
                 method = owner.getMethod(name, parameters);
             } else {
                 method = findDeclared(owner, name, parameters);
@@ -522,7 +507,7 @@ public final class UmbraVM {
             try {
                 return current.getDeclaredMethod(name, parameters);
             } catch (NoSuchMethodException ignored) {
-                // continue
+
             }
             Method fromInterface = findInInterfaces(current, name, parameters);
             if (fromInterface != null) {
@@ -537,7 +522,7 @@ public final class UmbraVM {
             try {
                 return itf.getDeclaredMethod(name, parameters);
             } catch (NoSuchMethodException ignored) {
-                // continue
+
             }
             Method nested = findInInterfaces(itf, name, parameters);
             if (nested != null) {
@@ -569,13 +554,6 @@ public final class UmbraVM {
         }
     }
 
-    /**
-     * Converts a stack value to the parameter type of a reflective call.
-     *
-     * <p>Values can be boxed as {@code Boolean}, {@code Character} or any
-     * {@code Number}; a plain {@code (Number)} cast is therefore wrong and used
-     * to abort with {@code ClassCastException} inside virtualized code.</p>
-     */
     private static Object coerce(Class<?> target, Object value) {
         if (target == boolean.class) {
             if (value instanceof Boolean) {
@@ -607,7 +585,6 @@ public final class UmbraVM {
         return value;
     }
 
-    /** Unboxes any numeric/boolean/character representation to an int. */
     private static int asInt(Object value) {
         if (value instanceof Boolean) {
             return ((Boolean) value).booleanValue() ? 1 : 0;
@@ -707,7 +684,7 @@ public final class UmbraVM {
                     field = current.getDeclaredField(name);
                     break;
                 } catch (NoSuchFieldException ignored) {
-                    // continue
+
                 }
             }
             if (field == null) {
@@ -729,7 +706,7 @@ public final class UmbraVM {
             try {
                 return itf.getDeclaredField(name);
             } catch (NoSuchFieldException ignored) {
-                // continue
+
             }
             Field nested = findInterfaceField(itf, name);
             if (nested != null) {
@@ -774,15 +751,10 @@ public final class UmbraVM {
         try {
             object.setAccessible(true);
         } catch (RuntimeException ignored) {
-            // Public members in exported packages remain callable without it.
+
         }
     }
 
-    /**
-     * Loads a class through the context loader first (nested JAR/WAR containers
-     * install their own loader there), then the helper's loader and the system
-     * loader. See the equivalent helper in {@code UmbraVM2}.
-     */
     private static Class<?> forName(String dottedName) throws ClassNotFoundException {
         ClassNotFoundException failure = null;
         ClassLoader context = null;
@@ -895,7 +867,6 @@ public final class UmbraVM {
         }
     }
 
-    /** Emulates the JVM's array clone intrinsic (also works on JDK 9+). */
     private static Object arrayClone(Object array) {
         int length = Array.getLength(array);
         Object copy = Array.newInstance(array.getClass().getComponentType(), length);
@@ -945,13 +916,6 @@ public final class UmbraVM {
         return value instanceof Long || value instanceof Double;
     }
 
-    /*
-     * The interpreter represents JVM boolean values as Integer 0/1 (JVM stack
-     * convention). Older payloads and reflection results may still hand us a
-     * java.lang.Boolean or java.lang.Character, so every numeric unboxing path
-     * must accept those boxed types as well; a bare (Number) cast aborts with
-     * ClassCastException inside virtualized code.
-     */
     private static int i(Object value) {
         if (value instanceof Boolean) {
             return ((Boolean) value).booleanValue() ? 1 : 0;

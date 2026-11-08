@@ -29,74 +29,36 @@ import io.umbra.core.jni.JniNames;
  */
 public final class GuardCodeGenerator {
 
-    /** Signature of the token native method. */
     public static final String NATIVE_INIT_DESCRIPTOR =
             "(IJLjava/lang/String;Ljava/lang/String;Ljava/lang/String;)I";
 
-    /** Number of randomized code-section samples compared at runtime. */
     public static final int CODE_SAMPLE_COUNT = 12;
-    /** Bytes compared per code-section sample. */
+
     public static final int CODE_SAMPLE_WINDOW = 8;
 
     private GuardCodeGenerator() {
     }
 
-    /** JNI export symbol of a guard native method. */
     public static String exportSymbol(String guardClassInternalName, String method) {
         return JniNames.shortName(guardClassInternalName, method);
     }
 
-    /**
-     * Generates the guard translation unit with the classic 3.0 feature set.
-     *
-     * @param guardClassInternalName internal name of the injected guard class
-     * @param secret                 keyed token secret (same value embeds in Java)
-     * @param fridaEnabled           enable Frida/instrumentation checks
-     * @param hashEnabled            enable self-file-hash checks
-     */
     public static String generate(String guardClassInternalName, long secret,
                                   boolean fridaEnabled, boolean hashEnabled) {
         return generate(guardClassInternalName, secret,
                 GuardFeatures.legacy(fridaEnabled, hashEnabled), null);
     }
 
-    /**
-     * Generates the guard translation unit (Umbra 3.1 dynamic protection).
-     *
-     * @param guardClassInternalName internal name of the injected guard class
-     * @param secret                 keyed token secret (same value embeds in Java)
-     * @param features               enabled dynamic checks
-     * @param codeSamples            randomized code-section samples computed from
-     *                               the compiled library (may be {@code null})
-     */
     public static String generate(String guardClassInternalName, long secret,
                                   GuardFeatures features) {
         return generate(guardClassInternalName, secret, features, null);
     }
 
-    /**
-     * Generates the guard translation unit; the code-sample parameter is kept for
-     * source compatibility only. The sample table is patched into the compiled
-     * library by {@link PeImage#withCodeSamples} (single compile, no layout drift).
-     */
     public static String generate(String guardClassInternalName, long secret,
                                   GuardFeatures features, PeImage.CodeSample[] codeSamples) {
         return generate(guardClassInternalName, secret, features, codeSamples, null);
     }
 
-    /**
-     * Generates the guard translation unit and, when {@code otpClass} is not
-     * {@code null}, also binds a native one-time-state advance
-     * ({@code nativeNext(J)J}) to the injected OTP class.
-     *
-     * <p>The advance runs in native code, so the state transition is not a plain
-     * Java xorshift a patcher can reimplement. The binding is a second
-     * {@code RegisterNatives} call in {@code JNI_OnLoad}, and the OTP class name
-     * is encoded exactly like the guard class name (no plaintext symbol). The
-     * extra entry point is deliberately kept out of the magic-located function
-     * table: that table drives the prologue hashes, so growing it would change
-     * every existing guard's expected prologues.</p>
-     */
     public static String generate(String guardClassInternalName, long secret,
                                   GuardFeatures features, PeImage.CodeSample[] codeSamples,
                                   String otpClass) {
@@ -146,6 +108,8 @@ public final class GuardCodeGenerator {
         out.append("#define UMBRA_DETECT_LINUX ").append(GuardOptions.DETECT_LINUX).append("\n");
         out.append("#define UMBRA_DETECT_CODE_CRC ").append(GuardOptions.DETECT_CODE_CRC).append("\n");
         out.append("#define UMBRA_DETECT_PAGE_GUARD ").append(GuardOptions.DETECT_PAGE_GUARD).append("\n");
+        out.append("#define UMBRA_DETECT_TEXT_RWX ").append(GuardOptions.DETECT_TEXT_RWX).append("\n");
+        out.append("#define UMBRA_DETECT_GUARD_PROBE ").append(GuardOptions.DETECT_GUARD_PROBE).append("\n");
         out.append("\n");
         out.append("static JavaVM* g_vm;\n");
         out.append("static jclass g_guard_class;\n");
@@ -161,6 +125,8 @@ public final class GuardCodeGenerator {
         out.append("static int g_hash_check = ").append(active.hash ? 1 : 0).append(";\n");
         out.append("static int g_initialized;\n");
         out.append("static volatile long g_last_mask;\n");
+
+        out.append("static volatile int g_action;\n");
 
         out.append('\n');
 
@@ -231,8 +197,7 @@ public final class GuardCodeGenerator {
         out.append("    if ((*g_vm)->GetEnv(g_vm, (void**)&env, JNI_VERSION_1_6) != JNI_OK || env == NULL) return;\n");
         out.append("    (*env)->CallStaticVoidMethod(env, g_guard_class, g_on_detect, (jint)mask);\n");
         out.append("}\n\n");
-        // The body is rendered first: the sealed-literal pool only emits the
-        // literals the body actually references, and it has to precede them.
+
         GuardLiterals literals = new GuardLiterals(secret, active.execWhitelist);
         GuardImports imports = new GuardImports(literals);
         StringBuilder body = new StringBuilder(1 << 14);
@@ -261,10 +226,6 @@ public final class GuardCodeGenerator {
         out.append('\n').append(body);
         return out.toString();
     }
-
-    // ------------------------------------------------------------------
-    // Windows detection code
-    // ------------------------------------------------------------------
 
     private static void appendWindowsChecks(StringBuilder out, GuardLiterals literals,
                                             GuardImports imports) {
@@ -424,9 +385,7 @@ public final class GuardCodeGenerator {
         out.append("            if (umbra_lower_contains(entry.szModule, ").append(literals.ref("jdwp")).append(")\n");
         out.append("                    || umbra_lower_contains(entry.szModule, ").append(literals.ref("dt_socket")).append(")\n");
         out.append("                    || umbra_lower_contains(entry.szModule, ").append(literals.ref("dt_shmem")).append(")\n");
-        // Dynamic JDK attach (VirtualMachine.attach + loadAgent) loads attach.dll
-        // into the target; an in-process -javaagent loads instrument.dll. Neither
-        // module is present in a normal application JVM.
+
         out.append("                    || umbra_lower_contains(entry.szModule, ").append(literals.ref("attach.dll")).append(")\n");
         out.append("                    || umbra_lower_contains(entry.szModule, ").append(literals.ref("instrument.dll")).append(")) { found = 1; break; }\n");
         out.append("        } while (Module32Next(snapshot, &entry));\n");
@@ -595,14 +554,6 @@ public final class GuardCodeGenerator {
         out.append("}\n");
     }
 
-    // ------------------------------------------------------------------
-    // Portable (non-Windows) stub: keeps the library loadable, no checks
-    // ------------------------------------------------------------------
-
-    // ------------------------------------------------------------------
-    // Self-integrity
-    // ------------------------------------------------------------------
-
     private static void appendIntegrity(StringBuilder out, String checkSymbol, String tokenSymbol) {
         out.append("static unsigned long long umbra_hash_file(const char* path) {\n");
         out.append("    unsigned long long hash = 0xcbf29ce484222325ULL;\n");
@@ -650,16 +601,12 @@ public final class GuardCodeGenerator {
         out.append("}\n\n");
     }
 
-    /** Forward declarations: the self-test compares these entry points' prologues. */
     private static void appendNativeDeclarations(StringBuilder out) {
         out.append("static jint JNICALL umbra_native_init(JNIEnv*, jclass, jint, jlong, jstring, jstring, jstring);\n");
         out.append("static jint JNICALL umbra_native_check(JNIEnv*, jclass);\n");
         out.append("static jint JNICALL umbra_native_self(JNIEnv*, jclass);\n");
         out.append("static jlong JNICALL umbra_native_token(JNIEnv*, jclass, jint);\n\n");
     }
-    // ------------------------------------------------------------------
-    // JNI methods, tick and JNI_OnLoad
-    // ------------------------------------------------------------------
 
     private static void appendNativeMethods(StringBuilder out, String initSymbol, String checkSymbol,
                                             String selfTestSymbol, String tokenSymbol,
@@ -668,7 +615,7 @@ public final class GuardCodeGenerator {
                 .append("(JNIEnv* env, jclass cls, jint action, jlong secret,\n");
         out.append("        jstring hash_hex, jstring prologue_check_hex, jstring prologue_token_hex) {\n");
         out.append("    const char* text;\n");
-        out.append("    (void)action;\n");
+        out.append("    g_action = (int)action;\n");
         out.append("    g_secret = (unsigned long long)secret;\n");
         out.append("    if (g_guard_class == NULL) g_guard_class = (jclass)(*env)->NewGlobalRef(env, cls);\n");
         out.append("    if (g_on_detect == NULL) {\n");
@@ -744,19 +691,20 @@ public final class GuardCodeGenerator {
         out.append("    if (mask != 0) {\n");
         out.append("        g_last_mask = mask;\n");
         out.append("        umbra_notify(mask);\n");
-        out.append("        return 1;\n");
+        out.append("        /* corrupt: silently poison the result of every translated method\n");
+        out.append("           (the caller returns a zero/NULL default); any other action lets\n");
+        out.append("           the Java guard's exception or halt take effect. */\n");
+        out.append("        return g_action == 3 ? 1 : 0;\n");
         out.append("    }\n");
         out.append("    return 0;\n");
         out.append("}\n\n");
     }
 
-    /** XOR key for the encoded class-name literals (no plaintext class name in the PE). */
     private static int classNameKey(long secret) {
         int key = (int) ((secret >>> 8) & 0xFF);
         return key == 0 ? 0x5A : key;
     }
 
-    /** Emits a helper that decodes and resolves a class name via FindClass. */
     private static void appendClassNameLookup(StringBuilder out, String functionName,
                                               String internalName, int key) {
         byte[] encoded = new byte[internalName.length()];
@@ -783,11 +731,7 @@ public final class GuardCodeGenerator {
         out.append("    return 0;\n");
         out.append("}\n\n");
     }
-    /**
-     * Emits a magic-located table of the native entry points. The protection pass
-     * reads the function addresses from the compiled image (via the table magic)
-     * to compute the expected prologue bytes without needing PE export symbols.
-     */
+
     private static void appendFunctionTable(StringBuilder out, long secret, String initSymbol,
                                             String checkSymbol, String selfTestSymbol,
                                             String tokenSymbol) {
@@ -801,14 +745,6 @@ public final class GuardCodeGenerator {
         out.append("};\n\n");
     }
 
-    /**
-     * Emits the native one-time-state advance consumed by the injected OTP class.
-     *
-     * <p>The mix mirrors the Java fallback (xorshift64) but folds in the
-     * per-build secret, so the native state sequence is specific to this artifact
-     * and cannot be replayed from a sample build. A zero result is remapped to a
-     * fixed non-zero value, because zero is a xorshift fixed point.</p>
-     */
     private static void appendOtpNative(StringBuilder out) {
         out.append("static jlong JNICALL umbra_native_otp(JNIEnv* env, jclass cls, jlong state) {\n");
         out.append("    unsigned long long value = (unsigned long long)state;\n");
@@ -823,11 +759,6 @@ public final class GuardCodeGenerator {
         out.append("}\n\n");
     }
 
-    /**
-     * Emits {@code JNI_OnLoad}: the only JNI export. The four guard methods (and
-     * the test hooks when enabled) are bound with {@code RegisterNatives}, so the
-     * PE export table exposes no plaintext {@code Java_*} symbols.
-     */
     private static void appendOnLoad(StringBuilder out, String guardClassInternalName, long secret,
                                      GuardFeatures features, String initSymbol, String checkSymbol,
                                      String selfTestSymbol, String tokenSymbol, String otpClass) {
@@ -894,16 +825,16 @@ public final class GuardCodeGenerator {
         out.append("}\n");
     }
 
-    /** RegisterNatives binding for the test-only hook class (never in production). */
     private static void appendHookRegistration(StringBuilder out, String hookClassInternalName,
                                                int key) {
         appendClassNameLookup(out, "umbra_find_hooks", hookClassInternalName, key);
         String[] names = {"testAllocExec", "testRemoteThread", "testPatchSample", "testAgeTiming",
                 "testSampleMismatch", "testSampleCount", "testReadByte", "testQuick", "testDeep",
                 "testExecScan", "testRemoteScan", "testPatchCode", "testCodeCrc", "testTamperPage",
-                "testPageRotation", "testSealAligned"};
+                "testPageRotation", "testSealAligned", "testTextGuard", "testTamperText",
+                "testGuardProbe", "testTamperProbe", "testCodeSegments"};
         String[] signatures = {"()J", "()I", "()I", "(J)I", "()I", "()I", "(I)I", "()I", "()I",
-                "()I", "()I", "()I", "()I", "()I", "()I", "()I"};
+                "()I", "()I", "()I", "()I", "()I", "()I", "()I", "()I", "()I", "()I", "()I", "()I"};
         out.append("static int umbra_register_hooks(JNIEnv* env) {\n");
         out.append("    jclass cls;\n");
         out.append("    JNINativeMethod methods[").append(names.length).append("];\n");
@@ -925,10 +856,6 @@ public final class GuardCodeGenerator {
         out.append("}\n\n");
     }
 
-    /**
-     * FNV-1a over the little-endian secret^salt: 64-bit magic that identifies the
-     * post-link-patched data structures without a PE export symbol.
-     */
     private static long magic(long secret, long salt) {
         long hash = 0xcbf29ce484222325L;
         long value = secret ^ salt;
@@ -939,12 +866,10 @@ public final class GuardCodeGenerator {
         return hash;
     }
 
-    /** Magic of the randomized code-sample table inside the compiled guard. */
     public static long sampleMagic(long secret) {
         return magic(secret, 0x53414D504C454D41L);
     }
 
-    /** Magic of the native entry-point pointer table inside the compiled guard. */
     public static long functionTableMagic(long secret) {
         return magic(secret, 0x464E54424C4D4147L);
     }
@@ -965,4 +890,3 @@ public final class GuardCodeGenerator {
         return out.toString();
     }
 }
-

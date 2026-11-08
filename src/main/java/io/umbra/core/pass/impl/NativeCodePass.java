@@ -11,6 +11,7 @@ import io.umbra.core.runtime.TemplateInjector;
 import io.umbra.core.runtime.UmbraNativeLoader;
 import io.umbra.core.runtime.crypto.GuardSupport;
 import io.umbra.core.util.AsmUtil;
+import io.umbra.core.util.Log;
 import io.umbra.core.util.NameGenerator;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
@@ -34,7 +35,9 @@ import org.objectweb.asm.tree.TypeAnnotationNode;
 import java.io.IOException;
 import java.security.MessageDigest;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -68,7 +71,7 @@ import io.umbra.core.util.RuntimeNames;
  */
 public final class NativeCodePass implements Pass {
 
-    private static final long ZIP_TIME = 315532800000L; // 1980-01-01
+    private static final long ZIP_TIME = 315532800000L;
     private static final int MAX_LOGGED_COMPILER_OUTPUT = 8000;
 
     @Override
@@ -78,7 +81,7 @@ public final class NativeCodePass implements Pass {
 
     @Override
     public int order() {
-        return 105;
+        return 106;
     }
 
     @Override
@@ -100,6 +103,7 @@ public final class NativeCodePass implements Pass {
                 context.log().warn("native-code: JNI headers of the running JDK were not found; keeping Java methods");
             }
             context.stats().add("native.fallback", 1);
+            context.stats().text("native.fallbackReason", "native toolchain unavailable");
             failIfNotAtomic(context, settings, "native toolchain unavailable");
             return;
         }
@@ -117,10 +121,11 @@ public final class NativeCodePass implements Pass {
         List<ConstructorRewrite> rewrites = new ArrayList<ConstructorRewrite>();
         List<AddedMethod> addedMethods = new ArrayList<AddedMethod>();
         try {
-            tempDirectory = Files.createTempDirectory("umbra-native");
+
+            cleanupStaleNativeTemp(context.log());
+            tempDirectory = Files.createTempDirectory(NativeCompiler.randomToken());
             CGenerator generator = new CGenerator();
-            // Per-build key of the encrypted name/descriptor pool, so a dumped
-            // library does not share the literal keystream with the next build.
+
             generator.configureLiteralKey(context.random().nextLong());
             boolean antiDump = settings.antiDump();
             boolean antiBackfill = settings.antiBackfill();
@@ -164,9 +169,7 @@ public final class NativeCodePass implements Pass {
                         generator.addMethod(generated);
                         work.translated.add(generated);
                         work.translatedNames.add(method.name + method.desc);
-                        // The generator groups bindings by owner in first-appearance
-                        // order, so the id assigned here is the id the registration
-                        // dispatcher expects.
+
                         if (!ownerIds.containsKey(work.node.name)) {
                             ownerIds.put(work.node.name, Integer.valueOf(ownerIds.size()));
                         }
@@ -187,8 +190,7 @@ public final class NativeCodePass implements Pass {
                 }
                 translatedMethods += work.translated.size();
             }
-            // Constructor bodies whose extracted helper could not be translated get
-            // their original Java body back (graceful fallback).
+
             int constructorBodies = 0;
             for (ConstructorRewrite rewrite : rewrites) {
                 if (rewrite.work.translatedNames.contains(rewrite.helper.name + rewrite.helper.desc)) {
@@ -205,46 +207,61 @@ public final class NativeCodePass implements Pass {
                 return;
             }
 
-            // The loader has to exist before the C source is generated because the
-            // keyed-challenge JNI symbol is derived from its (random) class name.
-            // The fingerprint is only known after compilation, so the loader is
-            // injected with zero placeholders and patched in place afterwards;
-            // any failure before the output is committed removes it again.
             Map<String, String> replacements = new LinkedHashMap<String, String>();
-            replacements.put("@@RESOURCE@@", resourceName);
+
+            replacements.put("@@CODELIB@@", resourceName);
             replacements.put("@@ANTIDUMP@@", String.valueOf(antiDump));
             replacements.put("@@ANTIBACKFILL@@", String.valueOf(antiBackfill));
             replacements.put("@@AKEY@@", hex16(antiDumpKey));
             replacements.put("@@FP0@@", "000000000000000000000000");
             replacements.put("@@FP1@@", "00000000000000000000");
             replacements.put("@@FP2@@", "00000000000000000000");
-            loaderName = TemplateInjector.inject(context.classes(), UmbraNativeLoader.class,
-                    RuntimeNames.path("N"), context.config().seed(), replacements);
-            loaderInjected = true;
+
+            String sharedLoader = context.classes().getMeta("native.loader");
+            if (sharedLoader != null && !sharedLoader.isEmpty()) {
+                loaderName = sharedLoader;
+                loaderInjected = false;
+            } else {
+                context.log().warn("native-code: native.loader missing; injecting a second loader");
+                loaderName = TemplateInjector.inject(context.classes(), UmbraNativeLoader.class,
+                        RuntimeNames.path("N"), context.config().seed(), replacements);
+                loaderInjected = true;
+            }
             if (antiDump || antiBackfill) {
                 generator.configureAntiDump(loaderName, antiDumpKey, antiBackfill);
             }
-            // Registration is always needed: without it the business classes have no
-            // way to bind their natives (nothing is exported any more).
+
             generator.configureRegistration(loaderName);
 
             String sourceText = generator.finish();
+
+            if (!sourceText.contains("umbra_bind_loader(JNIEnv* env, jclass loader")
+                    || !sourceText.contains("const char* registerName")) {
+                throw new IllegalStateException("native-code: umbra_bind_loader lost its name parameters");
+            }
             Path sourceFile = tempDirectory.resolve("umbra_native.c");
-            Files.write(sourceFile, sourceText.getBytes(StandardCharsets.UTF_8));
+            Files.write(sourceFile, (NATIVE_SOURCE_MARKER + "\n" + sourceText)
+                    .getBytes(StandardCharsets.UTF_8));
             Path nativeDirectory = tempDirectory.resolve("out");
             Files.createDirectories(nativeDirectory);
             Path libraryFile = nativeDirectory.resolve("umbra_native" + librarySuffix(settings.target()));
             NativeCompiler.Result result = NativeCompiler.compile(compiler, sourceFile, libraryFile,
                     settings.target(), settings.compilerFlags(), context.log());
+
+            if (result.success()) {
+                deleteSourceWithRetry(sourceFile, context.log());
+            }
             context.stats().add("native.compile.ms", result.millis());
             if (!result.success()) {
-                context.log().warn("native-code: compilation failed with %s; keeping Java methods",
+                context.log().error("native-code: compilation failed with %s; keeping Java methods",
                         displayCommand(result));
                 String output = result.output();
                 if (output != null && !output.trim().isEmpty()) {
-                    context.log().warn("native-code: compiler output: %s", abbreviate(output));
+                    context.log().error("native-code: compiler output: %s", abbreviate(output));
                 }
                 context.stats().add("native.fallback", 1);
+                context.stats().add("native.compileFailed", 1);
+                context.stats().text("native.fallbackReason", "native compilation failed");
                 rollbackCoverage(rewrites, addedMethods);
                 failIfNotAtomic(context, settings, "native compilation failed");
                 return;
@@ -253,10 +270,6 @@ public final class NativeCodePass implements Pass {
             context.stats().add("native.compile", 1);
             context.stats().add("native.dll.bytes", libraryBytes.length);
 
-            // Anti-dump: embed the SHA-256 of the exact library bytes into the
-            // loader, so a dumped/rebuilt/patched resource is refused before
-            // System.load. The native side carries the matching keyed challenge
-            // and backfill table.
             if (antiDump) {
                 String fingerprint = sha256Hex(libraryBytes);
                 if (fingerprint == null || fingerprint.length() != 64) {
@@ -271,8 +284,7 @@ public final class NativeCodePass implements Pass {
 
             int convertedClasses = 0;
             int convertedMethods = 0;
-            // The loader hook reaches the injected loader through an indirect call site,
-            // so the program class carries no `invokestatic umbra/runtime/...`.
+
             String hookDispatch = GuardSupport.ensureGuardDispatch(context.classes(), loaderName);
             for (ClassWork work : classes) {
                 if (work.translated.isEmpty()) {
@@ -291,6 +303,8 @@ public final class NativeCodePass implements Pass {
             }
 
             context.classes().putResource(resourceName, libraryBytes, ZIP_TIME, 8);
+
+            context.classes().putMeta("native.codeLibrary", resourceName);
             if (settings.keepDll()) {
                 keepArtifacts(context, settings, sourceText, libraryBytes, result);
             }
@@ -320,6 +334,7 @@ public final class NativeCodePass implements Pass {
             }
             context.log().warn("native-code: I/O failure while generating the native library: %s", e);
             context.stats().add("native.fallback", 1);
+            context.stats().text("native.fallbackReason", "native generation failed");
             failIfNotAtomic(context, settings, "native generation failed");
         } catch (RuntimeException e) {
             rollbackCoverage(rewrites, addedMethods);
@@ -330,15 +345,16 @@ public final class NativeCodePass implements Pass {
         } finally {
             if (tempDirectory != null) {
                 deleteRecursively(tempDirectory);
+                if (Files.exists(tempDirectory)) {
+
+                    deleteRecursively(tempDirectory);
+                    context.log().warn("native-code: temp directory survived cleanup: %s",
+                            tempDirectory);
+                }
             }
         }
     }
 
-    // ------------------------------------------------------------------
-    // Coverage pre-transformations (constructors, invokedynamic bridges)
-    // ------------------------------------------------------------------
-
-    /** A synthetic method added to a class for the current pass run. */
     private static final class AddedMethod {
         final ClassNode owner;
         final MethodNode method;
@@ -349,7 +365,6 @@ public final class NativeCodePass implements Pass {
         }
     }
 
-    /** One extracted constructor body and the information needed to undo it. */
     private static final class ConstructorRewrite {
         final ClassWork work;
         final MethodNode constructor;
@@ -368,16 +383,6 @@ public final class NativeCodePass implements Pass {
         }
     }
 
-    /**
-     * Extracts the body after the mandatory {@code super()}/{@code this()} call
-     * of every constructor of one class into a private synthetic helper that can
-     * be translated to native code, and rewrites the constructor into
-     * "prologue + call helper". Conservative by design: constructors writing
-     * final fields, containing branches/switches/monitors or unusual prologues
-     * keep their Java body.
-     *
-     * @return number of successfully extracted constructor bodies
-     */
     private static int extractConstructorBodies(PassContext context, ClassWork work,
                                                 List<ConstructorRewrite> rewrites) {
         ClassNode owner = work.node;
@@ -428,7 +433,7 @@ public final class NativeCodePass implements Pass {
             if (call.getOpcode() == Opcodes.INVOKESPECIAL && "<init>".equals(call.name)
                     && (call.owner.equals(owner.superName) || call.owner.equals(owner.name))) {
                 if (initializerIndex >= 0) {
-                    return null; // more than one initializer call: unusual, keep Java
+                    return null;
                 }
                 initializerIndex = i;
             }
@@ -436,7 +441,7 @@ public final class NativeCodePass implements Pass {
         if (initializerIndex < 0) {
             return null;
         }
-        // The prologue has to be straight line: no branch may cross the split point.
+
         for (AbstractInsnNode insn : nodes) {
             int opcode = insn.getOpcode();
             if (opcode < 0) {
@@ -448,7 +453,7 @@ public final class NativeCodePass implements Pass {
                 return null;
             }
         }
-        // Exception handlers may only cover the extracted body.
+
         if (constructor.tryCatchBlocks != null) {
             for (org.objectweb.asm.tree.TryCatchBlockNode block : constructor.tryCatchBlocks) {
                 Integer start = labelIndex.get(block.start);
@@ -462,7 +467,7 @@ public final class NativeCodePass implements Pass {
                 }
             }
         }
-        // Final fields may only be assigned inside the declaring <init>.
+
         for (int i = initializerIndex + 1; i < nodes.size(); i++) {
             AbstractInsnNode insn = nodes.get(i);
             if (!(insn instanceof FieldInsnNode) || insn.getOpcode() != Opcodes.PUTFIELD) {
@@ -540,7 +545,6 @@ public final class NativeCodePass implements Pass {
         return new ConstructorRewrite(work, constructor, savedInstructions, savedTrys, helper);
     }
 
-    /** Picks a helper name that does not collide inside the owner class. */
     private static String uniqueHelperName(ClassNode owner) {
         int counter = 0;
         while (true) {
@@ -559,14 +563,12 @@ public final class NativeCodePass implements Pass {
         }
     }
 
-    /** Undoes one constructor extraction (helper is removed by the caller). */
     private static void revertConstructor(ConstructorRewrite rewrite) {
         rewrite.constructor.instructions = rewrite.savedInstructions;
         rewrite.constructor.tryCatchBlocks = rewrite.savedTrys;
         rewrite.work.node.methods.remove(rewrite.helper);
     }
 
-    /** Removes every coverage mutation of this run (compile/IO failure path). */
     private static void rollbackCoverage(List<ConstructorRewrite> rewrites,
                                          List<AddedMethod> addedMethods) {
         for (ConstructorRewrite rewrite : rewrites) {
@@ -577,7 +579,6 @@ public final class NativeCodePass implements Pass {
         }
     }
 
-    /** Deep-enough copy of a method: instructions with cloned labels plus handlers. */
     private static MethodNode copyMethod(MethodNode source) {
         MethodNode copy = new MethodNode(source.access, source.name, source.desc,
                 source.signature, source.exceptions == null ? null
@@ -606,7 +607,6 @@ public final class NativeCodePass implements Pass {
         return copy;
     }
 
-    /** True when the method (or its copy) still contains an invokedynamic. */
     private static boolean hasInvokeDynamic(MethodNode method) {
         for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null;
              insn = insn.getNext()) {
@@ -617,14 +617,6 @@ public final class NativeCodePass implements Pass {
         return false;
     }
 
-    /**
-     * Moves every invokedynamic of a method copy into a private static synthetic
-     * bridge in the same owner class and calls the bridge instead. This keeps
-     * lambda/string-concatenation semantics (the bootstrap still sees the owner
-     * class as lookup class) while making the method body translatable.
-     *
-     * @return number of bridges emitted
-     */
     private static int bridgeInvokeDynamic(ClassNode owner, MethodNode method,
                                            List<AddedMethod> addedMethods) {
         List<InvokeDynamicInsnNode> found = new ArrayList<InvokeDynamicInsnNode>();
@@ -677,7 +669,6 @@ public final class NativeCodePass implements Pass {
         }
     }
 
-    /** Drops the bridges of one failed translation. */
     private static void discardBridges(ClassNode owner, List<AddedMethod> bridges) {
         for (AddedMethod bridge : bridges) {
             bridge.owner.methods.remove(bridge.method);
@@ -695,10 +686,6 @@ public final class NativeCodePass implements Pass {
         }
         return count;
     }
-
-    // ------------------------------------------------------------------
-    // Selection
-    // ------------------------------------------------------------------
 
     private static final class ClassWork {
         final ClassNode node;
@@ -724,9 +711,7 @@ public final class NativeCodePass implements Pass {
             if (pool.isGenerated(name) || pool.isFrozen(name)) {
                 continue;
             }
-            // Umbra's injected runtime helpers (VM holders, guards, loaders,
-            // decryptors) are infrastructure: compiling them to native would
-            // explode the library and may break their own bootstrapping.
+
             if (RuntimeNames.isRuntime(name) || name.startsWith("umbra/")) {
                 continue;
             }
@@ -734,9 +719,7 @@ public final class NativeCodePass implements Pass {
                 continue;
             }
             if ((node.access & (Opcodes.ACC_INTERFACE | Opcodes.ACC_ANNOTATION | Opcodes.ACC_MODULE)) != 0) {
-                // Interface default/static methods can run without the interface
-                // being initialized, so the <clinit> load hook is not guaranteed to
-                // run before the native method. Keep them in Java.
+
                 continue;
             }
             if ("module-info".equals(node.name) || node.version < Opcodes.V1_6) {
@@ -782,10 +765,6 @@ public final class NativeCodePass implements Pass {
         return result;
     }
 
-    // ------------------------------------------------------------------
-    // Class rewriting
-    // ------------------------------------------------------------------
-
     private static void convertToNative(MethodNode method) {
         method.instructions.clear();
         if (method.tryCatchBlocks != null) {
@@ -796,8 +775,7 @@ public final class NativeCodePass implements Pass {
         }
         method.visibleLocalVariableAnnotations = null;
         method.invisibleLocalVariableAnnotations = null;
-        // Type annotations that point into the Code attribute would be written
-        // without a Code attribute and make the class unloadable.
+
         method.visibleTypeAnnotations = dropCodeTypeAnnotations(method.visibleTypeAnnotations);
         method.invisibleTypeAnnotations = dropCodeTypeAnnotations(method.invisibleTypeAnnotations);
         method.maxStack = 0;
@@ -822,16 +800,6 @@ public final class NativeCodePass implements Pass {
         return kept.isEmpty() ? null : kept;
     }
 
-    /**
-     * Prepends the native-library hook to a class's static initializer.
-     *
-     * <p>Two calls are inserted: {@code loader.ensureLoaded()} loads (and
-     * fingerprint-checks) the library once, and {@code loader.register(classId,
-     * Owner.class)} binds this class's native methods. Registering from the
-     * owning class's own {@code <clinit>} is what keeps initialization order
-     * identical to the unprotected program, because
-     * {@code RegisterNatives} initializes the class it registers for.</p>
-     */
     private static void addLoaderHook(ClassNode node, String loaderName, int classId,
                                       String dispatch) {
         MethodNode clinit = null;
@@ -849,8 +817,7 @@ public final class NativeCodePass implements Pass {
         hook.add(GuardSupport.indirectCall(dispatch, loaderName, "register",
                 "(ILjava/lang/Class;)I"));
         hook.add(new InsnNode(Opcodes.POP));
-        // register(int, Class) keeps the id and the class literal on the stack at the
-        // same time, so the initializer needs two stack slots.
+
         int hookStack = 2;
         if (clinit != null) {
             clinit.instructions.insert(hook);
@@ -865,22 +832,6 @@ public final class NativeCodePass implements Pass {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Helpers
-    // ------------------------------------------------------------------
-
-    /**
-     * Replaces placeholder tokens anywhere inside the string constants of an
-     * already injected loader template.
-     *
-     * <p>{@link TemplateInjector} only substitutes whole {@code LDC} constants,
-     * but javac constant-folds placeholders into surrounding literals (for
-     * example {@code "[Umbra] refused (" + RESOURCE + ")"} becomes one constant
-     * and {@code FINGERPRINT_0 + FINGERPRINT_1} is folded into a single string).
-     * This helper therefore substitutes substrings. It is used for the library
-     * fingerprint, which only exists after compilation, while the loader name
-     * has to exist before the C source is generated.</p>
-     */
     private static void patchLoaderConstants(ClassPool pool, String loaderInternalName,
                                              Map<String, String> replacements) {
         ClassNode loader = pool.getClass(loaderInternalName);
@@ -922,7 +873,6 @@ public final class NativeCodePass implements Pass {
         return result;
     }
 
-    /** Lower-case SHA-256 hex of the compiled library, or {@code null}. */
     private static String sha256Hex(byte[] data) {
         try {
             byte[] hash = MessageDigest.getInstance("SHA-256").digest(data);
@@ -941,7 +891,6 @@ public final class NativeCodePass implements Pass {
         }
     }
 
-    /** 16 lower-case hex digits of the per-program anti-dump key. */
     private static String hex16(long value) {
         String hex = Long.toHexString(value);
         StringBuilder out = new StringBuilder(16);
@@ -1018,6 +967,97 @@ public final class NativeCodePass implements Pass {
         return trimmed.substring(0, MAX_LOGGED_COMPILER_OUTPUT) + "... (truncated)";
     }
 
+    private static final String NATIVE_SOURCE_MARKER = "/* umbra-native generated source */";
+
+    private static final java.util.concurrent.atomic.AtomicBoolean SWEPT =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
+    private static final long STALE_NATIVE_AGE_MILLIS = 30L * 60L * 1000L;
+
+    private static String readFirstLine(Path file) {
+        try (java.io.BufferedReader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
+            String line = reader.readLine();
+            return line == null ? "" : line;
+        } catch (IOException failure) {
+            return "";
+        }
+    }
+    private static void deleteSourceWithRetry(Path source, Log log) {
+        if (source == null) {
+            return;
+        }
+        for (int attempt = 0; attempt < 3; attempt++) {
+            try {
+                Files.deleteIfExists(source);
+                if (!Files.exists(source)) {
+                    return;
+                }
+            } catch (IOException failure) {
+                log.warn("native-code: could not delete %s (attempt %d): %s", source,
+                        Integer.valueOf(attempt + 1), failure);
+            }
+            try {
+                Thread.sleep(50L);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        log.warn("native-code: generated C source is still on disk: %s", source);
+    }
+
+    private static void cleanupStaleNativeTemp(Log log) {
+
+        if (!SWEPT.compareAndSet(false, true)) {
+            return;
+        }
+        String tempRoot = System.getProperty("java.io.tmpdir");
+        if (tempRoot == null || tempRoot.isEmpty()) {
+            return;
+        }
+        Path root = Paths.get(tempRoot);
+        if (!Files.isDirectory(root)) {
+            return;
+        }
+        try (DirectoryStream<Path> entries = Files.newDirectoryStream(root)) {
+            for (Path entry : entries) {
+                if (Files.isRegularFile(entry) && entry.getFileName() != null
+                        && "umbra_native.c".equals(entry.getFileName().toString())) {
+                    try {
+                        Files.deleteIfExists(entry);
+                        log.info("native-code: removed stale native source %s", entry);
+                    } catch (IOException failure) {
+                        log.warn("native-code: could not remove %s: %s", entry, failure);
+                    }
+                    continue;
+                }
+                Path source = entry.resolve("umbra_native.c");
+                if (!Files.isRegularFile(source)) {
+                    continue;
+                }
+                try {
+                    long age = System.currentTimeMillis()
+                            - Files.getLastModifiedTime(source).toMillis();
+                    if (age < STALE_NATIVE_AGE_MILLIS) {
+
+                        continue;
+                    }
+                } catch (IOException failure) {
+                    continue;
+                }
+                try {
+
+                    deleteRecursively(entry);
+                    log.info("native-code: removed stale native temp %s", entry);
+                } catch (RuntimeException failure) {
+                    log.warn("native-code: could not remove %s: %s", entry, failure);
+                }
+            }
+        } catch (IOException failure) {
+            log.warn("native-code: could not scan the temp directory: %s", failure);
+        }
+    }
+
     private static void deleteRecursively(Path path) {
         try {
             if (!Files.exists(path)) {
@@ -1029,11 +1069,11 @@ public final class NativeCodePass implements Pass {
                         try {
                             Files.deleteIfExists(p);
                         } catch (IOException ignored) {
-                            // best effort
+
                         }
                     });
         } catch (IOException ignored) {
-            // best effort
+
         }
     }
 }

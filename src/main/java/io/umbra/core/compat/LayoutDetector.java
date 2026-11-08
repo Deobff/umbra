@@ -26,7 +26,6 @@ public final class LayoutDetector {
     private LayoutDetector() {
     }
 
-    /** Scans an open ZIP archive and returns the detected layout. */
     public static JarLayout detect(ZipFile zip, LayoutOptions options, List<String> warnings)
             throws IOException {
         LayoutOptions effective = options == null ? LayoutOptions.defaults() : options;
@@ -95,8 +94,7 @@ public final class LayoutDetector {
             multiReleaseAttribute = "true".equalsIgnoreCase(multiRelease == null ? "" : multiRelease.trim());
         }
         if (moduleInfo) {
-            // Detected through the case-insensitive scan above; cheap re-check for
-            // versioned-only module descriptors.
+
             moduleInfo = true;
         }
 
@@ -136,7 +134,7 @@ public final class LayoutDetector {
                         + "treating the archive as flat");
             }
             if (boot && hasWebXml && bootWar) {
-                // Expected for executable WARs; nothing to report.
+
             } else if (hasWebClasses && !boot) {
                 warnings.add("WEB-INF/classes detected (WAR layout)");
             }
@@ -150,7 +148,6 @@ public final class LayoutDetector {
                 nestedLibraries);
     }
 
-    /** Best-effort detection for pools assembled without {@code Jars.read}. */
     public static JarLayout detectFromPool(io.umbra.core.model.ClassPool pool, LayoutOptions options) {
         LayoutOptions effective = options == null ? LayoutOptions.defaults() : options;
         if (pool == null || !effective.enabled()) {
@@ -234,7 +231,6 @@ public final class LayoutDetector {
         }
     }
 
-    /** Reads the manifest text of an archive for inspection helpers. */
     public static String manifestText(byte[] manifest) {
         return manifest == null ? "" : new String(manifest, StandardCharsets.UTF_8);
     }

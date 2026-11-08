@@ -57,8 +57,7 @@ public final class TypedSetTest {
                 .renamer(new UmbraConfig.RenamerOptions(true, "", false, "", true, true, true,
                         "umbra-mapping.txt", "abcdefghijklmnopqrstuvwxyz", 1))
                 .flow(new UmbraConfig.FlowOptions(true, "light", 8000));
-        // Same two steps as the CLI: every --set key lands in the option map, then
-        // the typed keys are translated into the typed sections.
+
         for (Map.Entry<String, String> entry : sets.entrySet()) {
             builder.option(entry.getKey(), entry.getValue());
         }
@@ -75,19 +74,13 @@ public final class TypedSetTest {
                 "stringEncryption.minLength reaches stringEncryption().minLength()");
         check(config.antiLlm().decoyMethodsPerClass() == 7,
                 "antiLlm.decoyMethodsPerClass reaches antiLlm().decoyMethodsPerClass()");
-        // classEncryption has no typed section: the pass reads the option map, so
-        // the value must stay readable exactly as before.
+
         check(config.optionBool("classEncryption.enabled", false),
                 "classEncryption.enabled stays readable through optionBool()");
         check("false".equals(config.option("renamer.enabled", "")),
                 "the --set key itself stays in the option map");
     }
 
-    /**
-     * Regression guard for nocturne's exclusive mode: a configuration derived from
-     * a base whose option map still holds {@code flowObfuscation.*} must be able to
-     * switch the typed section off. A constructor-level override reopened it.
-     */
     private static void testDerivedConfigurationStaysStrict() throws Exception {
         UmbraConfig.Builder builder = baseBuilder()
                 .flow(new UmbraConfig.FlowOptions(true, "light", 8000));
@@ -159,8 +152,6 @@ public final class TypedSetTest {
             check(runIn(dir, javaBinary(), "-jar", kept.toString()).contains("OK"),
                     "jar protected with renaming disabled still runs and prints OK");
 
-            // Control case: without the option the renamer still runs, so the
-            // assertion above cannot pass for the wrong reason.
             Path renamed = dir.resolve("demo-default.jar");
             runIn(dir, javaBinary(), "-cp", absoluteClasspath(),
                     "io.umbra.cli.Main",
@@ -182,8 +173,7 @@ public final class TypedSetTest {
         Path demo = root.resolve("demo").resolve("demo.jar");
         Path dir = Files.createTempDirectory("umbra-typed-priority-");
         try {
-            // --set must beat the preset: maximum flattens every renamed class into
-            // one package, and the mapping file shows which package won.
+
             Path presetMapping = dir.resolve("preset-mapping.txt");
             runIn(dir, javaBinary(), "-cp", absoluteClasspath(), "io.umbra.cli.Main",
                     "-i", demo.toString(), "-o", dir.resolve("preset-only.jar").toString(),
@@ -205,7 +195,6 @@ public final class TypedSetTest {
                     "--set renamer.repackage=false overrides the maximum preset ("
                             + keptPackage + ")");
 
-            // --no-flow must beat --set, and --set must beat the default.
             String flowOn = runIn(dir, javaBinary(), "-cp", absoluteClasspath(),
                     "io.umbra.cli.Main", "-i", demo.toString(),
                     "-o", dir.resolve("flow-on.jar").toString(),
@@ -226,8 +215,6 @@ public final class TypedSetTest {
             check(!flowNoFlow.contains("flow-obfuscation"),
                     "--no-flow wins over --set flowObfuscation.enabled=true");
 
-            // The translation is CLI-only: a typed key inside a YAML options: block
-            // stays inert, while the YAML typed section still decides its value.
             Path inertJar = dir.resolve("options-inert.jar");
             Path inertYaml = dir.resolve("options-inert.yml");
             Files.write(inertYaml, ("input: " + slash(demo)
@@ -258,12 +245,10 @@ public final class TypedSetTest {
                 .output(Paths.get("out.jar"));
     }
 
-    /** Absolute path with forward slashes, safe inside a YAML scalar. */
     private static String slash(Path path) {
         return path.toAbsolutePath().toString().replace('\\', '/');
     }
 
-    /** The mapping line for {@code original}, or {@code null} when it is absent. */
     private static String mappingLine(Path mapping, String original) throws Exception {
         if (!Files.isRegularFile(mapping)) {
             return null;
@@ -310,7 +295,6 @@ public final class TypedSetTest {
         return Paths.get(System.getProperty("java.home"), "bin", "java").toString();
     }
 
-    /** Absolute classpath so subprocesses can run from a temp working directory. */
     private static String absoluteClasspath() {
         String raw = System.getProperty("java.class.path");
         StringBuilder result = new StringBuilder();
@@ -364,11 +348,11 @@ public final class TypedSetTest {
                         try {
                             Files.deleteIfExists(p);
                         } catch (Exception ignored) {
-                            // Best effort temp cleanup.
+
                         }
                     });
         } catch (Exception ignored) {
-            // Best effort temp cleanup.
+
         }
     }
 }

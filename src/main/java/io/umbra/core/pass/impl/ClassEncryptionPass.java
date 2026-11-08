@@ -8,6 +8,8 @@ import io.umbra.core.model.ClassPool;
 import io.umbra.core.runtime.TemplateInjector;
 import io.umbra.core.runtime.crypto.CryptoSupport;
 import io.umbra.core.runtime.crypto.GuardSupport;
+import io.umbra.core.runtime.crypto.NativeKeySupport;
+import io.umbra.core.runtime.crypto.UmbraCrypto;
 import io.umbra.core.runtime.crypto.UmbraClassLoader;
 import io.umbra.core.runtime.crypto.UmbraResourceConnection;
 import io.umbra.core.runtime.crypto.UmbraResourceHandler;
@@ -15,6 +17,7 @@ import io.umbra.core.runtime.crypto.UmbraWatchdog;
 import io.umbra.core.util.Cipher;
 import io.umbra.core.util.Jars;
 import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.MethodNode;
@@ -76,32 +79,35 @@ import io.umbra.core.util.RuntimeNames;
  */
 public final class ClassEncryptionPass implements Pass {
 
-    private static final long FIXED_TIME = 315532800000L; // 1980-01-01
+    private static final long FIXED_TIME = 315532800000L;
 
-    /** Internal names of compile-time templates remapped at injection time. */
+    private static final String LIBRARY_BOOTSTRAP_CLASS = "io/umbra/bootstrap/UmbraLibrary";
+
     private static final String LOADER_TEMPLATE = "io/umbra/core/runtime/crypto/UmbraClassLoader";
     private static final String HANDLER_TEMPLATE = "io/umbra/core/runtime/crypto/UmbraResourceHandler";
     private static final String CONNECTION_TEMPLATE = "io/umbra/core/runtime/crypto/UmbraResourceConnection";
 
     private static final int MAGIC = 0x554D4232;
-    /**
-     * Index format version. 4 adds the constant-pool flag; a loader built before
-     * that change rejects the archive with "Unsupported encrypted archive
-     * version" instead of misreading the flag.
-     */
-    private static final int INDEX_VERSION = 4;
+
+    private static final int INDEX_VERSION = 7;
     private static final int FLAG_INTEGRITY = 1;
     private static final int FLAG_ANTIDUMP = 2;
     private static final int FLAG_RESOURCE_INTEGRITY = 4;
-    /** Mirrored by {@code UmbraClassLoader}: encrypted {@code CONSTANT_Utf8} data. */
-    private static final int FLAG_CONSTANT_POOL = 32;
-    private static final int ALG_SHIFT = 3;
 
+    private static final int FLAG_CONSTANT_POOL = 32;
+
+    private static final int FLAG_NATIVE_ROOT = 64;
+
+    private static final int FLAG_NATIVE_GATE = 128;
+    private static final int ALG_SHIFT = 3;
 
     private static final int BINDING_SAMPLE = 0;
     private static final int BINDING_SEED = 1;
 
-    /** Assumed maximum entry count for the master-key binding. */
+    private static final int BINDING_NATIVE = 2;
+
+    private static final int BINDING_HOST = 3;
+
     private static final int MAX_ENTRIES = 1_000_000;
 
     @Override
@@ -124,20 +130,26 @@ public final class ClassEncryptionPass implements Pass {
         UmbraConfig config = context.config();
         ClassPool pool = context.classes();
 
-        // Eclipse runnable jars resolve classes through JarRsrcLoader, which builds
-        // a URLClassLoader over the archive; sealed payloads are not class files,
-        // so that loader cannot work with them.
         ClassPool.Resource archiveManifest = pool.resource("META-INF/MANIFEST.MF");
         if (archiveManifest != null && io.umbra.core.util.Jars
                 .parseManifest(archiveManifest.bytes()).get("Rsrc-Main-Class") != null) {
-            context.log().info("class-encryption: Eclipse runnable jar, archive left unencrypted");
+            skipOrFail(context, "the archive is an Eclipse runnable jar (Rsrc-Main-Class); its "
+                    + "JarRsrcLoader cannot start an encrypted archive");
             return;
         }
 
+        boolean libraryMode = config.optionBool("classEncryption.libraryMode", false);
         String[] entry = resolveEntryPoint(context);
+        if (entry == null && libraryMode) {
+
+            entry = new String[] { CryptoSupport.randomName(pool, config.seed(),
+                    "sealed-trampoline", RuntimeNames.path("T")), "main" };
+        }
         if (entry == null) {
-            context.log().warn("class-encryption: no entry point found (no Main-Class, no main(String[]) "
-                    + "and classEncryption.entry is not set); archive left unencrypted");
+
+            skipOrFail(context, "no entry point was found (no Main-Class, no "
+                    + "main(String[]) and classEncryption.entry is not set); a library jar "
+                    + "needs classEncryption.libraryMode=true");
             return;
         }
         String entryClass = entry[0];
@@ -149,8 +161,7 @@ public final class ClassEncryptionPass implements Pass {
             algorithm = Cipher.Algorithm.CHACHA20;
         }
         boolean integrity = config.optionBool("classEncryption.integrity", true);
-        // Encrypted archives always get per-class keyed digests: level 1 is not an
-        // acceptable default for a swapped payload (analysis finding P1-6).
+
         int level = integrity ? Math.max(2, integrityLevel(config)) : 0;
         boolean antiDump = config.optionBool("classEncryption.antiDump", true);
         String action = integrityAction(config);
@@ -161,16 +172,139 @@ public final class ClassEncryptionPass implements Pass {
         long watchdogMs = Math.max(1000L, config.optionLong("classEncryption.watchdogMs", 4000L));
         String bindingName = config.option("classEncryption.masterBinding", "sample").trim()
                 .toLowerCase(Locale.ROOT);
-        int binding = "seed".equals(bindingName) ? BINDING_SEED : BINDING_SAMPLE;
+        int requestedBinding = "seed".equals(bindingName) ? BINDING_SEED : BINDING_SAMPLE;
+
+        boolean nativeKey = config.optionBool("classEncryption.nativeKey", true);
+
+        boolean nativeKeyExplicit = config.options().containsKey("classEncryption.nativeKey");
+        boolean nativeFallbackExplicit =
+                config.options().containsKey("classEncryption.nativeKey.fallback");
+        boolean nativeFallback = config.optionBool("classEncryption.nativeKey.fallback", false);
+        byte[] nativeRoot = null;
+        String nativeLoaderName = null;
+        String nativeLibrary = null;
+        String nativeUnavailable = null;
+        if (nativeKey) {
+
+            nativeRoot = NativeKeySupport.keyRoot(context);
+
+            nativeLoaderName = NativeKeySupport.keyRootLoader(pool);
+            nativeLibrary = NativeKeySupport.nativeLibrary(pool, nativeLoaderName);
+            if (nativeRoot == null) {
+                nativeUnavailable = "the build has no key root context";
+            } else if (nativeLoaderName == null) {
+                nativeUnavailable = "the build has no native library (native pass disabled)";
+            } else if (nativeLibrary == null) {
+                nativeUnavailable = "the native library entry is missing from the archive";
+            } else if (!NativeKeySupport.declaresKeyRoot2(pool.getClass(nativeLoaderName))) {
+
+                throw new IllegalStateException("class-encryption: the injected native bridge "
+                        + "does not declare keyRoot2(int,int,byte[],byte[]) - it would answer "
+                        + "deriveKey()/keyRoot() for any caller; rebuild the bridge with the V14 "
+                        + "nonce protocol");
+            } else if (!NativeKeySupport.declaresKeyRoot(pool.getClass(nativeLoaderName))) {
+
+                nativeUnavailable = "the injected native loader does not declare keyRoot";
+            }
+        } else {
+            nativeUnavailable = "classEncryption.nativeKey=false";
+        }
+        boolean nativeBound = nativeUnavailable == null;
+
+        if (nativeBound) {
+            boolean shaForm = NativeKeySupport.declaresVerifyLoaderSha(pool.getClass(nativeLoaderName));
+            context.stats().text("classEncryption.loaderVerify",
+                    shaForm ? "sha(loader+bridge)" : "legacy(loader unverified)");
+            if (!shaForm) {
+                context.log().warn("class-encryption: the bridge has no verifyLoader(String,String); "
+                        + "the loader class will NOT be natively verified (runtime falls back and "
+                        + "prints ERROR)");
+            }
+        }
+
+        boolean hostKeyed = false;
+        if (libraryMode) {
+            String libraryKey = config.option("classEncryption.libraryKey", "").trim();
+            if (!libraryKey.isEmpty()) {
+                byte[] raw;
+                try {
+                    raw = java.util.Base64.getDecoder().decode(libraryKey);
+                } catch (IllegalArgumentException malformed) {
+                    raw = null;
+                }
+                if (raw == null || raw.length != UmbraCrypto.ROOT_BYTES) {
+                    throw new IllegalStateException("class-encryption: classEncryption.libraryKey must "
+                            + "be a Base64-encoded " + UmbraCrypto.ROOT_BYTES + "-byte key root");
+                }
+                nativeRoot = UmbraCrypto.nativeKeyRoot(raw, UmbraCrypto.ROOT_SLOT,
+                        UmbraCrypto.ROOT_SUB);
+                UmbraCrypto.wipe(raw);
+                if (nativeRoot == null) {
+                    throw new IllegalStateException("class-encryption: the host key root could not be "
+                            + "derived");
+                }
+                hostKeyed = true;
+            } else if (!nativeBound) {
+                throw new IllegalStateException("class-encryption: library mode needs an external key "
+                        + "root; without classEncryption.libraryKey or a native bridge the archive "
+                        + "would carry a seed that decrypts every class offline (set "
+                        + "classEncryption.libraryKey=<base64 32 bytes>)");
+            }
+        }
+
+        if (hostKeyed && !nativeBound) {
+            context.log().info("class-encryption: library mode binds the master key to the host "
+                    + "key root (no native bridge needed)");
+        }
+        if (libraryMode && hostKeyed) {
+
+            context.log().info("class-encryption: library mode uses the static flow table "
+                    + "tier (the host key root is not available to the runtime mask)");
+        }
+        if (nativeKey && !nativeBound && !hostKeyed) {
+
+            boolean fallbackAllowed = nativeFallbackExplicit && nativeFallback;
+            boolean fallbackRefused = nativeFallbackExplicit && !nativeFallback;
+            if (!fallbackAllowed && (nativeKeyExplicit || fallbackRefused)) {
+                throw new IllegalStateException("class-encryption: classEncryption.nativeKey=true but "
+                        + "the native key binding could not be established (" + nativeUnavailable
+                        + "); refusing to produce an archive whose native protection is silently "
+                        + "OFF (set classEncryption.nativeKey.fallback=true to accept the seed "
+                        + "fallback explicitly)");
+            }
+            if (!fallbackAllowed) {
+
+                context.log().warn("class-encryption: native key binding is OFF (%s); the archive "
+                        + "uses the embedded seed key and the native gate stays disabled. "
+                        + "Set classEncryption.nativeKey=false to silence this, or "
+                        + "classEncryption.nativeKey.fallback=true to accept the fallback.",
+                        nativeUnavailable);
+                context.stats().text("classEncryption.nativeKey", "fallback");
+                context.stats().add("classEncryption.nativeKeyFallback", 1);
+            } else {
+                context.log().warn("class-encryption: native key binding is OFF (%s); "
+                        + "classEncryption.nativeKey.fallback=true was set explicitly, so the "
+                        + "seed-bound master key and the single-key path are used (native gate OFF)",
+                        nativeUnavailable);
+                context.stats().text("classEncryption.nativeKey", "fallback");
+                context.stats().add("classEncryption.nativeKeyFallback", 1);
+            }
+        }
+        if (nativeBound && requestedBinding == BINDING_SEED) {
+            context.log().info("class-encryption: classEncryption.masterBinding=seed is superseded by "
+                    + "the native key root; the ZIP comment stays as the other half of the key");
+        }
+        int binding = hostKeyed ? BINDING_HOST
+                : (nativeBound ? BINDING_NATIVE : requestedBinding);
 
         Random random = new Random(config.seed() ^ 0x434C415353454E43L);
-        // Per-build randomness (not derived from the obfuscator seed): two builds of
-        // the same input must produce a different master key and different payloads.
+
         SecureRandom secure = new SecureRandom();
         byte[] siteSeed = new byte[32];
         secure.nextBytes(siteSeed);
         byte[] commentBytes = null;
-        if (binding == BINDING_SAMPLE) {
+        if (binding == BINDING_SAMPLE || binding == BINDING_NATIVE || binding == BINDING_HOST) {
+
             commentBytes = new byte[16];
             secure.nextBytes(commentBytes);
         }
@@ -183,8 +317,8 @@ public final class ClassEncryptionPass implements Pass {
         } else {
             loaderName = configuredLoader;
             if (pool.getClass(loaderName) != null) {
-                context.log().warn("class-encryption: classEncryption.loaderClass=%s already exists in the "
-                        + "input; archive left unencrypted", loaderName);
+                skipOrFail(context, "classEncryption.loaderClass=" + loaderName
+                        + " already exists in the input");
                 return;
             }
         }
@@ -198,10 +332,7 @@ public final class ClassEncryptionPass implements Pass {
             watchdog = TemplateInjector.inject(pool, UmbraWatchdog.class, RuntimeNames.path("W"),
                     config.seed()).replace('/', '.');
         }
-        // The encrypted loader refuses to decrypt/define classes while the unified
-        // runtime guard reports a signal. The anti-debug pass (order 115) already
-        // injected the shared seed-derived guard class; this call retrieves the same
-        // name, so the loader and the entry-point guards consult one detector.
+
         String runtimeGuard = "";
         int guardLevel = AntiDebugPass.resolveLevel(config);
         String guardToken = logToken;
@@ -225,6 +356,63 @@ public final class ClassEncryptionPass implements Pass {
             runtimeGuard = GuardSupport.ensureRuntimeGuard(pool, config.seed(), guardReplacements)
                     .replace('/', '.');
         }
+
+        boolean nativeGateOption = config.optionBool("antiDebug.nativeGate", true);
+        byte[] gateSecret = NativeKeySupport.gateSecret(context);
+        byte[] payloadRoot = null;
+        boolean gateBound = false;
+        String gateUnavailable = null;
+        if (!nativeGateOption) {
+            gateUnavailable = "antiDebug.nativeGate=false";
+        } else if (!nativeBound) {
+            gateUnavailable = "the native key root is not bound";
+        } else if (gateSecret == null) {
+            gateUnavailable = "no native gate secret was published";
+        } else if (runtimeGuard.isEmpty()) {
+            gateUnavailable = "no runtime guard was injected (antiDebug.level=0)";
+        } else if (!NativeKeySupport.declaresAttest(pool.getClass(runtimeGuard.replace('.', '/')))) {
+            gateUnavailable = "the runtime guard has no attest(long) method";
+        } else if (!NativeKeySupport.declaresGate(pool.getClass(nativeLoaderName))) {
+            gateUnavailable = "the native loader declares no gate entry points";
+        } else if (NativeKeySupport.nativeGuard(pool) == null) {
+            gateUnavailable = "the build has no injected native guard (nativeCheck)";
+        } else {
+
+            payloadRoot = UmbraCrypto.payloadRoot(NativeKeySupport.rawRoot(context));
+            gateBound = payloadRoot != null;
+            if (!gateBound) {
+                gateUnavailable = "the payload root could not be derived";
+            }
+        }
+        if (nativeGateOption && !gateBound) {
+            context.log().info("class-encryption: native gate disabled (%s); business payloads use "
+                    + "the single-key path", gateUnavailable);
+        }
+
+        String guardClassName = runtimeGuard;
+        String nativeGuardName = gateBound
+                ? NativeKeySupport.nativeGuard(pool).replace('/', '.') : "";
+
+        boolean tickBound = gateBound
+                && NativeKeySupport.declaresGateTick(pool.getClass(nativeLoaderName));
+        if (nativeGateOption && gateBound && !tickBound) {
+            context.log().info("class-encryption: the native loader has no gateTick; business "
+                    + "payloads keep the single-shot payload root");
+        }
+        if (gateBound) {
+            Map<String, String> gateReplacement = new LinkedHashMap<String, String>();
+            gateReplacement.put("@@GATESECRET@@", Cipher.base64(gateSecret));
+            int patched = CryptoSupport.replaceConstants(
+                    pool.getClass(runtimeGuard.replace('.', '/')), gateReplacement);
+            if (patched == 0) {
+                context.log().info("class-encryption: the runtime guard already carries a gate "
+                        + "secret (injected by the anti-debug pass)");
+            } else {
+                context.log().info("class-encryption: gate secret injected into the runtime guard "
+                        + "(%d constant(s))", patched);
+            }
+        }
+
         String indexEntry = randomResourceName(random);
         for (int attempt = 0; attempt < 1000 && (pool.resource(indexEntry) != null
                 || pool.getClass(indexEntry) != null); attempt++) {
@@ -243,22 +431,53 @@ public final class ClassEncryptionPass implements Pass {
 
         Map<String, String> replacements = new LinkedHashMap<String, String>();
         replacements.put("@@INDEX@@", indexEntry);
-        replacements.put("@@SEED@@", Cipher.base64(siteSeed));
+
+        replacements.put("@@SEED@@", (nativeBound || hostKeyed) ? "" : Cipher.base64(siteSeed));
+        replacements.put("@@NATIVE@@", nativeBound ? nativeLoaderName.replace('/', '.') : "");
         replacements.put("@@ACTION@@", action);
+        replacements.put("@@GUARDLOG@@",
+                String.valueOf("log".equals(AntiDebugPass.resolveAction(config))));
         replacements.put("@@LOGTOKEN@@", logToken);
         replacements.put("@@WATCHDOG@@", watchdog);
         replacements.put("@@GUARD@@", runtimeGuard);
+
+        replacements.put("@@NATIVEGUARD@@", nativeGuardName);
+
+        replacements.put("@@CODELIB@@", "");
         replacements.put("@@WATCHMS@@", String.valueOf(watchdogMs));
+
+        replacements.put("@@STRICTVERIFY@@",
+                String.valueOf(config.optionBool("native.enabled", false)));
         Map<String, String> loaderExtra = new LinkedHashMap<String, String>();
         loaderExtra.put(HANDLER_TEMPLATE, handlerName);
         CryptoSupport.injectWithCrypto(pool, UmbraClassLoader.class, loaderName, cryptoName, replacements,
                 loaderExtra);
+        String libraryBootstrapName = "";
+        if (libraryMode) {
+
+            libraryBootstrapName = LIBRARY_BOOTSTRAP_CLASS;
+            if (pool.getClass(libraryBootstrapName) != null) {
+                throw new IllegalStateException("class-encryption: the input already contains "
+                        + LIBRARY_BOOTSTRAP_CLASS + "; library mode needs that name for the "
+                        + "plaintext bootstrap");
+            }
+            CryptoSupport.injectWithCrypto(pool, io.umbra.core.runtime.UmbraLibraryBootstrap.class,
+                    libraryBootstrapName, null, null);
+            assertNoProgramReferences(pool.getClass(libraryBootstrapName), libraryBootstrapName);
+        }
+        if (nativeBound || hostKeyed) {
+
+            stripSeedFallback(pool.getClass(loaderName));
+        }
         pool.setMainClass(loaderName);
 
         ArchivePostProcessor processor = new ArchivePostProcessor(loaderName, cryptoName, connectionName,
                 handlerName, indexEntry, siteSeed, commentBytes, binding, algorithm, integrity, level,
                 antiDump, encryptResources, resourceIntegrity, manifestMinimal, minResourceSize,
-                entryClass, entryMethod, watchdogMs, new Random(config.seed() ^ 0x5EA1ED1L));
+                entryClass, entryMethod, watchdogMs, new Random(config.seed() ^ 0x5EA1ED1L),
+                nativeRoot, nativeLoaderName, nativeLibrary, secure.nextInt(),
+                gateBound, payloadRoot, guardClassName, nativeGuardName, tickBound,
+                libraryBootstrapName);
         context.postProcessors().add(processor);
         context.stats().add("classEncryption.algorithmCode", algorithm == Cipher.Algorithm.AES_CTR ? 2 : 1);
         context.stats().add("classEncryption.indexVersion", INDEX_VERSION);
@@ -266,23 +485,159 @@ public final class ClassEncryptionPass implements Pass {
         context.stats().add("classEncryption.watchdogMs", watchdogMs);
         context.stats().add("classEncryption.masterBinding",
                 binding == BINDING_SAMPLE ? 1 : 0);
+
+        context.stats().text("classEncryption.masterBinding",
+                binding == BINDING_HOST ? "host(library-key+comment)"
+                        : binding == BINDING_NATIVE ? "native(native-root+comment)"
+                                : binding == BINDING_SAMPLE ? "sample(zip-comment+entry-count)"
+                                        : "seed(diagnostic)");
+
+        if (nativeBound) {
+            context.stats().add("classEncryption.nativeKey", 1);
+        } else if (!nativeKey) {
+            context.stats().add("classEncryption.nativeKey", 0);
+        }
+        if (nativeBound) {
+            context.stats().add("classEncryption.nativeLoader", 1);
+        }
         if (!runtimeGuard.isEmpty()) {
             context.stats().add("classEncryption.runtimeGuard", 1);
         }
         context.log().info("class-encryption: registered archive post-processor (loader=%s, alg=%s, "
                         + "integrity=%s/%d, antiDump=%s, resources=%s, resourceIntegrity=%s, "
                         + "minResourceSize=%d, manifestMinimal=%s, entry=%s#%s, runtimeGuard=%s, "
-                        + "masterBinding=%s, index=v%d)",
+                        + "masterBinding=%s%s, index=v%d)",
                 loaderName, algorithm.id(), Boolean.valueOf(integrity), level, Boolean.valueOf(antiDump),
                 Boolean.valueOf(encryptResources), Boolean.valueOf(resourceIntegrity), minResourceSize,
                 Boolean.valueOf(manifestMinimal), entryClass, entryMethod,
                 runtimeGuard.isEmpty() ? "-" : runtimeGuard,
-                binding == BINDING_SAMPLE ? "sample" : "seed", INDEX_VERSION);
-        // The engine's --verify step only sees the plaintext loader and its
-        // infrastructure helpers; encrypted payloads are linked and digest
-        // checked by the loader at runtime, so verification cannot fail on them.
+                binding == BINDING_HOST ? "host"
+                        : (binding == BINDING_NATIVE ? "native"
+                                : (binding == BINDING_SAMPLE ? "sample" : "seed")),
+                binding == BINDING_HOST ? "(library-key)"
+                        : (nativeBound ? "(root)" : "(seed-fallback)"), INDEX_VERSION);
+
         context.log().info("class-encryption: note: --verify links only the plaintext loader/helpers; "
                 + "encrypted classes and resources are verified by the loader at runtime");
+    }
+
+    static void stripSeedFallback(ClassNode loader) {
+        if (loader == null) {
+            return;
+        }
+        if (loader.fields != null) {
+            for (int i = loader.fields.size() - 1; i >= 0; i--) {
+                String name = loader.fields.get(i).name;
+                if ("SITE_SEED".equals(name) || "BINDING_SEED".equals(name)) {
+                    loader.fields.remove(i);
+                }
+            }
+        }
+        if (loader.methods == null) {
+            return;
+        }
+        for (MethodNode method : loader.methods) {
+            if ("legacyIndex".equals(method.name)) {
+                failClosedStub(method);
+                method.name = "n0";
+            } else if ("siteSeedConstant".equals(method.name)) {
+                nullStub(method);
+                method.name = "n1";
+            }
+        }
+
+        for (MethodNode method : loader.methods) {
+            if (method.instructions == null) {
+                continue;
+            }
+            for (org.objectweb.asm.tree.AbstractInsnNode insn = method.instructions.getFirst();
+                    insn != null; insn = insn.getNext()) {
+                if (insn instanceof org.objectweb.asm.tree.MethodInsnNode) {
+                    org.objectweb.asm.tree.MethodInsnNode call =
+                            (org.objectweb.asm.tree.MethodInsnNode) insn;
+                    if ("legacyIndex".equals(call.name)) {
+                        call.name = "n0";
+                    } else if ("siteSeedConstant".equals(call.name)) {
+                        call.name = "n1";
+                    }
+                }
+            }
+        }
+    }
+
+    private static void failClosedStub(MethodNode method) {
+        org.objectweb.asm.tree.InsnList body = new org.objectweb.asm.tree.InsnList();
+        body.add(new org.objectweb.asm.tree.TypeInsnNode(Opcodes.NEW, "java/lang/SecurityException"));
+        body.add(new org.objectweb.asm.tree.InsnNode(Opcodes.DUP));
+        body.add(new org.objectweb.asm.tree.MethodInsnNode(Opcodes.INVOKESPECIAL,
+                "java/lang/SecurityException", "<init>", "()V", false));
+        body.add(new org.objectweb.asm.tree.InsnNode(Opcodes.ATHROW));
+        method.instructions = body;
+        if (method.tryCatchBlocks != null) {
+            method.tryCatchBlocks.clear();
+        }
+        if (method.localVariables != null) {
+            method.localVariables.clear();
+        }
+    }
+
+    private static void nullStub(MethodNode method) {
+        org.objectweb.asm.tree.InsnList body = new org.objectweb.asm.tree.InsnList();
+        body.add(new org.objectweb.asm.tree.InsnNode(Opcodes.ACONST_NULL));
+        body.add(new org.objectweb.asm.tree.InsnNode(Opcodes.ARETURN));
+        method.instructions = body;
+        if (method.tryCatchBlocks != null) {
+            method.tryCatchBlocks.clear();
+        }
+        if (method.localVariables != null) {
+            method.localVariables.clear();
+        }
+    }
+
+    private static void skipOrFail(PassContext context, String reason) {
+        if (!context.config().optionBool("classEncryption.allowSkip", false)) {
+            throw new IllegalStateException("class-encryption: " + reason
+                    + "; refusing to produce an archive with class encryption silently OFF "
+                    + "(set classEncryption.allowSkip=true to accept an unsealed archive)");
+        }
+        context.log().warn("class-encryption: archive left UNENCRYPTED (%s); "
+                + "classEncryption.allowSkip=true was set explicitly", reason);
+        context.stats().add("layout.classEncryptionSkipped", 1);
+        context.stats().text("layout.classEncryptionSkipReason", reason);
+    }
+
+    private static void assertNoProgramReferences(ClassNode node, String ownName) {
+        if (node == null || node.methods == null) {
+            throw new IllegalStateException("class-encryption: library bootstrap is missing");
+        }
+        for (MethodNode method : node.methods) {
+            for (org.objectweb.asm.tree.AbstractInsnNode insn = method.instructions.getFirst();
+                    insn != null; insn = insn.getNext()) {
+                String owner = null;
+                if (insn instanceof org.objectweb.asm.tree.MethodInsnNode) {
+                    owner = ((org.objectweb.asm.tree.MethodInsnNode) insn).owner;
+                } else if (insn instanceof org.objectweb.asm.tree.FieldInsnNode) {
+                    owner = ((org.objectweb.asm.tree.FieldInsnNode) insn).owner;
+                } else if (insn instanceof org.objectweb.asm.tree.TypeInsnNode) {
+                    owner = ((org.objectweb.asm.tree.TypeInsnNode) insn).desc;
+                }
+                if (owner == null || owner.startsWith("[") || owner.length() < 2) {
+                    continue;
+                }
+                String internal = owner;
+                if (internal.equals(ownName) || internal.equals("io/umbra/core/runtime/UmbraLibraryBootstrap")) {
+                    continue;
+                }
+                if (internal.startsWith("java/") || internal.startsWith("javax/")
+                        || internal.startsWith("sun/") || internal.startsWith("jdk/")
+                        || internal.startsWith("com/sun/")) {
+                    continue;
+                }
+                throw new IllegalStateException("class-encryption: the library bootstrap must not "
+                        + "reference a program class (" + internal + "); library mode needs a "
+                        + "JDK-only bootstrap");
+            }
+        }
     }
 
     private static String randomToken(SecureRandom secure, int length) {
@@ -294,10 +649,6 @@ public final class ClassEncryptionPass implements Pass {
         return builder.toString();
     }
 
-    /**
-     * Allocates a template name that is deterministic for the seed and cannot
-     * collide with the loader itself or with other injected helpers.
-     */
     private static String uniqueTemplateName(ClassPool pool, long seed, String salt, String prefix,
                                              String... reserved) {
         for (int attempt = 0; attempt < 10000; attempt++) {
@@ -315,10 +666,6 @@ public final class ClassEncryptionPass implements Pass {
         }
         throw new IllegalStateException("Unable to allocate an injected helper name");
     }
-
-    // ------------------------------------------------------------------
-    // Entry point detection
-    // ------------------------------------------------------------------
 
     private static String[] resolveEntryPoint(PassContext context) {
         UmbraConfig config = context.config();
@@ -381,10 +728,10 @@ public final class ClassEncryptionPass implements Pass {
     }
 
     private static String integrityAction(UmbraConfig config) {
-        // Documented default is throw (OPTIONS.md integrity.action); 3.0 code
-        // used exit here, which made a tampered archive shut down silently.
+
         String value = config.option("integrity.action", "throw").trim().toLowerCase(Locale.ROOT);
-        if ("exit".equals(value) || "throw".equals(value) || "corrupt".equals(value)) {
+        if ("exit".equals(value) || "throw".equals(value) || "corrupt".equals(value)
+                || "log".equals(value)) {
             return value;
         }
         return "throw";
@@ -409,11 +756,6 @@ public final class ClassEncryptionPass implements Pass {
         throw new IllegalStateException("Unable to allocate an encrypted payload entry name");
     }
 
-    // ------------------------------------------------------------------
-    // Post-processor
-    // ------------------------------------------------------------------
-
-    /** Rewrites the finished archive: encrypts classes + resources, injects loader/index. */
     private static final class ArchivePostProcessor implements OutputPostProcessor {
         private final String loaderName;
         private final String cryptoName;
@@ -436,12 +778,37 @@ public final class ClassEncryptionPass implements Pass {
         private final long watchdogMs;
         private final Random random;
 
+        private final byte[] nativeRoot;
+
+        private final String nativeLoaderName;
+
+        private final String nativeLibrary;
+
+        private final int buildSerial;
+
+        private final boolean gateBound;
+
+        private final byte[] payloadRoot;
+
+        private final String guardClassName;
+
+        private final String nativeGuardName;
+
+        private final boolean tickBound;
+
+        private final String libraryBootstrap;
+
+        private String codeLibraryName = "";
+
         ArchivePostProcessor(String loaderName, String cryptoName, String connectionName, String handlerName,
                              String indexEntry, byte[] siteSeed, byte[] commentBytes, int binding,
                              Cipher.Algorithm algorithm, boolean integrity, int level, boolean antiDump,
                              boolean encryptResources, boolean resourceIntegrity, boolean manifestMinimal,
                              int minResourceSize, String entryClass, String entryMethod, long watchdogMs,
-                             Random random) {
+                             Random random, byte[] nativeRoot, String nativeLoaderName, String nativeLibrary,
+                             int buildSerial, boolean gateBound, byte[] payloadRoot,
+                             String guardClassName, String nativeGuardName, boolean tickBound,
+                             String libraryBootstrap) {
             this.loaderName = loaderName;
             this.cryptoName = cryptoName;
             this.connectionName = connectionName;
@@ -462,6 +829,16 @@ public final class ClassEncryptionPass implements Pass {
             this.entryMethod = entryMethod;
             this.watchdogMs = watchdogMs;
             this.random = random;
+            this.nativeRoot = nativeRoot;
+            this.nativeLoaderName = nativeLoaderName;
+            this.nativeLibrary = nativeLibrary;
+            this.buildSerial = buildSerial == 0 ? 0x5A17C0DE : buildSerial;
+            this.gateBound = gateBound;
+            this.payloadRoot = payloadRoot;
+            this.guardClassName = guardClassName;
+            this.nativeGuardName = nativeGuardName;
+            this.tickBound = tickBound;
+            this.libraryBootstrap = libraryBootstrap == null ? "" : libraryBootstrap;
         }
 
         @Override
@@ -472,8 +849,11 @@ public final class ClassEncryptionPass implements Pass {
         @Override
         public void process(Path output, PassContext context) throws Exception {
             boolean constantPool = context.config().optionBool("classEncryption.constantPool", true);
+
+            String codeLibraryEntry = context.classes().getMeta("native.codeLibrary");
             Map<String, Integer> entryMethods = new LinkedHashMap<String, Integer>();
             Map<String, byte[]> entries = readEntries(output, entryMethods);
+
             String loaderEntry = loaderName + ".class";
             byte[] loaderBytes = entries.remove(loaderEntry);
             if (loaderBytes == null) {
@@ -484,6 +864,20 @@ public final class ClassEncryptionPass implements Pass {
             infrastructureEntries.add(cryptoName + ".class");
             infrastructureEntries.add(connectionName + ".class");
             infrastructureEntries.add(handlerName + ".class");
+
+            String nativeLoaderEntry = nativeLoaderName == null ? null : nativeLoaderName + ".class";
+            if (nativeLoaderEntry != null && entries.containsKey(nativeLoaderEntry)) {
+                infrastructureEntries.add(nativeLoaderEntry);
+            } else {
+                nativeLoaderEntry = null;
+            }
+            String libraryBootstrapEntry = libraryBootstrap.isEmpty() ? null
+                    : libraryBootstrap + ".class";
+            if (libraryBootstrapEntry != null && entries.containsKey(libraryBootstrapEntry)) {
+                infrastructureEntries.add(libraryBootstrapEntry);
+            } else {
+                libraryBootstrapEntry = null;
+            }
 
             byte[] oldManifest = entries.get("META-INF/MANIFEST.MF");
             Map<String, String> attributes = buildManifest(oldManifest);
@@ -511,9 +905,6 @@ public final class ClassEncryptionPass implements Pass {
             usedNames.addAll(infrastructureEntries);
             usedNames.add(indexEntry);
 
-            // Planning pass: decide payload names and classify entries without
-            // encrypting yet. The final entry count is part of the master-key
-            // binding, so it must be known before any payload is sealed.
             List<PayloadPlan> plans = new ArrayList<PayloadPlan>();
             boolean moduleInfoPresent = false;
             for (Map.Entry<String, byte[]> entry : entries.entrySet()) {
@@ -533,6 +924,21 @@ public final class ClassEncryptionPass implements Pass {
                     continue;
                 }
                 if (!name.endsWith(".class")) {
+                    if (nativeLibrary != null && nativeLibrary.equals(name)
+                            && !name.endsWith(".dat")) {
+
+                        plans.add(PayloadPlan.plaintext(name, bytes));
+                        continue;
+                    }
+
+                    boolean codeLibrary = codeLibraryEntry != null
+                            ? codeLibraryEntry.equals(name)
+                            : name.endsWith(".dat");
+                    if (codeLibrary && encryptResources) {
+                        codeLibraryName = name;
+                        plans.add(PayloadPlan.resource(name, randomPayloadName(random, usedNames), bytes));
+                        continue;
+                    }
                     if (encryptResources && bytes.length >= minResourceSize) {
                         plans.add(PayloadPlan.resource(name, randomPayloadName(random, usedNames), bytes));
                     } else {
@@ -556,20 +962,59 @@ public final class ClassEncryptionPass implements Pass {
                 }
                 plans.add(PayloadPlan.classPayload(binaryName, randomPayloadName(random, usedNames), bytes));
             }
-            int entryCount = rewritten.size() + plans.size() + 1; // + sealed index
+
+            assertNoPlaintextNativePayload(context, plans);
+            int entryCount = rewritten.size() + plans.size() + 1;
             if (entryCount > MAX_ENTRIES) {
                 throw new IOException("class-encryption: archive has too many entries: " + entryCount);
             }
-            byte[] master = binding == BINDING_SAMPLE
-                    ? Cipher.hmacSha256(siteSeed, Cipher.concat(Cipher.utf8("umbra.master.v3"),
-                    commentBytes == null ? new byte[0] : commentBytes, Cipher.le32(entryCount)))
-                    : Cipher.hmacSha256(siteSeed, Cipher.utf8("umbra.master.v3.seed"));
+            boolean nativeBound = binding == BINDING_NATIVE || binding == BINDING_HOST;
+            byte[] master;
+            if (nativeBound) {
+
+                master = UmbraCrypto.masterFromRoot(nativeRoot, commentBytes, entryCount);
+                if (master == null) {
+                    throw new IOException("class-encryption: native key root is missing from the key "
+                            + "derivation inputs");
+                }
+            } else if (binding == BINDING_SAMPLE) {
+                master = Cipher.hmacSha256(siteSeed, Cipher.concat(Cipher.utf8("umbra.master.v3"),
+                        commentBytes == null ? new byte[0] : commentBytes, Cipher.le32(entryCount)));
+            } else {
+                master = Cipher.hmacSha256(siteSeed, Cipher.utf8("umbra.master.v3.seed"));
+            }
+            if (nativeBound) {
+
+                String rootSha = nativeRoot == null ? "null"
+                        : UmbraCrypto.sha256Hex(nativeRoot).substring(0, 16);
+                String masterSha = UmbraCrypto.sha256Hex(master).substring(0, 16);
+                String commentText = commentBytes == null ? "<null>"
+                        : new String(commentBytes, java.nio.charset.StandardCharsets.ISO_8859_1);
+                context.log().info("class-encryption: [diag] rootSha8=%s masterSha8=%s entries=%d "
+                                + "commentB64=%s commentLen=%d",
+                        rootSha, masterSha, Integer.valueOf(entryCount),
+                        commentBytes == null ? "<null>" : Cipher.base64(commentBytes),
+                        Integer.valueOf(commentBytes == null ? 0 : commentBytes.length));
+            }
+
+            byte[] digestKey = nativeBound
+                    ? UmbraCrypto.subKey(nativeRoot, UmbraCrypto.SLOT_DIGEST, 0)
+                    : master;
+            if (digestKey == null) {
+                throw new IOException("class-encryption: digest key derivation failed");
+            }
 
             Set<String> plaintextClasses = new LinkedHashSet<String>();
             plaintextClasses.add(loaderName.replace('/', '.'));
             plaintextClasses.add(cryptoName.replace('/', '.'));
             plaintextClasses.add(connectionName.replace('/', '.'));
             plaintextClasses.add(handlerName.replace('/', '.'));
+            if (nativeLoaderEntry != null) {
+                plaintextClasses.add(nativeLoaderName.replace('/', '.'));
+            }
+            if (libraryBootstrapEntry != null) {
+                plaintextClasses.add(libraryBootstrap.replace('/', '.'));
+            }
             if (moduleInfoPresent) {
                 plaintextClasses.add("module-info");
             }
@@ -577,6 +1022,8 @@ public final class ClassEncryptionPass implements Pass {
             List<String> classNames = new ArrayList<String>();
             List<String> classPayloads = new ArrayList<String>();
             List<byte[]> classDigests = new ArrayList<byte[]>();
+
+            List<Integer> classGateFree = new ArrayList<Integer>();
             List<String> resourceNames = new ArrayList<String>();
             List<String> resourcePayloads = new ArrayList<String>();
             List<byte[]> resourceDigests = new ArrayList<byte[]>();
@@ -595,12 +1042,28 @@ public final class ClassEncryptionPass implements Pass {
                 }
                 byte[] nonce = Cipher.randomBytes(random, Cipher.NONCE_BYTES);
                 String label = (plan.kind == PayloadPlan.CLASS ? "c:" : "r:") + plan.logical;
-                byte[] key = Cipher.hmacSha256(master, Cipher.concat(Cipher.utf8(label), nonce));
+
+                boolean generatedHelper = context.classes().isGenerated(
+                        plan.logical.replace('.', '/'));
+                boolean gateFreeClass = generatedHelper
+                        || (guardClassName != null && guardClassName.equals(plan.logical))
+                        || (nativeGuardName != null && nativeGuardName.equals(plan.logical));
+                boolean gated = gateBound && plan.kind == PayloadPlan.CLASS && !gateFreeClass;
+
+                int classIndex = classNames.size();
+                byte[] classRoot = gated
+                        ? (tickBound ? UmbraCrypto.gateTick(payloadRoot, classIndex) : payloadRoot)
+                        : null;
+                if (gated && classRoot == null) {
+                    throw new IOException("class-encryption: gate tick derivation failed");
+                }
+                byte[] key = gated
+                        ? UmbraCrypto.entryKey(master, label, nonce, classRoot)
+                        : Cipher.hmacSha256(master, Cipher.concat(Cipher.utf8(label), nonce));
                 byte[] payload = plan.bytes;
                 try {
                     if (plan.kind == PayloadPlan.CLASS && constantPool) {
-                        // Same routine the injected loader runs before defineClass, so
-                        // build-time and run-time cannot drift apart.
+
                         payload = new byte[plan.bytes.length];
                         System.arraycopy(plan.bytes, 0, payload, 0, plan.bytes.length);
                         if (!UmbraClassLoader.cryptConstantPool(payload, key)) {
@@ -616,15 +1079,19 @@ public final class ClassEncryptionPass implements Pass {
                 if (plan.kind == PayloadPlan.CLASS) {
                     classNames.add(plan.logical);
                     classPayloads.add(plan.entry);
-                    // The digest covers exactly the bytes the loader unseals (constant
-                    // pool still encrypted), so verification needs no define-path patch.
-                    classDigests.add(Cipher.hmacSha256(master,
-                            Cipher.concat(Cipher.utf8("d:c:" + plan.logical), payload)));
+
+                    classDigests.add(gated
+                            ? UmbraCrypto.keyedDigest(digestKey, "d:c:" + plan.logical,
+                                    plan.bytes, classRoot)
+                            : UmbraCrypto.keyedDigest(digestKey, "d:c:" + plan.logical,
+                                    plan.bytes));
+
+                    classGateFree.add(gated ? (tickBound ? 2 : 0) : 1);
                 } else {
                     resourceNames.add(plan.logical);
                     resourcePayloads.add(plan.entry);
-                    resourceDigests.add(Cipher.hmacSha256(master,
-                            Cipher.concat(Cipher.utf8("d:r:" + plan.logical), plan.bytes)));
+                    resourceDigests.add(UmbraCrypto.keyedDigest(digestKey, "d:r:" + plan.logical,
+                            plan.bytes));
                     resourceSizes.add(Integer.valueOf(plan.bytes.length));
                     resourceBytes += plan.bytes.length;
                 }
@@ -636,6 +1103,8 @@ public final class ClassEncryptionPass implements Pass {
             int flags = (integrity ? FLAG_INTEGRITY : 0) | (antiDump ? FLAG_ANTIDUMP : 0)
                     | (resourceIntegrity ? FLAG_RESOURCE_INTEGRITY : 0)
                     | (constantPool ? FLAG_CONSTANT_POOL : 0)
+                    | (nativeBound ? FLAG_NATIVE_ROOT : 0)
+                    | (gateBound ? FLAG_NATIVE_GATE : 0)
                     | ((algorithm == Cipher.Algorithm.AES_CTR ? 2 : 1) << ALG_SHIFT);
             index.write(flags);
             index.write(level);
@@ -646,13 +1115,34 @@ public final class ClassEncryptionPass implements Pass {
             }
             writeString(index, entryClass.replace('/', '.'));
             writeString(index, entryMethod);
-            index.write(Cipher.hmacSha256(master,
-                    Cipher.concat(Cipher.utf8("d:loader"), loaderBytes)));
+
+            String loaderEntryName = loaderEntry;
+            String loaderSha256 = UmbraCrypto.sha256Hex(loaderBytes);
+            context.stats().text("classEncryption.loaderEntry", loaderEntryName);
+            context.stats().text("classEncryption.loaderSha256", loaderSha256);
+
+            context.log().info("class-encryption: final loader entry=%s sha256=%s len=%d",
+                    loaderEntryName, loaderSha256, Integer.valueOf(loaderBytes.length));
+
+            if (nativeLoaderName != null && !nativeLoaderName.isEmpty()) {
+                String bridgeEntryName = nativeLoaderName.replace('.', '/') + ".class";
+                byte[] bridgeBytes = rewritten.get(bridgeEntryName);
+                if (bridgeBytes != null) {
+                    String bridgeSha256 = UmbraCrypto.sha256Hex(bridgeBytes);
+                    context.stats().text("classEncryption.bridgeEntry", bridgeEntryName);
+                    context.stats().text("classEncryption.bridgeSha256", bridgeSha256);
+                    context.log().info("class-encryption: final bridge entry=%s sha256=%s len=%d",
+                            bridgeEntryName, bridgeSha256, Integer.valueOf(bridgeBytes.length));
+                }
+            }
+            index.write(UmbraCrypto.keyedDigest(digestKey, "d:loader", loaderBytes));
             writeInt(index, classNames.size());
             for (int i = 0; i < classNames.size(); i++) {
                 writeString(index, classNames.get(i));
                 writeString(index, classPayloads.get(i));
                 index.write(classDigests.get(i));
+
+                index.write(classGateFree.get(i).intValue());
             }
             writeInt(index, resourceNames.size());
             for (int i = 0; i < resourceNames.size(); i++) {
@@ -661,12 +1151,20 @@ public final class ClassEncryptionPass implements Pass {
                 index.write(resourceDigests.get(i));
                 writeInt(index, resourceSizes.get(i).intValue());
             }
+
+            writeInt(index, buildSerial);
+            index.write(UmbraCrypto.keyedDigest(digestKey, "d:serial", Cipher.le32(buildSerial)));
+            if (digestKey != master) {
+                Cipher.wipe(digestKey);
+            }
             byte[] nonce = Cipher.randomBytes(random, Cipher.NONCE_BYTES);
             byte[] sealedIndex = Cipher.seal(index.toByteArray(), master, nonce, Cipher.Algorithm.CHACHA20);
             rewritten.put(indexEntry, sealedIndex);
 
             String comment = commentBytes == null ? null : Cipher.base64(commentBytes);
             rewrite(output, rewritten, entryMethods, comment);
+
+            assertZipComment(output, comment);
             Cipher.wipe(master);
 
             try {
@@ -685,28 +1183,106 @@ public final class ClassEncryptionPass implements Pass {
             context.stats().add("classEncryption.indexBytes", sealedIndex.length);
             context.stats().add("classEncryption.entries", entryCount);
             context.stats().add("classEncryption.seedBound", binding == BINDING_SAMPLE ? 1 : 0);
+            context.stats().add("classEncryption.buildSerial", buildSerial);
+            context.stats().add("classEncryption.nativeBound", nativeBound ? 1 : 0);
+        context.stats().add("classEncryption.hostKey", binding == BINDING_HOST ? 1 : 0);
+
+        context.stats().add("classEncryption.nativeGate", gateBound ? 1 : 0);
+
+        context.stats().add("classEncryption.libraryMode", libraryBootstrap.isEmpty() ? 0 : 1);
+
+        context.stats().add("classEncryption.nativeGateTick", tickBound ? 1 : 0);
             context.log().info("class-encryption: encrypted %d classes and %d resources (%d bytes), "
                             + "%d plaintext resources kept, loader=%s, index=%s, entries=%d, "
                             + "masterBinding=%s, level=%d",
                     classNames.size(), resourceNames.size(), resourceBytes, plaintextResources,
                     loaderName, indexEntry, entryCount,
-                    binding == BINDING_SAMPLE ? "sample(zip-comment+entry-count)" : "seed(diagnostic)",
+                    binding == BINDING_HOST ? "host(library-key+comment)"
+                            : (binding == BINDING_NATIVE ? "native(native-root+comment)"
+                                    : (binding == BINDING_SAMPLE
+                                            ? "sample(zip-comment+entry-count)" : "seed(diagnostic)")),
                     level);
         }
 
-        /**
-         * Build-time assertions (analysis checklist P2-1/P2-2): no unreplaced
-         * {@code @@} placeholder in the plaintext runtime entries or entry names,
-         * the index names every payload that was written, the plaintext class list
-         * matches reality (module-info only when present), and the master binding
-         * inputs are consistent.
-         */
+        private void assertNoPlaintextNativePayload(PassContext context, List<PayloadPlan> plans)
+                throws IOException {
+            if (!context.config().optionBool("native.enabled", false)) {
+                return;
+            }
+            for (PayloadPlan plan : plans) {
+                if (plan.kind != PayloadPlan.PLAINTEXT || plan.bytes == null) {
+                    continue;
+                }
+                String name = plan.entry;
+                if (name == null) {
+                    continue;
+                }
+                if (!name.endsWith(".dat") && !name.endsWith(".so") && !name.endsWith(".dll")) {
+                    continue;
+                }
+
+                if (nativeLibrary != null && nativeLibrary.equals(name) && !name.endsWith(".dat")) {
+                    continue;
+                }
+                byte[] bytes = plan.bytes;
+                if (bytes == null || bytes.length < 4) {
+                    continue;
+                }
+                boolean pe = (bytes[0] & 0xFF) == 0x4D && (bytes[1] & 0xFF) == 0x5A;
+                boolean elf = (bytes[0] & 0xFF) == 0x7F && bytes[1] == 'E'
+                        && bytes[2] == 'L' && bytes[3] == 'F';
+                if (pe || elf) {
+                    throw new IOException("class-encryption: native payload " + name + " is an "
+                            + "unsealed " + (pe ? "PE" : "ELF") + " image (" + bytes.length
+                            + " bytes) - the JIT-translated method bodies would be readable with a "
+                            + "disassembler; seal it through the class-encryption resource channel "
+                            + "(classEncryption.resources=true) or disable native.enabled");
+                }
+            }
+        }
+
+        private static byte[] patchCodeLibraryName(byte[] loader, String name) {
+            if (loader == null) {
+                return null;
+            }
+            try {
+                ClassNode node = new ClassNode();
+                new ClassReader(loader).accept(node, 0);
+                Map<String, String> replacement = new LinkedHashMap<String, String>();
+                replacement.put("@@CODELIB@@", name == null ? "" : name);
+                CryptoSupport.replaceConstants(node, replacement);
+                ClassWriter writer = new ClassWriter(0);
+                node.accept(writer);
+                return writer.toByteArray();
+            } catch (RuntimeException unparseable) {
+                return loader;
+            }
+        }
+
+        private void assertZipComment(Path output, String comment) throws IOException {
+            String actual;
+            try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(output.toFile())) {
+                actual = zip.getComment();
+            }
+            boolean expectedAbsent = comment == null || comment.isEmpty();
+            boolean actualAbsent = actual == null || actual.isEmpty();
+            if (expectedAbsent != actualAbsent
+                    || (!expectedAbsent && !comment.equals(actual))) {
+                throw new IOException("class-encryption: the archive's ZIP comment does not match "
+                        + "the value the master key was derived from (expected "
+                        + (expectedAbsent ? "<none>" : "len=" + comment.length()) + ", found "
+                        + (actualAbsent ? "<none>" : "len=" + actual.length()) + "); a post-processor "
+                        + "that rewrites the archive must copy the comment verbatim");
+            }
+        }
+
         private void assertRewritten(Path output, Map<String, byte[]> rewritten, String comment,
                                      int entryCount, Set<String> infrastructureEntries,
                                      List<String> classPayloads, List<String> resourcePayloads,
                                      boolean moduleInfoPresent) throws IOException {
-            if (binding == BINDING_SAMPLE && (comment == null || comment.isEmpty())) {
-                throw new IOException("class-encryption: sample binding requires a ZIP comment");
+            if ((binding == BINDING_SAMPLE || binding == BINDING_NATIVE)
+                    && (comment == null || comment.isEmpty())) {
+                throw new IOException("class-encryption: sample/native binding requires a ZIP comment");
             }
             if (binding == BINDING_SEED && comment != null) {
                 throw new IOException("class-encryption: seed binding must not write a ZIP comment");
@@ -733,13 +1309,15 @@ public final class ClassEncryptionPass implements Pass {
                             + entryCount + ", actual " + actualEntries + "); master key would not match");
                 }
                 String writtenComment = zip.getComment();
-                if (binding == BINDING_SAMPLE) {
-                    if (writtenComment == null || !writtenComment.equals(comment)) {
-                        throw new IOException("class-encryption: ZIP comment was not written; "
-                                + "sample-bound master key would not match");
+                if (binding == BINDING_SEED) {
+                    if (writtenComment != null && !writtenComment.isEmpty()) {
+                        throw new IOException("class-encryption: unexpected ZIP comment for seed binding");
                     }
-                } else if (writtenComment != null && !writtenComment.isEmpty()) {
-                    throw new IOException("class-encryption: unexpected ZIP comment for seed binding");
+                } else if (writtenComment == null || !writtenComment.equals(comment)) {
+
+                    throw new IOException("class-encryption: ZIP comment was not written; "
+                            + (binding == BINDING_NATIVE ? "native" : "sample")
+                            + "-bound master key would not match");
                 }
                 for (String payload : classPayloads) {
                     if (!names.contains(payload)) {
@@ -759,8 +1337,7 @@ public final class ClassEncryptionPass implements Pass {
                         throw new IOException("class-encryption: plaintext helper missing: " + infrastructure);
                     }
                 }
-                // Class entries that stay plaintext must be exactly the injected
-                // infrastructure plus an optional module-info.
+
                 for (String name : names) {
                     if (!name.endsWith(".class")) {
                         continue;
@@ -771,8 +1348,7 @@ public final class ClassEncryptionPass implements Pass {
                         throw new IOException("class-encryption: unexpected plaintext class entry: " + name);
                     }
                 }
-                // No unreplaced template placeholder may survive in a plaintext
-                // class; encrypted payload bytes are random and are not scanned.
+
                 for (String name : names) {
                     if (!name.endsWith(".class") || !infrastructureEntries.contains(name)) {
                         continue;
@@ -846,7 +1422,6 @@ public final class ClassEncryptionPass implements Pass {
         }
     }
 
-    /** One planned output entry: encrypted class/resource payload or plaintext copy. */
     private static final class PayloadPlan {
         static final int CLASS = 1;
         static final int RESOURCE = 2;
@@ -876,10 +1451,6 @@ public final class ClassEncryptionPass implements Pass {
             return new PayloadPlan(PLAINTEXT, null, entry, bytes);
         }
     }
-
-    // ------------------------------------------------------------------
-    // I/O helpers
-    // ------------------------------------------------------------------
 
     static Map<String, byte[]> readEntries(Path jar, Map<String, Integer> methods)
             throws IOException {
@@ -928,8 +1499,7 @@ public final class ClassEncryptionPass implements Pass {
                     zipEntry.setTime(FIXED_TIME);
                     Integer method = methods.get(entry.getKey());
                     if (method != null && method.intValue() == ZipEntry.STORED) {
-                        // Preserve STORED entries; recompressing a nested library
-                        // breaks container loaders (Spring Boot/WAR).
+
                         zipEntry.setMethod(ZipEntry.STORED);
                         zipEntry.setSize(entry.getValue().length);
                         zipEntry.setCompressedSize(entry.getValue().length);

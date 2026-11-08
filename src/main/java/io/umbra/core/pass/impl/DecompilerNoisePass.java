@@ -57,22 +57,20 @@ public final class DecompilerNoisePass implements Pass {
 
     private static final int LEVEL_V4 = 4;
 
-    /** Level-4 per-class payload budget in bytes. */
     private static final int V4_PER_CLASS_BUDGET = 40960;
-    /** Level-4 global payload budget in bytes. */
+
     private static final int V4_GLOBAL_BUDGET = 8 * 1024 * 1024;
 
-    /** Attribute names that are code-only; unknown at class/method/field level. */
     private static final String[] CODE_ONLY_NAMES = {
             "LocalVariableTypeTable", "LineNumberTable", "LocalVariableTable", "StackMapTable",
             "Code", "MethodParameters", "AnnotationDefault"
     };
-    /** Attribute names that are class-only; unknown at method/field level. */
+
     private static final String[] CLASS_ONLY_NAMES = {
             "SourceDebugExtension", "BootstrapMethods", "InnerClasses", "NestHost", "NestMembers",
             "EnclosingMethod", "SourceFile", "PermittedSubclasses", "Record"
     };
-    /** Attribute names that are field-only; unknown at class/method level. */
+
     private static final String[] FIELD_ONLY_NAMES = { "ConstantValue" };
 
     @Override
@@ -94,15 +92,9 @@ public final class DecompilerNoisePass implements Pass {
     public void run(PassContext context) {
         int level = clampLevel(context.config().optionInt("decompilerNoise.level", 1));
         int baseLevel = Math.min(level, ClassNoise.LEVEL_HOSTILE);
-        // Anti-LLM moves bodies into wrappers and skips methods that carry custom
-        // attributes. If it is enabled, leave wrappable methods' attribute list
-        // empty so the two features do not cancel each other.
+
         boolean preserveAntiLlm = context.config().antiLlm().enabled();
 
-        // Level 1..3 keep the exact v2 profile (same budgets, same random
-        // sequence). Level 4 first applies the level-3 profile with its own
-        // budget and then the hostile additions with a separate budget, so the
-        // stronger profile does not starve the classic one.
         NoiseBudget baseBudget = level >= LEVEL_V4
                 ? new NoiseBudget(ClassNoise.perClassBudget(ClassNoise.LEVEL_HOSTILE),
                         ClassNoise.globalBudget(ClassNoise.LEVEL_HOSTILE))
@@ -153,41 +145,33 @@ public final class DecompilerNoisePass implements Pass {
                 level, classes, attributes, bytes, level4Attributes, level4Bytes);
     }
 
-    /** Clamps the configured level to the supported 1..4 range. */
     static int clampLevel(int level) {
         return Math.max(1, Math.min(LEVEL_V4, level));
     }
 
-    /** Mirrors the pass opt-out rules used by every other metadata pass. */
     private static boolean skip(PassContext context, ClassNode node) {
         if (node == null || node.name == null) {
             return true;
         }
         if ("module-info".equals(node.name) || node.name.endsWith("/module-info")) {
-            // module-info has a rigid attribute set; unknown attributes are legal
-            // but there is no benefit and module frameworks are picky.
+
             return true;
         }
         if (context.classes().isGenerated(node.name) || context.classes().isFrozen(node.name)) {
             return true;
         }
         if (context.rules().skipBodyTransform(node.name)) {
-            // Mixin classes and their targets must keep their exact bytecode shape.
+
             return true;
         }
         return !context.rules().transformClass(node);
     }
-
-    // ------------------------------------------------------------------
-    // Level 4
-    // ------------------------------------------------------------------
 
     private static final class V4Result {
         private int attributes;
         private int bytes;
     }
 
-    /** Applies the level-4 hostile metadata profile on top of level 3. */
     private static V4Result applyLevel4(ClassNode node, Random random, NoiseBudget budget,
                                         boolean preserveAntiLlm) {
         V4Result result = new V4Result();
@@ -197,7 +181,6 @@ public final class DecompilerNoisePass implements Pass {
         return result;
     }
 
-    /** Picks an attribute name that is unknown at the current location. */
     private static String wrongLocationName(NoiseGenerator gen, String[]... groups) {
         int total = 0;
         for (String[] group : groups) {
@@ -239,7 +222,7 @@ public final class DecompilerNoisePass implements Pass {
         }
 
         void run() {
-            // Structural traps first so they are never starved by the budget.
+
             bogusEnclosingMethod();
             innerClassDecoys();
             oversizedSourceDebug();
@@ -279,15 +262,11 @@ public final class DecompilerNoisePass implements Pass {
             return node.attrs;
         }
 
-        /** JVM ignores the attribute; decompilers treat the class as local/anonymous. */
         private void bogusEnclosingMethod() {
             if (node.version < Opcodes.V1_5 || node.outerClass != null) {
                 return;
             }
-            // The enclosing class must be resolvable: reflection and some tools
-            // resolve it, and a phantom name would raise NoClassDefFoundError.
-            // Using the superclass keeps the attribute loadable while still
-            // making decompilers display the class as a local/anonymous class.
+
             String owner = node.superName == null ? "java/lang/Object" : node.superName;
             String method = gen.tag(3, 8);
             if (!charge(HEADER + owner.length() + method.length() + 4)) {
@@ -300,12 +279,6 @@ public final class DecompilerNoisePass implements Pass {
             result.bytes += HEADER + owner.length() + method.length() + 4;
         }
 
-        /**
-         * Phantom InnerClasses rows with contradictory flags and duplicated
-         * names. Deliberately no row whose inner class is this class: HotSpot's
-         * {@code Class.getModifiers()} takes an inner class' flags from that row,
-         * which would drop ACC_ENUM/ACC_INTERFACE and break enums at run time.
-         */
         private void innerClassDecoys() {
             if (node.version < Opcodes.V1_5) {
                 return;
@@ -328,8 +301,7 @@ public final class DecompilerNoisePass implements Pass {
                 result.attributes++;
                 result.bytes += cost;
             }
-            // A duplicate row for the same phantom pair with different flags is
-            // legal class-file data that decompilers disagree about.
+
             int duplicates = gen.nextInt(2);
             for (int i = 0; i < duplicates; i++) {
                 String inner = gen.phantomClass();
@@ -382,8 +354,7 @@ public final class DecompilerNoisePass implements Pass {
         }
 
         private void classLevelTraps() {
-            // A second class-level Code attribute plus code-only / field-only
-            // attribute names at class level (unknown there, so the JVM skips them).
+
             namedAttribute(classAttributes(), "Code", new byte[] { 0, 0, 0, 0 });
             for (int i = 0; i < 3; i++) {
                 namedAttribute(classAttributes(),
@@ -434,8 +405,7 @@ public final class DecompilerNoisePass implements Pass {
         }
 
         private void fieldNoise(FieldNode field) {
-            // Code-only / class-only attribute names on a field are unknown at
-            // this location, so the JVM ignores them while parsers do not.
+
             for (int i = 0; i < 2; i++) {
                 namedAttribute(fieldAttributes(field),
                         wrongLocationName(gen, CODE_ONLY_NAMES, CLASS_ONLY_NAMES),
@@ -459,8 +429,7 @@ public final class DecompilerNoisePass implements Pass {
                 return;
             }
             if (method.name.startsWith("<") && method.name.contains("init")) {
-                // Constructors still get metadata noise, but no phantom checked
-                // exceptions: some tools inspect constructor throws aggressively.
+
                 fakeExceptions(method, 1);
             } else {
                 fakeExceptions(method, 1 + gen.nextInt(2));
@@ -482,9 +451,7 @@ public final class DecompilerNoisePass implements Pass {
         }
 
         private void fakeExceptions(MethodNode method, int count) {
-            // Only real, resolvable JDK exception classes: reflection and the
-            // launcher resolve declared exception types, so phantom names
-            // would break `getExceptionTypes` and main-class validation.
+
             List<String> exceptions = method.exceptions == null
                     ? new ArrayList<String>() : new ArrayList<String>(method.exceptions);
             for (int i = 0; i < count; i++) {
@@ -575,7 +542,6 @@ public final class DecompilerNoisePass implements Pass {
             method.localVariables = rows;
         }
 
-        /** Mirrors {@code ClassNoise}'s anti-LLM eligibility check. */
         private boolean antiLlmWrappable(MethodNode method) {
             if ((method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE
                     | Opcodes.ACC_BRIDGE | Opcodes.ACC_SYNTHETIC)) != 0) {

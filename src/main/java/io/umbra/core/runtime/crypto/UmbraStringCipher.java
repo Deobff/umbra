@@ -69,19 +69,18 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class UmbraStringCipher {
 
-    /** Engine codes used by the emitted call sites and the bootstrap. */
     public static final int XOR = 0;
     public static final int CHACHA20 = 1;
     public static final int AES_CTR = 2;
     public static final int RC4 = 3;
     public static final int SPECK = 4;
 
-    /** Payload/key-schedule version implemented by this template. */
-    public static final int PAYLOAD_VERSION = 3;
+    public static final int PAYLOAD_VERSION = 4;
 
-    /** "0" for plain, bit 0 = wipe, bit 1 = stack-trace hiding, bit 2 = plaintext cache. */
+    public static final int PAYLOAD_SALT_BYTES = 8;
+
     private static final String FLAGS_SPEC = "@@FLAGS@@";
-    /** Build-time artifact salt (decimal 64-bit); replaced at injection time. */
+
     private static final String SALT_SPEC = "@@SALT@@";
 
     private static final int FLAGS = parseFlags(FLAGS_SPEC);
@@ -89,117 +88,68 @@ public final class UmbraStringCipher {
     private static final boolean HIDE_TRACE = (FLAGS & 2) != 0;
     private static final boolean CACHE_ENABLED = (FLAGS & 4) != 0;
 
-    /**
-     * Only allocated when the opt-in cache bit is set; the default build keeps
-     * no plaintext map reachable from the decryptor at all.
-     */
     private static final ConcurrentHashMap<String, String> CACHE =
             CACHE_ENABLED ? new ConcurrentHashMap<String, String>() : null;
 
-    /** Artifact salt embedded by the pass (0 when a foreign template is used). */
     private static final long SALT = parseLong(SALT_SPEC);
 
-    /**
-     * Engine code of the most recent decryption. Self-test hook: a protected
-     * program can assert that two consecutive calls at one site really used
-     * different engines. Holds no key material.
-     */
     private static int lastEngine = -1;
 
     private UmbraStringCipher() {
     }
 
-    // ------------------------------------------------------------------
-    // Call-site entry points (emitted by StringEncryptionPass)
-    // ------------------------------------------------------------------
-
-    /** Per-class key, no memoization. */
     public static String d(String[] parts, String classKey, int siteId, int engine) {
         return decrypt(parts, classKey, 0L, siteId, true, false, engine);
     }
 
-    /** Per-class key, memoized per call site (only when the cache bit is set). */
     public static String e(String[] parts, String classKey, int siteId, int engine) {
         return decrypt(parts, classKey, 0L, siteId, true, CACHE_ENABLED, engine);
     }
 
-    /** Per-site 64-bit seed, no memoization. */
     public static String d(String[] parts, long siteSeed, int siteId, int engine) {
         return decrypt(parts, null, siteSeed, siteId, false, false, engine);
     }
 
-    /** Per-site 64-bit seed, memoized per call site (only when the cache bit is set). */
     public static String e(String[] parts, long siteSeed, int siteId, int engine) {
         return decrypt(parts, null, siteSeed, siteId, false, CACHE_ENABLED, engine);
     }
 
-    /** Per-class key, dual payload, no memoization. */
     public static String d(String[] parts, String classKey, int siteId, int engineA, int engineB,
                            int selector) {
         return decryptDual(parts, classKey, 0L, siteId, true, false, engineA, engineB, selector);
     }
 
-    /** Per-class key, dual payload, memoized per call site (only when the cache bit is set). */
     public static String e(String[] parts, String classKey, int siteId, int engineA, int engineB,
                            int selector) {
         return decryptDual(parts, classKey, 0L, siteId, true, CACHE_ENABLED, engineA, engineB,
                 selector);
     }
 
-    /** Per-site 64-bit seed, dual payload, no memoization. */
     public static String d(String[] parts, long siteSeed, int siteId, int engineA, int engineB,
                            int selector) {
         return decryptDual(parts, null, siteSeed, siteId, false, false, engineA, engineB, selector);
     }
 
-    /** Per-site 64-bit seed, dual payload, memoized per call site (cache bit only). */
     public static String e(String[] parts, long siteSeed, int siteId, int engineA, int engineB,
                            int selector) {
         return decryptDual(parts, null, siteSeed, siteId, false, CACHE_ENABLED, engineA, engineB,
                 selector);
     }
 
-    /**
-     * Engine code used by the most recent decryption ({@code -1} before the first
-     * one). Self-test hook only: it lets a protected program assert that two
-     * consecutive calls at one site really used different engines.
-     */
     public static int lastEngine() {
         return lastEngine;
     }
 
-    /**
-     * Site index of one half of a dual payload. The second half is domain
-     * separated, so the two ciphertexts of the same value never derive the same
-     * key/nonce and therefore never share a keystream. Shared by the build-side
-     * pass (encryption) and this template (decryption), so the two sides cannot
-     * drift.
-     */
     public static int dualSiteId(int siteId, int half) {
         return half == 0 ? siteId : siteId ^ 0x7F4A7C15;
     }
 
-    /**
-     * Decodes one packed payload (parts joined with {@code '|'}). Used by the
-     * invokedynamic string bootstrap, which cannot pass a {@code String[]}.
-     */
-    public static String decode(String packed, String classKeyBase64, long siteSeed, int siteId,
-                                int engine) {
+    public static String decode(String packed, String classKeyBase64, long siteSeed, int siteId) {
         String[] parts = split(packed);
         return decrypt(parts, classKeyBase64, siteSeed, siteId,
-                classKeyBase64 != null && classKeyBase64.length() > 0, false, engine);
+                classKeyBase64 != null && classKeyBase64.length() > 0, false, -1);
     }
 
-    // ------------------------------------------------------------------
-    // Salted key schedule (payload format v3, shared build/runtime)
-    // ------------------------------------------------------------------
-
-    /**
-     * Literal domain separators (rewritten per build by template injection) and
-     * their mutable counterparts, which the build side sets through
-     * {@link #applyDomainTags(java.util.Map)}. The passes call this class at build
-     * time, so both sides have to read the same field.
-     */
     private static final String LIT_CLASS_KEY = "io.umbra.string.v3.class.key";
     private static final String LIT_SITE_SEED = "io.umbra.string.v3.site.seed";
     private static final String LIT_SITE_KEY = "io.umbra.string.v3.site.key";
@@ -220,10 +170,6 @@ public final class UmbraStringCipher {
     private static String TAG_RC4_KEY = LIT_RC4_KEY;
     private static String TAG_SPECK_KEY = LIT_SPECK_KEY;
 
-    /**
-     * Build-side hook: installs the per-build separators. Never called at runtime
-     * (the injected copy has them baked into its static initializer).
-     */
     public static void applyDomainTags(java.util.Map<String, String> tags) {
         TAG_CLASS_KEY = pick(tags, LIT_CLASS_KEY);
         TAG_SITE_SEED = pick(tags, LIT_SITE_SEED);
@@ -241,11 +187,6 @@ public final class UmbraStringCipher {
         return value == null ? literal : value;
     }
 
-    /**
-     * Derives the 256-bit per-class key from the artifact salt, the build seed
-     * and the class name. Build-time only (the runtime reads the Base64 form),
-     * but kept here so the pass and the template share one implementation.
-     */
     public static byte[] classKeyV2(long salt, long buildSeed, String className) {
         return UmbraCrypto.sha256(UmbraCrypto.concat(
                 UmbraCrypto.utf8(TAG_CLASS_KEY),
@@ -253,7 +194,6 @@ public final class UmbraStringCipher {
                 UmbraCrypto.utf8(className)));
     }
 
-    /** Derives the per-site 64-bit seed with the artifact salt folded in. */
     public static long siteSeedV2(long salt, long buildSeed, String className, int siteId) {
         byte[] digest = UmbraCrypto.sha256(UmbraCrypto.concat(
                 UmbraCrypto.utf8(TAG_SITE_SEED),
@@ -262,14 +202,12 @@ public final class UmbraStringCipher {
         return readLongLE(digest, 0);
     }
 
-    /** Per-site key: SHA-256 over salt, site seed and random site index. */
     public static byte[] siteKeyV2(long salt, long siteSeed, int siteId) {
         return UmbraCrypto.sha256(UmbraCrypto.concat(
                 UmbraCrypto.utf8(TAG_SITE_KEY),
                 UmbraCrypto.le64(salt), UmbraCrypto.le64(siteSeed), UmbraCrypto.le32(siteId)));
     }
 
-    /** Per-site nonce: 96 bits of SHA-256 over salt, site seed and site index. */
     public static byte[] siteNonceV2(long salt, long siteSeed, int siteId) {
         return UmbraCrypto.first(UmbraCrypto.sha256(UmbraCrypto.concat(
                 UmbraCrypto.utf8(TAG_SITE_NONCE),
@@ -277,14 +215,123 @@ public final class UmbraStringCipher {
                 12);
     }
 
-    /** Per-class nonce: 96 bits of SHA-256 over salt, class key and site index. */
     public static byte[] classNonceV2(long salt, byte[] classKey, int siteId) {
         return UmbraCrypto.first(UmbraCrypto.sha256(UmbraCrypto.concat(
                 UmbraCrypto.utf8(TAG_CLASS_NONCE),
                 UmbraCrypto.le64(salt), classKey, UmbraCrypto.le32(siteId))), 12);
     }
 
-    /** Default artifact salt derived from the build seed (build-time only). */
+    public static byte[] siteKeyV4(byte[] root, long salt, long siteSeed, int siteId,
+                                   byte[] payloadSalt) {
+        return UmbraCrypto.sha256(rooted(root, TAG_SITE_KEY, UmbraCrypto.le64(salt),
+                UmbraCrypto.le64(siteSeed), UmbraCrypto.le32(siteId), payloadSalt));
+    }
+
+    public static byte[] siteNonceV4(byte[] root, long salt, long siteSeed, int siteId,
+                                     byte[] payloadSalt) {
+        return UmbraCrypto.first(UmbraCrypto.sha256(rooted(root, TAG_SITE_NONCE,
+                UmbraCrypto.le64(salt), UmbraCrypto.le64(siteSeed), UmbraCrypto.le32(siteId),
+                payloadSalt)), 12);
+    }
+
+    public static byte[] classNonceV4(byte[] root, long salt, byte[] classKey, int siteId,
+                                      byte[] payloadSalt) {
+        return UmbraCrypto.first(UmbraCrypto.sha256(rooted(root, TAG_CLASS_NONCE,
+                UmbraCrypto.le64(salt), classKey, UmbraCrypto.le32(siteId), payloadSalt)), 12);
+    }
+
+    public static long payloadStreamSeed(long siteSeed, byte[] payloadSalt) {
+        return siteSeed ^ readLongLE(payloadSalt, 0);
+    }
+
+    private static byte[] rooted(byte[] root, String tag, byte[]... parts) {
+        byte[] tagBytes = UmbraCrypto.utf8(tag);
+        if (root == null) {
+            byte[][] all = new byte[parts.length + 1][];
+            all[0] = tagBytes;
+            System.arraycopy(parts, 0, all, 1, parts.length);
+            return UmbraCrypto.concat(all);
+        }
+        byte[][] all = new byte[parts.length + 2][];
+        all[0] = tagBytes;
+        all[1] = root;
+        System.arraycopy(parts, 0, all, 2, parts.length);
+        return UmbraCrypto.concat(all);
+    }
+
+    private static byte[] resolveRoot() {
+        byte[] published = UmbraCrypto.keyRoot();
+        if (published != null) {
+            return published;
+        }
+        try {
+            String self = UmbraStringCipher.class.getName();
+            int dot = self.lastIndexOf('.');
+            if (dot <= 0) {
+                return null;
+            }
+            String prefix = self.substring(0, dot + 1);
+            java.io.File archive = selfArchive();
+            if (archive == null) {
+                return null;
+            }
+            java.util.jar.JarFile jar = new java.util.jar.JarFile(archive);
+            try {
+                java.util.Enumeration<java.util.jar.JarEntry> entries = jar.entries();
+                while (entries.hasMoreElements()) {
+                    String name = entries.nextElement().getName();
+                    if (!name.startsWith(prefix) || !name.endsWith(".class")) {
+                        continue;
+                    }
+                    String binary = name.substring(0, name.length() - 6).replace('/', '.');
+                    if (binary.equals(self)) {
+                        continue;
+                    }
+                    try {
+                        Class<?> type = Class.forName(binary, true,
+                                UmbraStringCipher.class.getClassLoader());
+                        java.lang.reflect.Method entry =
+                                type.getDeclaredMethod("rootOrNull");
+                        Object value = entry.invoke(null);
+                        if (value instanceof byte[]) {
+                            byte[] root = (byte[]) value;
+                            if (root.length == 32) {
+                                UmbraCrypto.installKeyRoot(root);
+                                return root;
+                            }
+                        }
+                    } catch (Throwable notTheMask) {
+
+                    }
+                }
+            } finally {
+                jar.close();
+            }
+        } catch (Throwable unavailable) {
+            return null;
+        }
+        return null;
+    }
+
+    private static java.io.File selfArchive() {
+        try {
+            java.security.CodeSource source =
+                    UmbraStringCipher.class.getProtectionDomain().getCodeSource();
+            if (source == null || source.getLocation() == null) {
+                return null;
+            }
+            java.io.File file = new java.io.File(source.getLocation().toURI());
+            return file.isFile() ? file : null;
+        } catch (Throwable unavailable) {
+            return null;
+        }
+    }
+
+    public static byte[] classKeyV4(byte[] root, long salt, long buildSeed, String className) {
+        return UmbraCrypto.sha256(rooted(root, TAG_CLASS_KEY,
+                UmbraCrypto.le64(salt), UmbraCrypto.le64(buildSeed), UmbraCrypto.utf8(className)));
+    }
+
     public static long deriveArtifactSalt(long buildSeed) {
         byte[] digest = UmbraCrypto.sha256(UmbraCrypto.concat(
                 UmbraCrypto.utf8(TAG_ARTIFACT_SALT),
@@ -293,7 +340,6 @@ public final class UmbraStringCipher {
         return salt == 0L ? 0x5A17C0DEL : salt;
     }
 
-    /** Deterministic salt derived from an explicit {@code string.siteSalt} text. */
     public static long hashSaltText(String text) {
         byte[] digest = UmbraCrypto.sha256(UmbraCrypto.concat(
                 UmbraCrypto.utf8(TAG_USER_SALT), UmbraCrypto.utf8(text)));
@@ -301,41 +347,23 @@ public final class UmbraStringCipher {
         return salt == 0L ? 0x5A17C0DEL : salt;
     }
 
-    // ------------------------------------------------------------------
-    // Per-site decryption
-    // ------------------------------------------------------------------
-
     private static String decrypt(String[] parts, String classKeyBase64, long siteSeed, int siteId,
                                   boolean perClass, boolean cached, int engine) {
         return decryptRange(parts, 0, parts.length, classKeyBase64, siteSeed, siteId, perClass,
                 cached, engine);
     }
 
-    /**
-     * Decrypts one dual-engine payload: the first {@code parts.length / 2} entries
-     * are the {@code engineA} ciphertext, the rest the {@code engineB} ciphertext,
-     * and bit 0 of {@code selector} chooses which one is used. Both halves decrypt
-     * to the same value, so the choice is invisible except in the executed
-     * instructions and the cipher state.
-     */
     private static String decryptDual(String[] parts, String classKeyBase64, long siteSeed,
                                       int siteId, boolean perClass, boolean cached, int engineA,
                                       int engineB, int selector) {
         int half = dualHalf(parts);
         boolean second = (selector & 1) != 0;
         int engine = second ? engineB : engineA;
-        // The halves are domain separated by site index (see dualSiteId), so the
-        // key material of the selected half is derived from its own index.
-        int halfSiteId = dualSiteId(siteId, second ? 1 : 0);
+
         return decryptRange(parts, second ? half : 0, second ? parts.length : half, classKeyBase64,
-                siteSeed, halfSiteId, perClass, cached, engine);
+                siteSeed, siteId, perClass, cached, engine);
     }
 
-    /**
-     * Number of entries in the first half of a dual payload. The build side emits
-     * two equal halves, so an odd length or a single part is a corrupt payload,
-     * not something to guess a boundary for.
-     */
     private static int dualHalf(String[] parts) {
         if (parts == null || parts.length < 2 || (parts.length & 1) != 0) {
             throw new IllegalArgumentException();
@@ -356,7 +384,19 @@ public final class UmbraStringCipher {
                     return hit;
                 }
             }
-            byte[] ciphertext = join(parts, from, to);
+            byte[] packed = join(parts, from, to);
+            if (packed.length <= PAYLOAD_SALT_BYTES) {
+                Arrays.fill(packed, (byte) 0);
+                throw new IllegalArgumentException();
+            }
+            byte[] payloadSalt = Arrays.copyOfRange(packed, 0, PAYLOAD_SALT_BYTES);
+            byte[] ciphertext = Arrays.copyOfRange(packed, PAYLOAD_SALT_BYTES, packed.length);
+            Arrays.fill(packed, (byte) 0);
+            if (engine < 0) {
+
+                engine = payloadSalt[0] & 7;
+            }
+            byte[] root = UmbraCrypto.keyRoot();
             byte[] classKey = null;
             byte[] key = null;
             byte[] nonce = null;
@@ -365,13 +405,15 @@ public final class UmbraStringCipher {
                 if (perClass) {
                     classKey = UmbraCrypto.base64Decode(classKeyBase64);
                     key = classKey;
-                    nonce = classNonceV2(SALT, classKey, siteId);
+                    nonce = classNonceV4(root, SALT, classKey, siteId, payloadSalt);
                 } else {
-                    key = siteKeyV2(SALT, siteSeed, siteId);
-                    nonce = siteNonceV2(SALT, siteSeed, siteId);
+                    key = siteKeyV4(root, SALT, siteSeed, siteId, payloadSalt);
+                    nonce = siteNonceV4(root, SALT, siteSeed, siteId, payloadSalt);
                     temporaryKey = true;
                 }
-                byte[] plain = transform(engine, ciphertext, key, nonce, siteSeed);
+
+                long streamSeed = payloadStreamSeed(siteSeed, payloadSalt);
+                byte[] plain = transform(engine, ciphertext, key, nonce, streamSeed);
                 String value = internUtf8(plain);
                 Arrays.fill(plain, (byte) 0);
                 lastEngine = engine;
@@ -380,8 +422,10 @@ public final class UmbraStringCipher {
                 }
                 return value;
             } finally {
+                UmbraCrypto.wipe(payloadSalt);
                 UmbraCrypto.wipe(ciphertext);
                 UmbraCrypto.wipe(classKey);
+                UmbraCrypto.wipe(root);
                 if (temporaryKey) {
                     UmbraCrypto.wipe(key);
                 }
@@ -395,7 +439,6 @@ public final class UmbraStringCipher {
         }
     }
 
-    /** Builds the interned value; with wipe enabled the UTF-16 buffer is zeroed. */
     private static String internUtf8(byte[] plain) {
         if (!WIPE) {
             return UmbraCrypto.fromUtf8(plain).intern();
@@ -410,7 +453,6 @@ public final class UmbraStringCipher {
         }
     }
 
-    /** A failure that cannot be used to locate the helper or read its state. */
     private static IllegalStateException sanitized(RuntimeException failure) {
         IllegalStateException sanitized = new IllegalStateException("");
         sanitized.setStackTrace(new StackTraceElement[0]);
@@ -431,7 +473,6 @@ public final class UmbraStringCipher {
         return builder.toString();
     }
 
-    /** Concatenates the Base64 parts in {@code [from, to)} into one ciphertext. */
     private static byte[] join(String[] parts, int from, int to) {
         int length = 0;
         for (int i = from; i < to; i++) {
@@ -472,23 +513,6 @@ public final class UmbraStringCipher {
         return parts;
     }
 
-    // ------------------------------------------------------------------
-    // Engine primitive (shared by the build-time pass and the runtime)
-    // ------------------------------------------------------------------
-
-    /**
-     * Stream-cipher transform: XORs {@code data} with the keystream of the
-     * selected engine. Symmetric, so encryption and decryption are the same
-     * call.
-     *
-     * @param engine engine code ({@link #XOR}, {@link #CHACHA20}, {@link #AES_CTR},
-     *               {@link #RC4}, {@link #SPECK})
-     * @param data   input bytes (never mutated)
-     * @param key    256-bit derived key; ignored by {@link #XOR}
-     * @param nonce  96-bit derived nonce
-     * @param seed   64-bit per-site seed (xorshift engine only)
-     * @return transformed copy of {@code data}
-     */
     public static byte[] transform(int engine, byte[] data, byte[] key, byte[] nonce, long seed) {
         switch (engine) {
             case XOR:
@@ -506,7 +530,6 @@ public final class UmbraStringCipher {
         }
     }
 
-    /** Human-readable engine id for logs (build side only). */
     public static String engineId(int engine) {
         switch (engine) {
             case XOR: return "xor";
@@ -516,10 +539,6 @@ public final class UmbraStringCipher {
             default: return "chacha20";
         }
     }
-
-    // ------------------------------------------------------------------
-    // RC4
-    // ------------------------------------------------------------------
 
     private static byte[] rc4(byte[] key, byte[] data) {
         int[] state = new int[256];
@@ -551,10 +570,6 @@ public final class UmbraStringCipher {
             Arrays.fill(key, (byte) 0);
         }
     }
-
-    // ------------------------------------------------------------------
-    // Speck64/128 in counter mode (pure Java, no provider dependency)
-    // ------------------------------------------------------------------
 
     private static final int SPECK_ROUNDS = 27;
 
@@ -592,7 +607,6 @@ public final class UmbraStringCipher {
         }
     }
 
-    /** Speck64/128 key schedule: 4 key words, 27 round keys. */
     private static void speckSchedule(int[] key, int[] roundKeys) {
         int[] l = new int[SPECK_ROUNDS + 2];
         roundKeys[0] = key[0];
@@ -609,10 +623,6 @@ public final class UmbraStringCipher {
             Arrays.fill(l, 0);
         }
     }
-
-    // ------------------------------------------------------------------
-    // Helpers
-    // ------------------------------------------------------------------
 
     private static int parseFlags(String value) {
         if (value == null) {

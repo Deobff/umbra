@@ -22,7 +22,6 @@ import java.util.Set;
  */
 public final class GuiSwitches {
 
-    /** Group rendering hint: plain switches or a custom stack of rows. */
     public enum Kind {
         SWITCHES,
         INPUT_OUTPUT,
@@ -30,7 +29,6 @@ public final class GuiSwitches {
         ADVANCED
     }
 
-    /** One toggle row. */
     public static final class Toggle {
         public final String id;
         public final String label;
@@ -50,7 +48,6 @@ public final class GuiSwitches {
         }
     }
 
-    /** One collapsible group. */
     public static final class GroupDef {
         public final String title;
         public final boolean expanded;
@@ -86,36 +83,56 @@ public final class GuiSwitches {
 
         groups.add(group("Names", true,
                 toggle("rename", "Rename classes & members", "renamer.enabled", true),
+                toggle("recordComponents", "Rename record components", "renamer.records", false),
                 toggle("keepPublic", "Keep public API names", "keepPublicApi", false)));
 
         groups.add(group("Data", true,
                 toggle("strings", "String encryption", "stringEncryption.enabled", true),
                 toggle("stringHide", "Hide decryption traces", "string.stackTraceHide", true),
                 toggle("stringWipe", "Wipe decrypted strings", "string.wipe", true),
+                toggle("keylessFallback", "Allow keyless string tier (weak)",
+                        "string.allowKeylessFallback", false),
                 toggle("integers", "Integer encryption", "integerEncryption.enabled", true)));
 
         groups.add(group("Control flow", true,
                 toggle("flow", "Control-flow obfuscation", "flowObfuscation.enabled", true),
                 toggle("flatten", "Flattening", "flowObfuscation.flattening", true),
                 toggle("aggressiveFlow", "Aggressive flow", "flow.aggressive", false),
+                toggle("crossClass", "Cross-class guard fields", "flow.crossClass", true),
+                toggle("mbaPredicates", "MBA opaque predicates", "flow.mbaPredicates", true),
+                toggle("entryShuffle", "Entry shuffle", "flow.entryShuffle", false),
                 toggle("exceptions", "Exception obfuscation", "exceptionObfuscation.enabled", true)));
 
         groups.add(group("Virtualization", false,
                 toggle("vm2", "Virtualize methods (VM2)", "methodVirtualization.enabled", true),
                 toggle("fusion", "VM2 superinstructions", "vm2.fusion", true),
+                toggle("semanticCodes", "VM2 per-payload opcodes", "vm2.semanticCodes", true),
+                toggle("localCallIds", "VM2 local call ids", "vm2.localCallIds", true),
+                toggle("perPayloadOpcodes", "VM2 per-payload dispatch",
+                        "vm2.perPayloadOpcodes", true),
                 toggle("nocturne", "Nocturne engine", "nocturne.enabled", false),
                 toggle("nocturneCompatible", "Nocturne + body passes",
                         "nocturne.compatible", false)));
 
         groups.add(group("Native", false,
                 toggle("nativeCode", "Native compilation (JNI)", "native.enabled", false),
-                toggle("antiDump", "Native anti-dump", "native.antiDump", true)));
+                toggle("antiDump", "Native anti-dump", "native.antiDump", true),
+                toggle("nativeKey", "Bind master to native root",
+                        "classEncryption.nativeKey", false),
+                toggle("nativeKeyFallback", "Allow seed fallback",
+                        "classEncryption.nativeKey.fallback", true)));
 
         groups.add(group("Archive", false,
                 toggle("classEnc", "Encrypt class payload", "classEncryption.enabled", false),
                 toggle("encryptResources", "Encrypt resources", "classEncryption.resources",
                         false),
-                toggle("integrity", "Integrity guard", "integrity.enabled", false)));
+                toggle("constantPool", "Encrypt constant pool",
+                        "classEncryption.constantPool", true),
+                toggle("integrity", "Integrity guard", "integrity.enabled", false),
+                toggle("libraryMode", "Sealed library (key never in archive)",
+                        "classEncryption.libraryMode", false),
+                toggle("allowSkip", "Allow unsealed archive (weak)",
+                        "classEncryption.allowSkip", false)));
 
         groups.add(group("Anti-analysis", false,
                 toggle("noise", "Decompiler noise", "decompilerNoise.enabled", true),
@@ -127,6 +144,7 @@ public final class GuiSwitches {
         groups.add(group("Verification", false,
                 toggle("verify", "Verify output", null, true),
                 toggle("watermark", "Watermark", "watermark.enabled", true),
+                toggle("watermarkBlind", "RSA-blind watermark", "watermark.blind", true),
                 toggle("minecraft", "Minecraft auto-adaptation", "minecraft.enabled", true)));
 
         groups.add(new GroupDef("Advanced", false, Kind.ADVANCED,
@@ -163,7 +181,6 @@ public final class GuiSwitches {
         return toggles;
     }
 
-    /** Default switch state map, in display order. */
     public static Map<String, Boolean> defaults() {
         Map<String, Boolean> states = new LinkedHashMap<String, Boolean>();
         for (Toggle toggle : allToggles()) {
@@ -172,7 +189,6 @@ public final class GuiSwitches {
         return states;
     }
 
-    /** All option keys controlled by a toggle (used to filter override maps). */
     public static Set<String> coveredKeys() {
         Set<String> keys = new LinkedHashSet<String>();
         for (Toggle toggle : allToggles()) {
@@ -183,7 +199,6 @@ public final class GuiSwitches {
         return keys;
     }
 
-    /** Translates switch states into advanced options (GUI-only keys skipped). */
     public static Map<String, String> baseOptions(Map<String, Boolean> states) {
         Map<String, String> options = new LinkedHashMap<String, String>();
         for (Toggle toggle : allToggles()) {
@@ -197,7 +212,6 @@ public final class GuiSwitches {
         return options;
     }
 
-    /** Parses the advanced editor text into an ordered override map. */
     public static Map<String, String> parseAdvanced(String text) {
         Map<String, String> options = new LinkedHashMap<String, String>();
         if (text == null) {
@@ -222,10 +236,6 @@ public final class GuiSwitches {
         return options;
     }
 
-    /**
-     * Reads toggle states from a loaded configuration. Typed sections are
-     * described first, then raw advanced options win, exactly like the CLI.
-     */
     public static Map<String, Boolean> fromConfig(UmbraConfig config) {
         Map<String, String> effective = GuiConfig.describe(config);
         Map<String, Boolean> states = new LinkedHashMap<String, Boolean>();
@@ -240,7 +250,6 @@ public final class GuiSwitches {
         return states;
     }
 
-    /** Advanced options from a loaded configuration that no toggle owns. */
     public static Map<String, String> advancedOverrides(UmbraConfig config) {
         Set<String> covered = coveredKeys();
         Map<String, String> overrides = new LinkedHashMap<String, String>();
@@ -252,7 +261,6 @@ public final class GuiSwitches {
         return overrides;
     }
 
-    /** True when the raw option value means "on" for this toggle. */
     public static boolean matches(String value, Toggle toggle) {
         if (value == null) {
             return toggle.defaultOn;
@@ -274,7 +282,6 @@ public final class GuiSwitches {
         }
     }
 
-    /** Renders an override map back into the advanced editor's line format. */
     public static String formatAdvanced(Map<String, String> overrides) {
         StringBuilder out = new StringBuilder();
         for (Map.Entry<String, String> entry : overrides.entrySet()) {

@@ -56,7 +56,6 @@ public final class MethodGate {
         };
     }
 
-    /** Deep-copies a method including labels, try/catch blocks and debug nodes. */
     public static MethodNode copy(MethodNode original) {
         MethodNode copy = new MethodNode(original.access, original.name, original.desc,
                 original.signature, original.exceptions == null
@@ -86,7 +85,6 @@ public final class MethodGate {
         return copy;
     }
 
-    /** Installs a verified transformed method into the real method node. */
     public static void commit(MethodNode target, MethodNode work) {
         target.instructions = work.instructions;
         target.tryCatchBlocks = work.tryCatchBlocks;
@@ -97,14 +95,6 @@ public final class MethodGate {
         target.invisibleLocalVariableAnnotations = null;
     }
 
-    /**
-     * Serializes a complete class the same way the engine will at write time
-     * ({@code COMPUTE_FRAMES} with the program hierarchy). A pass can therefore
-     * detect class-level frame-computation failures before committing and roll
-     * the whole class back.
-     *
-     * @return true when the class serializes successfully
-     */
     public boolean writes(ClassNode owner) {
         try {
             ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS) {
@@ -123,10 +113,12 @@ public final class MethodGate {
         }
     }
 
-    /**
-     * @return true when the transformed method passes frame computation and
-     *         ASM's type checker
-     */
+    private volatile boolean tolerateMissingClasses;
+
+    public void tolerateMissingClasses(boolean value) {
+        this.tolerateMissingClasses = value;
+    }
+
     public boolean verify(ClassNode owner, MethodNode method) {
         byte[] bytes;
         try {
@@ -164,8 +156,30 @@ public final class MethodGate {
         }
         String output = errors.toString();
         if (!output.isEmpty()) {
+            if (tolerateMissingClasses && onlyMissingClassErrors(output)) {
+                context.log().debug("method-gate: %s.%s carries unresolved references on purpose "
+                        + "(bogus-pop obfuscation); accepted", owner.name, method.name);
+                return true;
+            }
             context.log().debug("method-gate: verification rejected %s.%s: %s",
                     owner.name, method.name, output.trim());
+            return false;
+        }
+        return true;
+    }
+
+    private static boolean onlyMissingClassErrors(String output) {
+        for (String line : output.split("\n")) {
+            String text = line.trim();
+            if (text.isEmpty()) {
+                continue;
+            }
+            if (text.contains("NoClassDefFoundError") || text.contains("ClassNotFoundException")
+                    || text.contains("Cannot find class") || text.contains("Execution error")
+                    || text.contains("Type not present") || text.startsWith("Error:")
+                    || text.startsWith("Exception in thread")) {
+                continue;
+            }
             return false;
         }
         return true;

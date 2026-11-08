@@ -18,13 +18,11 @@ import java.util.Map;
  */
 final class MinecraftJson {
 
-    /** Nesting limit so a hostile document cannot overflow the stack. */
     private static final int MAX_DEPTH = 256;
 
     private MinecraftJson() {
     }
 
-    /** Decodes resource bytes as UTF-8 and strips a leading byte-order mark. */
     static String text(byte[] bytes) {
         if (bytes == null || bytes.length == 0) {
             return "";
@@ -36,7 +34,6 @@ final class MinecraftJson {
         return text;
     }
 
-    /** Parses a JSON document into maps, lists and scalars. */
     static Object parse(String text) {
         if (text == null) {
             throw new IllegalArgumentException("empty JSON document");
@@ -51,7 +48,6 @@ final class MinecraftJson {
         return value;
     }
 
-    /** Parses a JSON document that must be an object. */
     @SuppressWarnings("unchecked")
     static Map<String, Object> parseObject(String text) {
         Object value = parse(text);
@@ -97,7 +93,6 @@ final class MinecraftJson {
         return fallback;
     }
 
-    /** Returns every scalar string found in a string-or-array value. */
     static List<String> strings(Object value) {
         List<String> out = new ArrayList<String>();
         collectStrings(value, out);
@@ -172,7 +167,7 @@ final class MinecraftJson {
 
         private Map<String, Object> object(int depth) {
             Map<String, Object> map = new LinkedHashMap<String, Object>();
-            index++; // '{'
+            index++;
             skipWhitespace();
             if (!atEnd() && text.charAt(index) == '}') {
                 index++;
@@ -209,7 +204,7 @@ final class MinecraftJson {
 
         private List<Object> array(int depth) {
             List<Object> list = new ArrayList<Object>();
-            index++; // '['
+            index++;
             skipWhitespace();
             if (!atEnd() && text.charAt(index) == ']') {
                 index++;
@@ -236,7 +231,7 @@ final class MinecraftJson {
 
         private String string() {
             StringBuilder out = new StringBuilder();
-            index++; // opening quote
+            index++;
             while (index < text.length()) {
                 char c = text.charAt(index++);
                 if (c == '"') {
@@ -298,7 +293,7 @@ final class MinecraftJson {
                 try {
                     return Long.valueOf(raw);
                 } catch (NumberFormatException ignored) {
-                    // fall through to double
+
                 }
             }
             try {

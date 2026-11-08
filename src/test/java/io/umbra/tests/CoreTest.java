@@ -54,11 +54,6 @@ public final class CoreTest {
         System.out.println("CoreTest: " + checks + " checks passed");
     }
 
-    /**
-     * Static constants moved into {@code <clinit>} must be assigned before the
-     * terminal {@code RETURN}: appending them after it turns every assignment into
-     * dead code, and the field silently keeps its default value.
-     */
     private static void testFieldInitializationBeforeReturn() throws Exception {
         ClassNode node = new ClassNode();
         node.version = Opcodes.V1_8;
@@ -111,12 +106,6 @@ public final class CoreTest {
                 "both constants were moved into <clinit>");
     }
 
-    /**
-     * The instruction ceilings are eligibility thresholds, and they scale with the
-     * preset tier. A single shared value made {@code light} as expensive per method
-     * as {@code maximum} on large methods, which defeats the point of picking a
-     * cheaper tier.
-     */
     private static void testPresetCeilings() throws Exception {
         UmbraConfig light = Presets.apply(baseConfig(), "light");
         UmbraConfig balanced = Presets.apply(baseConfig(), "balanced");
@@ -279,11 +268,11 @@ public final class CoreTest {
                         try {
                             Files.deleteIfExists(p);
                         } catch (java.io.IOException ignored) {
-                            // best effort
+
                         }
                     });
         } catch (java.io.IOException ignored) {
-            // best effort
+
         }
     }
 }

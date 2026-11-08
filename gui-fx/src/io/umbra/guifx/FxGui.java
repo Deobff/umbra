@@ -30,7 +30,7 @@ import java.io.File;
 public final class FxGui extends Application {
 
     /** Console version, shown in the title bar and in the About window. */
-    static final String VERSION = "3.2.2";
+    static final String VERSION = "3.4.0";
 
     private static String jarArgument;
 

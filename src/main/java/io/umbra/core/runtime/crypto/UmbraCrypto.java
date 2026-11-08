@@ -37,10 +37,6 @@ public final class UmbraCrypto {
     private UmbraCrypto() {
     }
 
-    // ------------------------------------------------------------------
-    // Encoding / byte helpers
-    // ------------------------------------------------------------------
-
     public static byte[] utf8(String value) {
         return value.getBytes(StandardCharsets.UTF_8);
     }
@@ -89,31 +85,60 @@ public final class UmbraCrypto {
         return Arrays.copyOfRange(data, 0, Math.min(count, data.length));
     }
 
-    // ------------------------------------------------------------------
-    // Digests and HMAC
-    // ------------------------------------------------------------------
+    public static String sha256Hex(byte[] data) {
+        byte[] digest = sha256(data);
+        StringBuilder out = new StringBuilder(digest.length * 2);
+        for (byte b : digest) {
+            out.append(Character.forDigit((b >> 4) & 0xF, 16))
+                    .append(Character.forDigit(b & 0xF, 16));
+        }
+        java.util.Arrays.fill(digest, (byte) 0);
+        return out.toString();
+    }
+
+    public static String algName(int[] codes) {
+        char[] chars = new char[codes.length];
+        for (int i = 0; i < codes.length; i++) {
+            chars[i] = (char) (codes[i] ^ ((i & 1) == 0 ? 0x15 : 0x2A));
+        }
+        try {
+            return new String(chars).intern();
+        } finally {
+            Arrays.fill(chars, (char) 0);
+        }
+    }
+
+    private static final int[] A_SHA256 = {
+            0x46, 0x62, 0x54, 0x07, 0x27, 0x1F, 0x23
+    };
+
+    private static final int[] A_HMAC256 = {
+            0x5D, 0x47, 0x74, 0x49, 0x46, 0x62, 0x54, 0x18, 0x20, 0x1C
+    };
+
+    private static final int[] A_AESCTR = {
+            0x54, 0x6F, 0x46, 0x05, 0x56, 0x7E, 0x47, 0x05, 0x5B, 0x45, 0x45, 0x4B,
+            0x71, 0x4E, 0x7C, 0x44, 0x72
+    };
 
     public static byte[] sha256(byte[] data) {
         try {
-            return MessageDigest.getInstance("SHA-256").digest(data);
+            return MessageDigest.getInstance(algName(A_SHA256)).digest(data);
         } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("SHA-256 unavailable");
+            throw new IllegalStateException("");
         }
     }
 
     public static byte[] hmacSha256(byte[] key, byte[] data) {
         try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(key, "HmacSHA256"));
+            String name = algName(A_HMAC256);
+            Mac mac = Mac.getInstance(name);
+            mac.init(new SecretKeySpec(key, name));
             return mac.doFinal(data);
         } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("HmacSHA256 unavailable");
+            throw new IllegalStateException("");
         }
     }
-
-    // ------------------------------------------------------------------
-    // ChaCha20 (RFC 8439) and AES-256-CTR
-    // ------------------------------------------------------------------
 
     public static byte[] chacha20(byte[] key, byte[] nonce, int counter, byte[] data) {
         byte[] out = data.clone();
@@ -174,12 +199,12 @@ public final class UmbraCrypto {
 
     public static byte[] aesCtr(byte[] key, byte[] iv, byte[] data) {
         try {
-            javax.crypto.Cipher cipher = javax.crypto.Cipher.getInstance("AES/CTR/NoPadding");
+            javax.crypto.Cipher cipher = javax.crypto.Cipher.getInstance(algName(A_AESCTR));
             cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"),
                     new IvParameterSpec(iv));
             return cipher.doFinal(data);
         } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("AES-256-CTR unavailable");
+            throw new IllegalStateException("");
         }
     }
 
@@ -195,34 +220,11 @@ public final class UmbraCrypto {
         return out;
     }
 
-    // ------------------------------------------------------------------
-    // Key derivation (mirrors io.umbra.core.util.Cipher)
-    // ------------------------------------------------------------------
-
-    /**
-     * Literal domain separators. Template injection rewrites the constants (they
-     * are {@code ConstantValue} attributes) so the injected copy starts from the
-     * per-build values; the build side sets the {@code TAG_*} fields through
-     * {@link #applyDomainTags(java.util.Map)}.
-     */
-    private static final String LIT_SITE_KEY = "io.umbra.string.site.key.v1";
-    private static final String LIT_SITE_NONCE = "io.umbra.string.site.nonce.v1";
-    private static final String LIT_CLASS_NONCE = "io.umbra.string.class.nonce.v1";
     private static final String LIT_AES_IV = "io.umbra.aes.iv.v1";
 
-    private static String TAG_SITE_KEY = LIT_SITE_KEY;
-    private static String TAG_SITE_NONCE = LIT_SITE_NONCE;
-    private static String TAG_CLASS_NONCE = LIT_CLASS_NONCE;
     private static String TAG_AES_IV = LIT_AES_IV;
 
-    /**
-     * Build-side hook: installs the per-build separators. Never called at runtime
-     * (the injected copy has them baked into its static initializer).
-     */
     public static void applyDomainTags(java.util.Map<String, String> tags) {
-        TAG_SITE_KEY = pick(tags, LIT_SITE_KEY);
-        TAG_SITE_NONCE = pick(tags, LIT_SITE_NONCE);
-        TAG_CLASS_NONCE = pick(tags, LIT_CLASS_NONCE);
         TAG_AES_IV = pick(tags, LIT_AES_IV);
     }
 
@@ -231,74 +233,170 @@ public final class UmbraCrypto {
         return value == null ? literal : value;
     }
 
-    public static byte[] siteKey(long siteSeed, int siteId) {
-        return sha256(concat(utf8(TAG_SITE_KEY), le64(siteSeed), le32(siteId)));
-    }
-
-    public static byte[] siteNonce(long siteSeed, int siteId) {
-        return first(sha256(concat(utf8(TAG_SITE_NONCE), le64(siteSeed), le32(siteId))),
-                NONCE_BYTES);
-    }
-
-    public static byte[] classNonce(byte[] classKey, int siteId) {
-        return first(sha256(concat(utf8(TAG_CLASS_NONCE), classKey, le32(siteId))),
-                NONCE_BYTES);
-    }
-
     public static byte[] aesIv(byte[] key, byte[] nonce) {
         return first(sha256(concat(utf8(TAG_AES_IV), key, nonce)), AES_IV_BYTES);
     }
 
-    /**
-     * Decrypts a string payload accepted by the injected string decryptor.
-     *
-     * @param ciphertext ciphertext bytes (already Base64-decoded and joined)
-     * @param classKey   256-bit per-class key, or {@code null} for per-site keys
-     * @param siteSeed   64-bit per-site seed embedded at the call site
-     * @param siteId     per-class call-site index
-     * @param alg        one of {@link #ALG_XOR}, {@link #ALG_CHACHA20}, {@link #ALG_AES_CTR}
-     * @return plaintext bytes
-     */
-    public static byte[] stringPlain(byte[] ciphertext, byte[] classKey, long siteSeed, int siteId, int alg) {
-        if (alg == ALG_XOR) {
-            return xorStream(ciphertext, siteSeed);
-        }
-        byte[] key;
-        boolean temporary = false;
-        if (classKey != null) {
-            key = classKey;
-        } else {
-            key = siteKey(siteSeed, siteId);
-            temporary = true;
-        }
-        try {
-            byte[] nonce = classKey != null ? classNonce(key, siteId) : siteNonce(siteSeed, siteId);
-            if (alg == ALG_AES_CTR) {
-                return aesCtr(key, aesIv(key, nonce), ciphertext);
-            }
-            return chacha20(key, nonce, 1, ciphertext);
-        } finally {
-            if (temporary) {
-                wipe(key);
-            }
+    public static final int ROOT_BYTES = 32;
+
+    public static final int SLOT_CLASS_MASTER = 1;
+    public static final int SLOT_DIGEST = 2;
+    public static final int SLOT_STRING = 3;
+    public static final int SLOT_INTEGRITY = 4;
+
+    private static final String SUB_KEY_LABEL = "umbra.sub.v1";
+
+    private static final String NATIVE_ROOT_LABEL = "umbra.keyroot.v1";
+
+    public static final int ROOT_SLOT = 1;
+    public static final int ROOT_SUB = 0;
+
+    private static final String NATIVE_MASTER_LABEL = "class.master.v1";
+
+    private static final Object ROOT_LOCK = new Object();
+
+    private static volatile byte[] root32;
+
+    private static final String STRING_KEY = "__UMBRA_NO_STRING_KEY__";
+
+    private static volatile byte[] stringKey;
+
+    public static void installKeyRoot(byte[] value) {
+        synchronized (ROOT_LOCK) {
+            root32 = value == null ? null : value.clone();
         }
     }
 
-    /**
-     * Per-entry key derivation used by the class-encryption loader (index v3):
-     * the entry's own nonce is mixed into the KDF, so the same class name in two
-     * builds has different keys even though the label is stable.
-     *
-     * @param master  archive master key
-     * @param label   {@code "c:<binary name>"} or {@code "r:<logical resource>"}
-     * @param nonce   the 12-byte envelope nonce of that payload
-     * @return 256-bit payload key
-     */
+    public static boolean hasKeyRoot() {
+        return root32 != null;
+    }
+
+    public static byte[] keyRoot() {
+        byte[] value = root32;
+        if (value != null) {
+            return value.clone();
+        }
+        return embeddedStringKey();
+    }
+
+    private static byte[] embeddedStringKey() {
+        String encoded = STRING_KEY;
+        if (encoded == null || encoded.isEmpty() || encoded.charAt(0) == '_') {
+            return null;
+        }
+        byte[] cached = stringKey;
+        if (cached != null) {
+            return cached.clone();
+        }
+        synchronized (ROOT_LOCK) {
+            if (stringKey == null) {
+                try {
+                    stringKey = base64Decode(encoded);
+                } catch (Throwable unreadable) {
+                    return null;
+                }
+            }
+            return stringKey == null ? null : stringKey.clone();
+        }
+    }
+
+    public static byte[] subKey(byte[] root, int slot, int sub) {
+        if (root == null) {
+            return null;
+        }
+        return hmacSha256(root, concat(utf8(SUB_KEY_LABEL), le32(slot), le32(sub)));
+    }
+
+    public static byte[] subKey(int slot, int sub) {
+        return subKey(root32, slot, sub);
+    }
+
+    public static byte[] nativeKeyRoot(byte[] rawRoot, int slot, int sub) {
+        if (rawRoot == null || rawRoot.length != ROOT_BYTES) {
+            return null;
+        }
+        return hmacSha256(rawRoot, concat(utf8(NATIVE_ROOT_LABEL), le32(slot), le32(sub)));
+    }
+
+    public static byte[] nativeKeyRoot(byte[] rawRoot) {
+        return nativeKeyRoot(rawRoot, ROOT_SLOT, ROOT_SUB);
+    }
+
+    public static final int SLOT_BOOTSTRAP = ROOT_SLOT;
+
+    public static final int SLOT_PAYLOAD = 2;
+
+    private static final String GATE_LABEL = "umbra.gate.v1";
+
+    public static byte[] gateAttest(byte[] gateSecret, long nonce) {
+        if (gateSecret == null || gateSecret.length != ROOT_BYTES) {
+            return null;
+        }
+        return hmacSha256(gateSecret, concat(utf8(GATE_LABEL), le64(nonce)));
+    }
+
+    public static byte[] payloadRoot(byte[] rawRoot) {
+        return nativeKeyRoot(rawRoot, SLOT_PAYLOAD, 0);
+    }
+
+    public static byte[] gateTick(byte[] payloadRoot, int index) {
+        if (payloadRoot == null || payloadRoot.length != ROOT_BYTES) {
+            return null;
+        }
+        return hmacSha256(payloadRoot, concat(utf8("umbra.tick.v1"), le32(index)));
+    }
+
+    public static byte[] checkEvidence(byte[] gateSecret, long counter, int mask) {
+        if (gateSecret == null || gateSecret.length != ROOT_BYTES) {
+            return null;
+        }
+        return hmacSha256(gateSecret,
+                concat(utf8("umbra.check.v1"), le64(counter), le32(mask)));
+    }
+
+    public static byte[] entryKey(byte[] master, String label, byte[] nonce, byte[] payloadRoot) {
+        if (payloadRoot == null) {
+            return hmacSha256(master, concat(utf8(label), nonce));
+        }
+        return hmacSha256(master, concat(utf8(label), nonce, payloadRoot));
+    }
+
+    public static byte[] keyedDigest(byte[] digestKey, String label, byte[] data,
+                                     byte[] payloadRoot) {
+        if (payloadRoot == null) {
+            return keyedDigest(digestKey, label, data);
+        }
+
+        return hmacParts(digestKey, utf8(label), data, payloadRoot);
+    }
+
+    public static byte[] masterFromRoot(byte[] root, byte[] commentBytes, int entryCount) {
+        if (root == null || root.length != ROOT_BYTES) {
+            return null;
+        }
+        return hmacSha256(root, concat(utf8(NATIVE_MASTER_LABEL),
+                commentBytes == null ? new byte[0] : commentBytes, le32(entryCount)));
+    }
+
+    public static byte[] masterKeyRooted(String[] parts, String saltB64, byte[] root) {
+        if (root == null || root.length != ROOT_BYTES) {
+            return null;
+        }
+        byte[] material = concat(utf8("integrity.master.v1"), root);
+        for (int i = 0; i < parts.length; i++) {
+            material = concat(material, base64Decode(parts[i]));
+        }
+        try {
+            return hmacSha256(material, base64Decode(saltB64));
+        } finally {
+            wipe(material);
+        }
+    }
+
     public static byte[] entryKey(byte[] master, String label, byte[] nonce) {
         return hmacSha256(master, concat(utf8(label), nonce));
     }
 
-    /** Extracts and validates the nonce prefix of a sealed envelope. */
     public static byte[] nonceOf(byte[] envelope) {
         if (envelope == null || envelope.length < NONCE_BYTES + TAG_BYTES) {
             throw new SecurityException("Malformed protected payload");
@@ -306,19 +404,26 @@ public final class UmbraCrypto {
         return Arrays.copyOfRange(envelope, 0, NONCE_BYTES);
     }
 
-    /**
-     * Keyed digest for index v3 integrity metadata: an attacker who decrypts a
-     * payload cannot locally verify the result without the master key.
-     */
     public static byte[] keyedDigest(byte[] master, String label, byte[] data) {
-        return hmacSha256(master, concat(utf8(label), data));
+
+        return hmacParts(master, utf8(label), data);
     }
 
-    /**
-     * Sample-bound master key (class-encryption index v3). The ZIP comment and
-     * entry count are stable only after the archive is written, so the master key
-     * is bound to the concrete built sample and not just to the tool version.
-     */
+    public static byte[] hmacParts(byte[] key, byte[]... parts) {
+        try {
+            javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+            mac.init(new javax.crypto.spec.SecretKeySpec(key, "HmacSHA256"));
+            for (int i = 0; i < parts.length; i++) {
+                if (parts[i] != null && parts[i].length > 0) {
+                    mac.update(parts[i]);
+                }
+            }
+            return mac.doFinal();
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException("HmacSha256 unavailable");
+        }
+    }
+
     public static byte[] masterFromSample(byte[] siteSeed, byte[] commentBytes, int entryCount) {
         byte[] count = le32(entryCount);
         return hmacSha256(siteSeed,
@@ -326,14 +431,9 @@ public final class UmbraCrypto {
                         count));
     }
 
-    /** Diagnostic fallback binding (no comment/entry-count dependency). */
     public static byte[] masterFromSeed(byte[] siteSeed) {
         return hmacSha256(siteSeed, utf8("umbra.master.v3.seed"));
     }
-
-    // ------------------------------------------------------------------
-    // Authenticated envelopes (mirrors Cipher.seal/unseal)
-    // ------------------------------------------------------------------
 
     public static byte[] unseal(byte[] envelope, byte[] key, int alg) {
         if (envelope == null || envelope.length < NONCE_BYTES + TAG_BYTES) {
@@ -370,19 +470,12 @@ public final class UmbraCrypto {
         return concat(nonce, ciphertext, tag);
     }
 
-    /** Archive payloads only support ChaCha20 (1) and AES-256-CTR (2); no XOR. */
     private static void requireSupportedAlgorithm(int alg) {
         if (alg != ALG_CHACHA20 && alg != ALG_AES_CTR) {
             throw new SecurityException("Unsupported payload algorithm");
         }
     }
 
-    /**
-     * Rebuilds the archive master key from split key parts.
-     *
-     * <p>The parts and the salt are embedded in the injected loader/guard as
-     * separate string constants; the final key is an HMAC over their bytes.</p>
-     */
     public static byte[] masterKey(String[] parts, String saltB64) {
         byte[] material = new byte[0];
         for (int i = 0; i < parts.length; i++) {
@@ -394,10 +487,6 @@ public final class UmbraCrypto {
             wipe(material);
         }
     }
-
-    // ------------------------------------------------------------------
-    // Security helpers
-    // ------------------------------------------------------------------
 
     public static boolean constantTimeEquals(byte[] a, byte[] b) {
         if (a == null || b == null) {

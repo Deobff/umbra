@@ -21,7 +21,6 @@ public final class NoiseAttribute extends Attribute {
         this.payload = payload == null ? new byte[0] : payload;
     }
 
-    /** Payload length in bytes, used for budget accounting. */
     public int payloadLength() {
         return payload.length;
     }

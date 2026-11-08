@@ -78,10 +78,6 @@ public final class CompatTest {
         System.out.println("CompatTest: " + checks + " checks passed");
     }
 
-    // ------------------------------------------------------------------
-    // 1. Flat JAR: unchanged behaviour + executable output
-    // ------------------------------------------------------------------
-
     private static void testFlatRoundTrip() throws Exception {
         Path jar = root.resolve("flat.jar");
         Map<String, byte[]> fixture = new LinkedHashMap<String, byte[]>();
@@ -121,10 +117,6 @@ public final class CompatTest {
         check(detailed.ok() && "flat".equals(detailed.layoutKind()), "flat: verifier reports flat layout");
         check(detailed.classesVerified() == 2, "flat: verifier loaded 2 classes");
     }
-
-    // ------------------------------------------------------------------
-    // 2. Spring Boot fat JAR
-    // ------------------------------------------------------------------
 
     private static void testSpringBootFatJar() throws Exception {
         Path jar = root.resolve("boot.jar");
@@ -221,10 +213,6 @@ public final class CompatTest {
         check(verified.classesVerified() >= 5, "boot: verifier loaded application + loader classes");
     }
 
-    // ------------------------------------------------------------------
-    // 3. WAR
-    // ------------------------------------------------------------------
-
     private static void testWarLayout() throws Exception {
         Path jar = root.resolve("app.war");
         byte[] nestedLib = jarBytes(bytesMap("lib/Dep.class", classBytes("lib/Dep", 2, Opcodes.V1_8)));
@@ -266,10 +254,6 @@ public final class CompatTest {
         check(UmbraVerifier.verify(out).isEmpty(), "war: verifier clean");
     }
 
-    // ------------------------------------------------------------------
-    // 4. Multi-release layout (preserve + flatten, consistent mapping)
-    // ------------------------------------------------------------------
-
     private static void testMultiReleaseLayouts() throws Exception {
         Path jar = root.resolve("mr.jar");
         Map<String, byte[]> fixture = new LinkedHashMap<String, byte[]>();
@@ -303,7 +287,6 @@ public final class CompatTest {
         List<String> mrErrors = UmbraVerifier.verify(out);
         check(mrErrors.isEmpty(), "mr: verifier clean (" + mrErrors + ")");
 
-
         Map<String, String> options = new LinkedHashMap<String, String>();
         options.put("layout.multiRelease", "flatten");
         ClassPool flatPool = new ClassPool();
@@ -325,10 +308,6 @@ public final class CompatTest {
         check(flatReport.texts().get("layout.multiRelease.mode").equals("flatten"),
                 "mr flatten: mode reported");
     }
-
-    // ------------------------------------------------------------------
-    // 5. module-info.class
-    // ------------------------------------------------------------------
 
     private static void testModuleInfo() throws Exception {
         byte[] moduleInfo = moduleInfoBytes();
@@ -372,7 +351,6 @@ public final class CompatTest {
         check(!Jars.parseManifest(entries.get("META-INF/MANIFEST.MF")).containsKey("Automatic-Module-Name"),
                 "module: no Automatic-Module-Name invented");
 
-        // drop mode
         Map<String, String> dropOptions = new LinkedHashMap<String, String>();
         dropOptions.put("layout.moduleInfo", "drop");
         ClassPool dropPool = new ClassPool();
@@ -385,7 +363,6 @@ public final class CompatTest {
         check("dropped".equals(dropReport.texts().get("layout.moduleInfo.action")),
                 "module drop: action reported");
 
-        // auto mode with an inconsistent package mapping drops the descriptor
         ClassPool conflictPool = new ClassPool();
         Jars.read(jar, conflictPool, log());
         Map<String, String> conflicting = map(
@@ -398,7 +375,6 @@ public final class CompatTest {
         check("dropped".equals(conflictReport.texts().get("layout.moduleInfo.action")),
                 "module auto: drop reason recorded");
 
-        // keep mode keeps the original descriptor bytes
         Map<String, String> keepOptions = new LinkedHashMap<String, String>();
         keepOptions.put("layout.moduleInfo", "keep");
         ClassPool keepPool = new ClassPool();
@@ -414,10 +390,6 @@ public final class CompatTest {
         check("kept".equals(keepReport.texts().get("layout.moduleInfo.action")),
                 "module keep: action reported");
     }
-
-    // ------------------------------------------------------------------
-    // 6. Agent / OSGi manifest attributes
-    // ------------------------------------------------------------------
 
     private static void testAgentAndOsgiManifest() throws Exception {
         Path jar = root.resolve("agent.jar");
@@ -477,10 +449,6 @@ public final class CompatTest {
         check(UmbraVerifier.verify(out).isEmpty(), "agent: verifier clean");
     }
 
-    // ------------------------------------------------------------------
-    // 7. Services / spring.factories / AutoConfiguration.imports / native-image
-    // ------------------------------------------------------------------
-
     private static void testServiceAndFrameworkResources() throws Exception {
         Path jar = root.resolve("resources.jar");
         Map<String, byte[]> fixture = new LinkedHashMap<String, byte[]>();
@@ -523,10 +491,6 @@ public final class CompatTest {
         check(UmbraVerifier.verify(out).isEmpty(), "resources: verifier clean");
     }
 
-    // ------------------------------------------------------------------
-    // 8. Duplicate entries: warn + deterministic first-wins
-    // ------------------------------------------------------------------
-
     private static void testDuplicateEntries() throws Exception {
         Path jar = root.resolve("duplicates.jar");
         byte[] first = classBytes("dup/Foo", 1, Opcodes.V1_8);
@@ -566,10 +530,6 @@ public final class CompatTest {
         check(UmbraVerifier.verify(out).isEmpty(), "duplicates: verifier clean");
     }
 
-    // ------------------------------------------------------------------
-    // 9. Zip64 + unicode entry names
-    // ------------------------------------------------------------------
-
     private static void testZip64AndUnicode() throws Exception {
         Path jar = root.resolve("unicode.jar");
         Map<String, byte[]> fixture = new LinkedHashMap<String, byte[]>();
@@ -592,7 +552,6 @@ public final class CompatTest {
                 .equals("uni.Ünïcode"), "unicode: unicode Main-Class preserved");
         check(runJar(out).contains("UNICODE"), "unicode: protected unicode-named class executes");
 
-        // Zip64: more than 65535 entries forces the ZIP64 central directory.
         Path bulkIn = root.resolve("bulk-in.jar");
         Map<String, byte[]> bulkFixture = new LinkedHashMap<String, byte[]>();
         bulkFixture.put("META-INF/MANIFEST.MF", manifest("Manifest-Version: 1.0"));
@@ -620,10 +579,6 @@ public final class CompatTest {
         check(readBack > 65535, "zip64: " + readBack + " entries written and read back");
         check(Files.size(bulkOut) > 0L, "zip64: archive written");
     }
-
-    // ------------------------------------------------------------------
-    // 10. Signed JAR: strip cleanly, never emit half-signed archives
-    // ------------------------------------------------------------------
 
     private static void testSignedJar() throws Exception {
         Path jar = root.resolve("signed.jar");
@@ -666,10 +621,6 @@ public final class CompatTest {
         check(runJar(out).contains("SIGNED"), "signed: unsigned protected JAR executes");
     }
 
-    // ------------------------------------------------------------------
-    // 11. Deterministic output
-    // ------------------------------------------------------------------
-
     private static void testDeterministicOutput() throws Exception {
         Path jar = root.resolve("deterministic.jar");
         byte[] nestedLib = jarBytes(bytesMap("lib/Dep.class", classBytes("lib/Dep", 3, Opcodes.V1_8)));
@@ -701,13 +652,8 @@ public final class CompatTest {
         check(UmbraVerifier.verify(first).isEmpty(), "determinism: verifier clean");
     }
 
-    // ------------------------------------------------------------------
-    // 12. WS11 edge-case regressions (3.1 bug hunt)
-    // ------------------------------------------------------------------
-
     private static void testArchiveEdgeRegressions() throws Exception {
-        // 12a. Malformed manifest (continuation without key, garbage line,
-        //      over-long value): output must stay a readable JAR manifest.
+
         Path malformed = root.resolve("edge-malformed-manifest.jar");
         Map<String, byte[]> f1 = new LinkedHashMap<String, byte[]>();
         String badManifest = "Manifest-Version: 1.0\r\n"
@@ -731,7 +677,6 @@ public final class CompatTest {
                 Jars.parseManifest(readEntries(out1).get("META-INF/MANIFEST.MF")).get("Main-Class")));
         check("edge: malformed manifest verifier clean", UmbraVerifier.verify(out1).isEmpty());
 
-        // 12b. UTF-8 BOM before the first manifest header must be stripped.
         Path bom = root.resolve("edge-bom-manifest.jar");
         Map<String, byte[]> f2 = new LinkedHashMap<String, byte[]>();
         byte[] valid = manifest("Manifest-Version: 1.0", "Main-Class: edge.Main");
@@ -756,8 +701,6 @@ public final class CompatTest {
         check("edge: BOM output readable by JarFile", jarFileReadable(out2));
         check("edge: BOM verifier clean", UmbraVerifier.verify(out2).isEmpty());
 
-        // 12c. Invalid module-info must be dropped in AUTO mode even when no
-        //      class was renamed (previously kept because mapping was empty).
         Path badModule = root.resolve("edge-invalid-module.jar");
         Map<String, byte[]> f3 = new LinkedHashMap<String, byte[]>();
         f3.put("module-info.class", "not a class file".getBytes(StandardCharsets.UTF_8));
@@ -773,8 +716,6 @@ public final class CompatTest {
                 report3.counts().get("layout.moduleInfo").longValue() == 0L);
         check("edge: invalid module-info verifier clean", UmbraVerifier.verify(out3).isEmpty());
 
-        // 12d. Versioned-only Main-Class is valid for multi-release: the
-        //      verifier must report a note, not an error.
         Path versionedOnly = root.resolve("edge-mr-versioned-only.jar");
         Map<String, byte[]> f4 = new LinkedHashMap<String, byte[]>();
         f4.put("META-INF/MANIFEST.MF", manifest("Manifest-Version: 1.0",
@@ -797,7 +738,6 @@ public final class CompatTest {
         check("edge: versioned entry preserved",
                 readEntries(out4).containsKey("META-INF/versions/11/mr/Only.class"));
 
-        // 12e. Corrupt nested library must be reported by the verifier.
         Path corruptBoot = root.resolve("edge-corrupt-nested-lib.jar");
         Map<String, byte[]> f5 = new LinkedHashMap<String, byte[]>();
         f5.put("META-INF/MANIFEST.MF", manifest("Manifest-Version: 1.0",
@@ -826,7 +766,6 @@ public final class CompatTest {
                 Arrays.equals("not a zip archive".getBytes(StandardCharsets.UTF_8),
                         readEntries(out5).get("BOOT-INF/lib/broken.jar")));
 
-        // 12f. Newer class-file version: structural checks only (skipped link).
         Path newer = root.resolve("edge-newer-class.jar");
         Map<String, byte[]> f6 = new LinkedHashMap<String, byte[]>();
         f6.put("META-INF/MANIFEST.MF", manifest("Manifest-Version: 1.0",
@@ -845,8 +784,6 @@ public final class CompatTest {
         check("edge: newer class version is not an error", ver6.ok());
         check("edge: newer class version counted as skipped", ver6.skippedByVersion() >= 1);
 
-        // 12g. Atomic publication: a failed replace must keep the previous
-        //      output and leave no temporary archive behind.
         Path atomicTarget = root.resolve("edge-atomic-out.jar");
         ClassPool atomicPool = new ClassPool();
         Jars.read(root.resolve("flat.jar"), atomicPool, log());
@@ -856,7 +793,7 @@ public final class CompatTest {
         try {
             Files.setAttribute(atomicTarget, "dos:readonly", Boolean.TRUE);
         } catch (Exception unsupported) {
-            // Platform without the DOS read-only attribute: skip this half.
+
             readOnlySupported = false;
         }
         if (readOnlySupported) {
@@ -869,7 +806,7 @@ public final class CompatTest {
                 try {
                     Files.setAttribute(atomicTarget, "dos:readonly", Boolean.FALSE);
                 } catch (Exception ignored) {
-                    // The attribute may already be gone on some file systems.
+
                 }
             }
             if (readOnlyFailed) {
@@ -905,10 +842,6 @@ public final class CompatTest {
             return false;
         }
     }
-
-    // ------------------------------------------------------------------
-    // Fixture helpers
-    // ------------------------------------------------------------------
 
     private static byte[] manifest(String... lines) {
         StringBuilder sb = new StringBuilder();
@@ -1001,10 +934,6 @@ public final class CompatTest {
         writeJar(jar, entries, java.util.Collections.<String>emptySet());
     }
 
-    /**
-     * Writes a fixture, storing the named entries without compression (nested
-     * JARs in Spring Boot {@code BOOT-INF/lib/} must be STORED).
-     */
     private static void writeJar(Path jar, Map<String, byte[]> entries,
                                  java.util.Set<String> storedEntries) throws Exception {
         try (ZipOutputStream out = new ZipOutputStream(Files.newOutputStream(jar))) {
@@ -1058,10 +987,6 @@ public final class CompatTest {
         return Jars.write(output, pool, new Hierarchy(), false, log(), options, classes, methods, fields);
     }
 
-    /**
-     * Simulates the renamer: remaps every class through a
-     * {@link ClassRenameMap} and applies the batch rename to the pool.
-     */
     private static void simulateRename(ClassPool pool, Map<String, String> classes,
                                        Map<String, String> methods, Map<String, String> fields) {
         ClassRenameMap rename = ClassRenameMap.of(classes, methods, fields);
@@ -1125,7 +1050,6 @@ public final class CompatTest {
         return Log.console(false);
     }
 
-    /** Runs the protected flat JAR and returns its stdout. */
     private static String runJar(Path jar) throws Exception {
         String javaExe = System.getProperty("java.home") + java.io.File.separator + "bin"
                 + java.io.File.separator + "java.exe";
@@ -1145,10 +1069,6 @@ public final class CompatTest {
         return new String(stdout, StandardCharsets.UTF_8);
     }
 
-    /**
-     * Loads classes under a container prefix from the protected archive and
-     * invokes the main class, emulating what the Spring Boot/WAR loader does.
-     */
     private static String runPrefixedMain(Path jar, String prefix, String mainClass) throws Exception {
         final Map<String, byte[]> classes = new TreeMap<String, byte[]>();
         try (ZipFile zip = new ZipFile(jar.toFile())) {
@@ -1247,7 +1167,6 @@ public final class CompatTest {
         }
     }
 
-    /** Message-first alias used by the newer edge-case groups. */
     private static void check(String message, boolean condition) {
         check(condition, message);
     }
@@ -1263,11 +1182,11 @@ public final class CompatTest {
                         try {
                             Files.deleteIfExists(path);
                         } catch (Exception ignored) {
-                            // Best-effort temporary cleanup.
+
                         }
                     });
         } catch (Exception ignored) {
-            // Best-effort temporary cleanup.
+
         }
     }
 }

@@ -50,7 +50,6 @@ public final class LayoutContext {
         return options;
     }
 
-    /** Detected class prefix; empty for flat layouts. */
     public String classPrefix() {
         return layout.classPrefix();
     }
@@ -64,10 +63,6 @@ public final class LayoutContext {
             warnings.add(warning);
         }
     }
-
-    // ------------------------------------------------------------------
-    // Read-side bookkeeping
-    // ------------------------------------------------------------------
 
     public void addSpringBootClass() {
         springBootClasses++;
@@ -97,7 +92,6 @@ public final class LayoutContext {
         multiReleaseClasses++;
     }
 
-    /** Counts a versioned class that was flattened into a base path (flatten mode). */
     public void addFlattenedVersionedClass() {
         multiReleaseClasses++;
     }
@@ -110,7 +104,6 @@ public final class LayoutContext {
         return !versionedClasses.isEmpty();
     }
 
-    /** Records the base (non-versioned) {@code module-info.class} of the archive. */
     public void addModuleInfoEntry(String entryName, byte[] bytes) {
         if (entryName == null || moduleInfoEntries.contains(entryName)) {
             return;
@@ -126,10 +119,6 @@ public final class LayoutContext {
     public byte[] moduleInfoBytes(String entryName) {
         return moduleInfoBytes.get(entryName);
     }
-
-    // ------------------------------------------------------------------
-    // Write-side bookkeeping
-    // ------------------------------------------------------------------
 
     public void addModuleInfoKept(int count) {
         moduleInfoKept += count;
@@ -189,7 +178,6 @@ public final class LayoutContext {
         return versionedClassesRemapped;
     }
 
-    /** Builds the statistics report consumed by the engine and audit reports. */
     public LayoutReport report() {
         return new LayoutReport(layout, buildCounts(), buildTexts());
     }

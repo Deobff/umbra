@@ -36,7 +36,6 @@ import java.util.zip.ZipFile;
  */
 public final class InspectTool {
 
-    /** Detected archive layout families. */
     public static final String LAYOUT_FLAT = "flat";
     public static final String LAYOUT_SPRING_BOOT = "spring-boot";
     public static final String LAYOUT_WAR = "war";
@@ -45,7 +44,6 @@ public final class InspectTool {
     private InspectTool() {
     }
 
-    /** Immutable analysis result for one archive. */
     public static final class Report {
         public Path input;
         public long bytes;
@@ -83,7 +81,6 @@ public final class InspectTool {
         public final List<String> duplicateNames = new ArrayList<String>();
     }
 
-    /** Analyzes {@code input}; throws IOException when the archive cannot be read. */
     public static Report analyze(Path input) throws IOException {
         Report report = new Report();
         report.input = input.toAbsolutePath();
@@ -147,7 +144,7 @@ public final class InspectTool {
                         classNames.add(name);
                         addMajor(report, zip, entry);
                     } else {
-                        // Class outside every known container: keep as a resource.
+
                         report.resources++;
                     }
                     continue;
@@ -170,8 +167,7 @@ public final class InspectTool {
                     }
                 }
             }
-            // A directory-only marker of the layouts is not enough: look for
-            // container prefixes in all entry names after the first pass.
+
             if (!report.springBoot) {
                 report.springBoot = hasPrefix(entryCounts.keySet(), "BOOT-INF/classes/")
                         || hasPrefix(entryCounts.keySet(), "BOOT-INF/lib/");
@@ -253,7 +249,7 @@ public final class InspectTool {
                 report.classFileVersions.put(key, Integer.valueOf(count == null ? 1 : count.intValue() + 1));
             }
         } catch (IOException ignored) {
-            // A damaged entry does not abort inspection.
+
         }
     }
 
@@ -424,7 +420,6 @@ public final class InspectTool {
         return sb.toString();
     }
 
-    /** Human-readable rendering used by {@code --inspect}. */
     public static String format(Report report, String version) {
         StringBuilder sb = new StringBuilder();
         sb.append("Umbra ").append(version).append(" - input compatibility inspection\n");
@@ -513,7 +508,6 @@ public final class InspectTool {
         return sb.toString();
     }
 
-    /** Writes the machine-readable inspection report ({@code --inspect-json}). */
     public static void writeJson(Report report, Path target, String version) throws IOException {
         StringBuilder sb = new StringBuilder();
         sb.append("{\n");
@@ -560,7 +554,6 @@ public final class InspectTool {
         writeFile(target, sb.toString());
     }
 
-    /** Writes the combined compatibility report after a protection run. */
     public static void writeCompatReport(Path target, Report inspection, EngineResult result,
                                          String version) throws IOException {
         StringBuilder sb = new StringBuilder();
@@ -752,12 +745,10 @@ public final class InspectTool {
         return String.format(Locale.ROOT, "%.1f %s", Double.valueOf(value), units[unit]);
     }
 
-    /** Prints the inspection to stdout (used by {@code --inspect}). */
     public static void print(Report report, String version, PrintStream out) {
         out.print(format(report, version));
     }
 
-    /** Utility for callers that need the stable set of layout names. */
     public static List<String> layouts() {
         return Collections.unmodifiableList(java.util.Arrays.asList(
                 LAYOUT_FLAT, LAYOUT_SPRING_BOOT, LAYOUT_WAR, LAYOUT_MULTI_RELEASE));

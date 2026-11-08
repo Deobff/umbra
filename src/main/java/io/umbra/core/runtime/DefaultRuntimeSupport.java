@@ -33,10 +33,10 @@ public final class DefaultRuntimeSupport implements RuntimeSupport {
     private String indyBootstrapName;
     private String virtualMachineName;
     private String otpName;
+    private String keyRootMaskName;
     private String authGateName;
     private String authGateKey;
 
-    /** Placeholder substitutions performed on the authorization gate template. */
     private static final String[] AUTH_GATE_PLACEHOLDERS = {
             "@@SERVER@@", "@@SOFTWARE@@", "@@TITLE@@", "@@CACHE@@",
             "@@REGISTER@@", "@@TIMEOUT@@", "@@ENTRY@@"
@@ -75,6 +75,50 @@ public final class DefaultRuntimeSupport implements RuntimeSupport {
     }
 
     @Override
+    public synchronized String ensureKeyRootMask(ClassPool pool, long seed) {
+        if (keyRootMaskName != null) {
+            return keyRootMaskName;
+        }
+        try {
+            byte[] bytes = readTemplate(UmbraKeyRootMask.class);
+            ClassNode node = new ClassNode();
+            new ClassReader(bytes).accept(node, 0);
+            Random random = new Random(seed ^ UmbraKeyRootMask.class.getName().hashCode()
+                    ^ 0x4D41534BL);
+            NameGenerator names = new NameGenerator(random, "");
+            String candidate;
+            int guard = 0;
+            do {
+                candidate = RuntimeNames.path("K") + names.random(10);
+                if (++guard > 10000) {
+                    throw new IllegalStateException("Unable to allocate a name for the "
+                            + "key-root mask helper");
+                }
+            } while (pool.getClass(candidate) != null);
+
+            ClassNode remapped = new ClassNode();
+            node.accept(new ClassRemapper(remapped, new SimpleRemapper(node.name, candidate)));
+            remapped.access |= Opcodes.ACC_SYNTHETIC;
+            remapped.version = Math.min(remapped.version, Opcodes.V1_8);
+            Map<String, String> replacements = new LinkedHashMap<String, String>();
+            replacements.put("@@PREFIX@@", RuntimeNames.prefix());
+            int replaced = replacePlaceholders(remapped, replacements);
+            replacePlaceholders(remapped, DomainTags.replacements());
+            if (replaced < 1) {
+
+                throw new IllegalStateException("Key-root mask template is incomplete: "
+                        + replaced + " prefix placeholders replaced");
+            }
+            TemplateInjector.stripDebugInfo(remapped);
+            pool.addGenerated(remapped);
+            keyRootMaskName = candidate;
+            return candidate;
+        } catch (IOException e) {
+            throw new IllegalStateException("Unable to load runtime template UmbraKeyRootMask", e);
+        }
+    }
+
+    @Override
     public synchronized String ensureAuthGate(ClassPool pool, long seed, UmbraConfig.AuthGateOptions options) {
         if (options == null || !options.enabled()) {
             return null;
@@ -99,13 +143,12 @@ public final class DefaultRuntimeSupport implements RuntimeSupport {
             if (node == null || "module-info".equals(node.name)) {
                 continue;
             }
-            // Interfaces and annotations may only declare public static final
-            // fields (JVMS 4.6): a private synthetic field would make them
-            // unloadable ("Illegal field modifiers 0x101A").
+
             if ((node.access & (Opcodes.ACC_INTERFACE | Opcodes.ACC_ANNOTATION | Opcodes.ACC_MODULE)) != 0) {
                 continue;
             }
-            String fieldName = "umbra$" + Integer.toHexString(watermark.hashCode() & 0xFFFFFF);
+
+            String fieldName = "z$" + Integer.toHexString(watermark.hashCode() & 0xFFFFFF);
             boolean exists = false;
             for (FieldNode field : node.fields) {
                 if (field.name.equals(fieldName)) {
@@ -124,12 +167,6 @@ public final class DefaultRuntimeSupport implements RuntimeSupport {
         return null;
     }
 
-    /**
-     * Injects a configured copy of {@link UmbraAuthGate}. The template is
-     * remapped to a random {@code umbra/runtime/A*} name (keeping it a single
-     * class file, so nested classes are not allowed in the template) and its
-     * placeholder string constants are substituted with the configuration.
-     */
     private static String injectAuthGate(long seed, ClassPool pool, UmbraConfig.AuthGateOptions options) {
         try {
             byte[] bytes = readTemplate(UmbraAuthGate.class);
@@ -177,7 +214,6 @@ public final class DefaultRuntimeSupport implements RuntimeSupport {
         }
     }
 
-    /** Replaces placeholder string constants (LDC and ConstantValue) in a class. */
     private static int replacePlaceholders(ClassNode node, Map<String, String> replacements) {
         int replaced = 0;
         for (MethodNode method : node.methods) {
@@ -224,14 +260,11 @@ public final class DefaultRuntimeSupport implements RuntimeSupport {
             } while (pool.getClass(candidate) != null);
 
             String originalName = node.name;
-            // Remap self-references (for example the bootstrap helper calling
-            // its own private decrypt method) as well as the class name.
+
             ClassNode remapped = new ClassNode();
             node.accept(new ClassRemapper(remapped, new SimpleRemapper(originalName, candidate)));
             remapped.access |= Opcodes.ACC_SYNTHETIC;
-            // These templates derive keys from the shared KDF labels, so they need the
-            // per-build separators like every other injection path; the debug metadata
-            // would otherwise publish the template's source file name.
+
             replacePlaceholders(remapped, DomainTags.replacements());
             TemplateInjector.stripDebugInfo(remapped);
             pool.addGenerated(remapped);

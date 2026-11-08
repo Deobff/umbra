@@ -8,6 +8,8 @@ import io.umbra.core.model.ClassPool;
 import io.umbra.core.runtime.TemplateInjector;
 import io.umbra.core.runtime.crypto.CryptoSupport;
 import io.umbra.core.runtime.crypto.GuardSupport;
+import io.umbra.core.runtime.crypto.NativeKeySupport;
+import io.umbra.core.runtime.crypto.UmbraCrypto;
 import io.umbra.core.runtime.crypto.UmbraIntegrityGuard;
 import io.umbra.core.runtime.crypto.UmbraWatchdog;
 import io.umbra.core.util.Cipher;
@@ -109,13 +111,25 @@ public final class IntegrityPass implements Pass {
         for (int i = 0; i < parts.length; i++) {
             material = Cipher.concat(material, parts[i]);
         }
-        byte[] master = Cipher.hmacSha256(material, salt);
-        Cipher.wipe(material);
 
-        // Reuse the unified runtime guard so an instrumented process is refused
-        // before the archive digests are trusted. When the anti-debug pass runs it
-        // already injected the same (seed-derived) guard class, so this call only
-        // asks for its name; otherwise the guard is injected here at level 2.
+        byte[] nativeRoot = NativeKeySupport.keyRoot(context);
+        String nativeLoader = NativeKeySupport.nativeLoaderBinaryName(context.classes());
+        boolean nativeBound = nativeRoot != null && nativeLoader != null;
+        String[] keyParts = {
+                Cipher.base64(parts[0]), Cipher.base64(parts[1]),
+                Cipher.base64(parts[2]), Cipher.base64(parts[3])
+        };
+        byte[] master = nativeBound
+                ? UmbraCrypto.masterKeyRooted(keyParts, Cipher.base64(salt), nativeRoot)
+                : Cipher.hmacSha256(material, salt);
+        if (master == null) {
+            throw new IllegalStateException("integrity: native-bound manifest key derivation failed");
+        }
+        Cipher.wipe(material);
+        if (nativeRoot != null) {
+            Cipher.wipe(nativeRoot);
+        }
+
         String runtimeGuard = "";
         if (antiDump) {
             int guardLevel = AntiDebugPass.resolveLevel(config);
@@ -125,7 +139,7 @@ public final class IntegrityPass implements Pass {
                 guardAction = action;
             }
             if ("log".equals(guardAction)) {
-                guardAction = "throw"; // the integrity layer cannot continue after a logged signal
+                guardAction = "throw";
             }
             Map<String, String> guardReplacements = new LinkedHashMap<String, String>();
             guardReplacements.put("@@LEVEL@@", String.valueOf(guardLevel));
@@ -168,6 +182,8 @@ public final class IntegrityPass implements Pass {
         replacements.put("@@ANTIDUMP@@", String.valueOf(antiDump));
         replacements.put("@@WATCHDOG@@", watchdog);
         replacements.put("@@RUNTIMEGUARD@@", runtimeGuard);
+        replacements.put("@@NATIVE@@", nativeBound ? nativeLoader : "");
+        replacements.put("@@NATIVEBOUND@@", String.valueOf(nativeBound));
         CryptoSupport.injectWithCrypto(context.classes(), UmbraIntegrityGuard.class, guard, crypto,
                 replacements);
 
@@ -184,13 +200,16 @@ public final class IntegrityPass implements Pass {
                 level, action, antiDump));
         context.stats().add("integrity.level", level);
         context.stats().add("integrity.guard", 1);
+
+        context.stats().add("integrity.nativeKey", nativeBound ? 1 : 0);
         if (!runtimeGuard.isEmpty()) {
             context.stats().add("integrity.runtimeGuard", 1);
         }
         context.log().info("integrity: level %d guard %s called from %d entry point(s) (action=%s, "
-                        + "antiDump=%s, runtimeGuard=%s)",
+                        + "antiDump=%s, runtimeGuard=%s, nativeKey=%s)",
                 level, guard, instrumented, action, Boolean.valueOf(antiDump),
-                runtimeGuard.isEmpty() ? "-" : runtimeGuard);
+                runtimeGuard.isEmpty() ? "-" : runtimeGuard,
+                nativeBound ? "root" : "embedded");
     }
 
     private static int level(UmbraConfig config) {
@@ -225,10 +244,6 @@ public final class IntegrityPass implements Pass {
         throw new IllegalStateException("Unable to allocate an integrity manifest entry name");
     }
 
-    /**
-     * Post-processor that appends the sealed integrity manifest. Excludes the
-     * guard class and the manifest itself (a file cannot contain its own hash).
-     */
     private static final class ManifestPostProcessor implements OutputPostProcessor {
         private final String guard;
         private final String digestEntry;
@@ -314,11 +329,6 @@ public final class IntegrityPass implements Pass {
         }
     }
 
-    // ------------------------------------------------------------------
-    // JAR helpers
-    // ------------------------------------------------------------------
-
-    /** Finds a class entry by exact name or by a layout prefix (BOOT-INF/classes/...). */
     private static String findEntry(Map<String, byte[]> entries, String classNameEntry) {
         if (entries.containsKey(classNameEntry)) {
             return classNameEntry;
@@ -371,8 +381,7 @@ public final class IntegrityPass implements Pass {
                     zipEntry.setTime(315532800000L);
                     Integer method = methods.get(entry.getKey());
                     if (method != null && method.intValue() == ZipEntry.STORED) {
-                        // Preserve STORED entries (nested Spring Boot/WAR libs):
-                        // recompressing them breaks the container loader.
+
                         zipEntry.setMethod(ZipEntry.STORED);
                         zipEntry.setSize(entry.getValue().length);
                         zipEntry.setCompressedSize(entry.getValue().length);

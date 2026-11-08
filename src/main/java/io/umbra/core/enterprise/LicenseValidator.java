@@ -110,12 +110,10 @@ public final class LicenseValidator {
         return new LicenseInfo(id, licensee, edition, expires, features, true, true, "");
     }
 
-    /** Legacy canonical payload (no id). */
     public static String canonical(String licensee, String edition, String expires, List<String> features) {
         return canonical("", licensee, edition, expires, features);
     }
 
-    /** Canonical payload shared by the signer and verifier. */
     public static String canonical(String id, String licensee, String edition, String expires,
                                    List<String> features) {
         List<String> sorted = new ArrayList<String>(features);

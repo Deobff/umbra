@@ -64,7 +64,6 @@ public final class ReflectionGatePass implements Pass {
     private static final String DENY_SPEC = "@@DENY@@";
     private static final String HIDDEN_SPEC = "@@HIDDEN@@";
 
-    /** Placeholder class name of the injected seal (remapped at injection time). */
     private static final String SEAL_REFERENCE = "io/umbra/core/pass/impl/UmbraReflectionSeal";
 
     @Override
@@ -145,20 +144,12 @@ public final class ReflectionGatePass implements Pass {
         if (context.rules().skipBodyTransform(node.name)) {
             return true;
         }
-        // Keep rules protect names from renaming; they do not make the reflection
-        // call sites disappear, and a gate that only covers non-kept classes would
-        // miss the reflection calls that actually matter (kept/probe classes).
-        // Method bodies are only rewritten at the call site and the target's
-        // descriptor never changes, so kept contracts stay intact.
+
         if (context.rules().hasKeepAnnotation(node)) {
             return true;
         }
         return !options.matchesClass(node.name);
     }
-
-    // ------------------------------------------------------------------
-    // Injection
-    // ------------------------------------------------------------------
 
     private static List<String> collectSealed(PassContext context, Options options) {
         List<String> sealed = new ArrayList<String>();
@@ -170,7 +161,7 @@ public final class ReflectionGatePass implements Pass {
                 continue;
             }
             if (options.isSealed(node.name)) {
-                // The seal compares against Class#getName(), i.e. the dotted form.
+
                 sealed.add(node.name.replace('/', '.'));
             }
         }
@@ -194,15 +185,13 @@ public final class ReflectionGatePass implements Pass {
         replacements.put(DENY_SPEC, options.deny ? "1" : "0");
         replacements.put(HIDDEN_SPEC, String.valueOf(key));
         CryptoSupport.replaceConstants(remapped, replacements);
-        // The seal is an injected runtime template: its SourceFile attribute would
-        // otherwise publish "UmbraReflectionSeal.java" in the constant pool.
+
         TemplateInjector.stripDebugInfo(remapped);
         context.classes().addGenerated(remapped);
         context.log().debug("reflection-gate: injected seal %s (template %s)", name, SEAL_REFERENCE);
         return name;
     }
 
-    /** XOR + Base64 encoding of a newline separated string list. */
     static String encode(List<String> values, int key) {
         StringBuilder raw = new StringBuilder();
         for (int i = 0; i < values.size(); i++) {
@@ -223,10 +212,6 @@ public final class ReflectionGatePass implements Pass {
         int key = (int) (mixed ^ (mixed >>> 32));
         return key == 0 ? 0x5A17 : key;
     }
-
-    // ------------------------------------------------------------------
-    // Call-site rewriting
-    // ------------------------------------------------------------------
 
     private static Counts transformClass(ClassNode node, String sealName, Options options) {
         Counts counts = new Counts();
@@ -268,7 +253,6 @@ public final class ReflectionGatePass implements Pass {
         private int lookups;
     }
 
-    /** How one call site maps to the seal helper, or {@code null} when it is not gated. */
     private static Repair repairFor(MethodInsnNode call) {
         if (Opcodes.INVOKESTATIC == call.getOpcode() && "java/lang/Class".equals(call.owner)
                 && "forName".equals(call.name)) {
@@ -325,11 +309,6 @@ public final class ReflectionGatePass implements Pass {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Options
-    // ------------------------------------------------------------------
-
-    /** Resolved pass configuration. */
     static final class Options {
         private boolean enabled;
         private boolean deny = true;
@@ -352,7 +331,7 @@ public final class ReflectionGatePass implements Pass {
             if (allow != null) {
                 for (String token : allow.split("[,;\\s]+")) {
                     if (!token.trim().isEmpty()) {
-                        // Runtime caller names are dotted (Class#getName()).
+
                         options.allow.add(token.trim().replace('/', '.'));
                         options.allowGlobs.add(new Glob(token.trim()));
                     }
@@ -396,11 +375,6 @@ public final class ReflectionGatePass implements Pass {
     }
 }
 
-/**
- * Runtime seal template injected by {@link ReflectionGatePass} (same file, so no
- * extra ownership surface). Package-private here, made public in the injected
- * copy. Contains no nested classes and references only JDK types.
- */
 final class UmbraReflectionSeal {
 
     private static final String SEALED_SPEC = "@@SEALED@@";
@@ -424,8 +398,6 @@ final class UmbraReflectionSeal {
     private UmbraReflectionSeal() {
     }
 
-    // ---- Class.forName -------------------------------------------------
-
     public static Class<?> forName(String name) throws ClassNotFoundException {
         Class<?> target = Class.forName(name);
         checkTarget(target);
@@ -438,8 +410,6 @@ final class UmbraReflectionSeal {
         checkTarget(target);
         return target;
     }
-
-    // ---- Method lookups ------------------------------------------------
 
     public static java.lang.reflect.Method getDeclaredMethod(Class<?> target, String name,
                                                              Class<?>[] types)
@@ -521,8 +491,6 @@ final class UmbraReflectionSeal {
         return target.getConstructors();
     }
 
-    // ---- Seal policy ---------------------------------------------------
-
     private static void checkTarget(Class<?> target) throws ClassNotFoundException {
         if (allowed(target)) {
             return;
@@ -553,7 +521,6 @@ final class UmbraReflectionSeal {
         throw new NoSuchFieldException("");
     }
 
-    /** Plural lookups cannot throw checked exceptions; denial masks as "nothing found". */
     private static boolean anyAllowed(Class<?> target) {
         if (allowed(target)) {
             return true;
@@ -593,7 +560,6 @@ final class UmbraReflectionSeal {
         return false;
     }
 
-    /** First stack frame that is not this helper (the reflective call site). */
     private static String caller() {
         StackTraceElement[] trace = new Throwable().getStackTrace();
         for (int i = 0; i < trace.length; i++) {
@@ -605,7 +571,6 @@ final class UmbraReflectionSeal {
         return null;
     }
 
-    /** Minimal glob: {@code *} matches any characters including dots. */
     private static boolean glob(String pattern, String value) {
         int p = 0;
         int v = 0;

@@ -69,9 +69,8 @@ public final class TypeConfusionPass implements Pass {
     private static final String OBJECT = "Ljava/lang/Object;";
     private static final String OBJECT_ARRAY = "[Ljava/lang/Object;";
 
-    /** Internal safety cap: trampolines created per class. */
     private static final int MAX_METHODS_PER_CLASS = 32;
-    /** Internal safety cap: fields carried per class. */
+
     private static final int MAX_FIELDS_PER_CLASS = 16;
 
     @Override
@@ -151,10 +150,6 @@ public final class TypeConfusionPass implements Pass {
         return AsmUtil.containsJsrOrRet(node);
     }
 
-    // ------------------------------------------------------------------
-    // One class
-    // ------------------------------------------------------------------
-
     private void transformClass(PassContext context, ClassNode node, Options options,
                                 Counters counters, RefIndex index) {
         List<MethodNode> originals = new ArrayList<MethodNode>(node.methods);
@@ -178,7 +173,7 @@ public final class TypeConfusionPass implements Pass {
         int classFields = 0;
         int classFieldSites = 0;
         try {
-            // 1. Static field carriers (level 2).
+
             if (options.level >= 2) {
                 for (FieldNode field : node.fields) {
                     if (classFields >= MAX_FIELDS_PER_CLASS) {
@@ -207,7 +202,6 @@ public final class TypeConfusionPass implements Pass {
                 }
             }
 
-            // 2. Pick eligible call targets and allocate their trampolines.
             Map<String, MethodNode> targets = new LinkedHashMap<String, MethodNode>();
             Map<String, String> trampolines = new LinkedHashMap<String, String>();
             Set<String> allocatedTrampolines = new HashSet<String>();
@@ -222,10 +216,7 @@ public final class TypeConfusionPass implements Pass {
                 if (!methodEligible(context, node, method, options)) {
                     continue;
                 }
-                // The original method is never modified, so calls from other
-                // classes keep working with their typed ABI. A private method
-                // reached from another class's bytecode is unusual (nestmate
-                // direct access) and left alone.
+
                 if (privateStaticMethod(method)
                         && index.hasExternalMethodCall(node.name, method.name, method.desc)) {
                     counters.refusedExternal++;
@@ -240,7 +231,6 @@ public final class TypeConfusionPass implements Pass {
                 trampolines.put(key, allocateTrampolineName(node, context, allocatedTrampolines));
             }
 
-            // 3. Rewrite call sites in every method of the class.
             Set<String> usedTargets = new HashSet<String>();
             for (Map.Entry<MethodNode, MethodNode> entry : work.entrySet()) {
                 int rewritten = rewriteCalls(node, entry.getValue(), targets, trampolines,
@@ -251,13 +241,10 @@ public final class TypeConfusionPass implements Pass {
                 }
             }
 
-            // 4. Boxed defaults for the re-typed static fields (before any <clinit> code).
             if (!defaults.isEmpty()) {
                 applyFieldDefaults(node, work, defaults, dirty);
             }
 
-            // 5. Install only the trampolines that actually gained a call site
-            //    (targets without a rewritten site stay dead metadata otherwise).
             for (Map.Entry<String, String> entry : trampolines.entrySet()) {
                 if (!usedTargets.contains(entry.getKey())) {
                     continue;
@@ -267,7 +254,6 @@ public final class TypeConfusionPass implements Pass {
                 classMethods++;
             }
 
-            // 6. Verify every changed method on a copy; commit only verified ones.
             boolean verificationFailed = false;
             for (Map.Entry<MethodNode, MethodNode> entry : work.entrySet()) {
                 MethodNode original = entry.getKey();
@@ -285,9 +271,7 @@ public final class TypeConfusionPass implements Pass {
                 MethodGate.commit(original, candidate);
             }
             if (verificationFailed && classFields > 0) {
-                // A re-typed field is observed by every committed accessor; if any
-                // accessor could not be verified the class must not keep the new
-                // descriptors at all.
+
                 restore(node, backups, originalFields);
                 counters.rolledBackClasses++;
                 context.log().debug("type-confusion: class %s rolled back after a field-accessor "
@@ -295,8 +279,6 @@ public final class TypeConfusionPass implements Pass {
                 return;
             }
 
-            // 7. Class-level check: if the new field descriptors or trampolines do
-            //    not serialize, restore methods and fields completely.
             if (classMethods > 0 || classFields > 0) {
                 if (!gate.writes(node)) {
                     restore(node, backups, originalFields);
@@ -329,10 +311,6 @@ public final class TypeConfusionPass implements Pass {
         return new FieldNode(field.access, field.name, field.desc, field.signature, field.value);
     }
 
-    // ------------------------------------------------------------------
-    // Method eligibility and call-site rewriting
-    // ------------------------------------------------------------------
-
     private static boolean privateStaticMethod(MethodNode method) {
         return (method.access & (Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC))
                 == (Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC);
@@ -351,7 +329,7 @@ public final class TypeConfusionPass implements Pass {
             return false;
         }
         if (method.name.startsWith("<")) {
-            // Constructors and <clinit> are never call targets.
+
             return false;
         }
         if (method.instructions == null || method.instructions.size() == 0) {
@@ -371,10 +349,6 @@ public final class TypeConfusionPass implements Pass {
         return context.rules().hasKeepAnnotation(field) || context.rules().keepField(node.name, field);
     }
 
-    /**
-     * Rewrites every direct {@code INVOKESTATIC} of a mapped target inside
-     * {@code caller} and returns the number of rewritten sites.
-     */
     private static int rewriteCalls(ClassNode node, MethodNode caller,
                                     Map<String, MethodNode> targets, Map<String, String> trampolines,
                                     int maxPerMethod, Set<String> usedTargets) {
@@ -403,10 +377,6 @@ public final class TypeConfusionPass implements Pass {
         return rewritten;
     }
 
-    /**
-     * Emits {@code Object[] args = new Object[n]; args[i] = box(arg_i);
-     * Object r = trampoline(args); unbox(r)} replacing the original static call.
-     */
     private static InsnList callSite(MethodNode caller, MethodInsnNode call, String trampoline) {
         Type[] arguments = Type.getArgumentTypes(call.desc);
         Type returnType = Type.getReturnType(call.desc);
@@ -440,7 +410,6 @@ public final class TypeConfusionPass implements Pass {
         return out;
     }
 
-    /** Builds the synthetic trampoline that unboxes the array and calls the original. */
     private static MethodNode trampoline(String name, MethodNode target, String owner) {
         Type[] arguments = Type.getArgumentTypes(target.desc);
         Type returnType = Type.getReturnType(target.desc);
@@ -471,10 +440,6 @@ public final class TypeConfusionPass implements Pass {
                 + (returnType.getSort() == Type.VOID ? "V" : OBJECT);
     }
 
-    // ------------------------------------------------------------------
-    // Boxing helpers
-    // ------------------------------------------------------------------
-
     private static void emitBox(InsnList out, Type type) {
         switch (type.getSort()) {
             case Type.BOOLEAN:
@@ -502,7 +467,7 @@ public final class TypeConfusionPass implements Pass {
                 out.add(wrapper("java/lang/Double", "valueOf", "(D)Ljava/lang/Double;"));
                 break;
             default:
-                // Reference and array types are already objects.
+
                 break;
         }
     }
@@ -551,10 +516,6 @@ public final class TypeConfusionPass implements Pass {
         out.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, wrapper, name, desc, false));
     }
 
-    // ------------------------------------------------------------------
-    // Static field carriers
-    // ------------------------------------------------------------------
-
     private static boolean fieldPrivateStatic(FieldNode field) {
         return (field.access & (Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC))
                 == (Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC);
@@ -565,8 +526,7 @@ public final class TypeConfusionPass implements Pass {
             return false;
         }
         if ((field.access & Opcodes.ACC_FINAL) != 0) {
-            // A final static field can carry a ConstantValue attribute that must
-            // match its descriptor; changing the type would corrupt the class.
+
             return false;
         }
         if (OBJECT.equals(field.desc)) {
@@ -575,7 +535,6 @@ public final class TypeConfusionPass implements Pass {
         return field.value == null;
     }
 
-    /** Rewrites GETSTATIC/PUTSTATIC of {@code field} in the given method copies. */
     private static int rewriteFieldAccesses(Map<MethodNode, MethodNode> work, ClassNode owner,
                                             FieldNode field, Set<MethodNode> dirty) {
         Type fieldType = Type.getType(field.desc);
@@ -616,7 +575,6 @@ public final class TypeConfusionPass implements Pass {
         return sites;
     }
 
-    /** Boxed default values at the start of {@code <clinit>} preserve the zero-init contract. */
     private static void applyFieldDefaults(ClassNode node, Map<MethodNode, MethodNode> work,
                                            List<FieldDefault> defaults, Set<MethodNode> dirty) {
         MethodNode original = null;
@@ -689,15 +647,6 @@ public final class TypeConfusionPass implements Pass {
         throw new IllegalStateException("Unable to allocate a trampoline name in " + node.name);
     }
 
-    // ------------------------------------------------------------------
-    // Cross-class reference index
-    // ------------------------------------------------------------------
-
-    /**
-     * One-pass index of member references whose owner is a different class than
-     * the referencing one. Such members are observed from outside and must not
-     * be re-typed.
-     */
     private static final class RefIndex {
         private final Set<String> methods = new HashSet<String>();
         private final Set<String> fields = new HashSet<String>();
@@ -737,11 +686,6 @@ public final class TypeConfusionPass implements Pass {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Options
-    // ------------------------------------------------------------------
-
-    /** Resolved pass configuration and method-glob matcher. */
     static final class Options {
         private boolean enabled;
         private int level = 1;
@@ -774,7 +718,6 @@ public final class TypeConfusionPass implements Pass {
             return options;
         }
 
-        /** True when the method matches {@code typeConfusion.methods}. */
         boolean matches(PassContext context, ClassNode node, MethodNode method) {
             for (int i = 0; i < patterns.size(); i++) {
                 if (patterns.get(i).matches(node.name, method.name)) {
@@ -824,7 +767,6 @@ public final class TypeConfusionPass implements Pass {
         }
     }
 
-    /** One {@code Class#method} glob (the method part may be {@code *}). */
     private static final class Pattern {
         private final Glob classGlob;
         private final String methodName;
@@ -850,7 +792,6 @@ public final class TypeConfusionPass implements Pass {
         }
     }
 
-    /** Field that was re-typed to Object and needs a boxed default in <clinit>. */
     private static final class FieldDefault {
         private final String name;
         private final Type type;
@@ -861,7 +802,6 @@ public final class TypeConfusionPass implements Pass {
         }
     }
 
-    /** Mutable statistics holder for one run. */
     private static final class Counters {
         private int classes;
         private int methods;

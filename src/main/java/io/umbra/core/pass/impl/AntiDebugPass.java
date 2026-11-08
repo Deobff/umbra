@@ -3,6 +3,7 @@ package io.umbra.core.pass.impl;
 import io.umbra.core.api.Pass;
 import io.umbra.core.api.PassContext;
 import io.umbra.core.config.UmbraConfig;
+import io.umbra.core.pass.impl.NativeGuardPass;
 import io.umbra.core.runtime.TemplateInjector;
 import io.umbra.core.runtime.crypto.GuardSupport;
 import io.umbra.core.runtime.crypto.UmbraWatchdog;
@@ -90,6 +91,10 @@ public final class AntiDebugPass implements Pass {
         replacements.put("@@WATCHDOG@@", watchdog);
         replacements.put("@@WATCHMS@@", String.valueOf(watchdogMs));
         replacements.put("@@LOGTOKEN@@", logToken(config));
+
+        byte[] gateSecret = context.secret(NativeGuardPass.GATE_SECRET);
+        replacements.put("@@GATESECRET@@", gateSecret == null ? ""
+                : java.util.Base64.getEncoder().encodeToString(gateSecret));
         String guard = GuardSupport.ensureRuntimeGuard(context.classes(), config.seed(), replacements);
 
         String[] entry = GuardSupport.parseEntryPoint(
@@ -123,10 +128,6 @@ public final class AntiDebugPass implements Pass {
                 watchdog.isEmpty() ? "-" : watchdog + " @ " + watchdogMs + "ms");
     }
 
-    /**
-     * Resolves the effective level from the advanced options and the legacy
-     * typed switch. An explicit {@code antiDebug.level=0} always disables.
-     */
     static int resolveLevel(UmbraConfig config) {
         if (config.options().containsKey("antiDebug.level")) {
             return clamp(config.optionInt("antiDebug.level", 0));
@@ -146,10 +147,6 @@ public final class AntiDebugPass implements Pass {
         return "throw";
     }
 
-    /**
-     * Random short log token substituted for the fixed {@code [umbra-guard]}
-     * prefix, so a log line does not fingerprint the guard in protected output.
-     */
     static String logToken(UmbraConfig config) {
         String alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
         java.util.Random random = new java.util.Random(

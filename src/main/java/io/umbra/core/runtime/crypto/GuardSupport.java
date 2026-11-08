@@ -37,34 +37,15 @@ public final class GuardSupport {
 
     private static final String MAIN_DESC = "([Ljava/lang/String;)V";
 
-    /** Internal-name prefix of the unified runtime guard. */
-    /** Resolved per run, because one JVM may protect several archives. */
     private static String runtimeGuardPrefix() {
         return RuntimeNames.path("G");
     }
 
-    /** Salt that distinguishes the guard's deterministic name from other helpers. */
     private static final String RUNTIME_GUARD_SALT = "umbra-runtime-guard";
 
     private GuardSupport() {
     }
 
-    /**
-     * Returns the injected name of the unified runtime guard, injecting it on
-     * first use.
-     *
-     * <p>The name only depends on the seed, so the anti-debug, integrity and
-     * class-encryption passes all reach the same injected class (the first caller
-     * supplies the placeholder substitutions). A pre-existing user class with the
-     * same name is skipped deterministically.</p>
-     *
-     * @param pool         program class pool
-     * @param seed         run seed
-     * @param replacements string-constant substitutions for the template
-     *                     (may be {@code null}); ignored when the guard already
-     *                     exists
-     * @return internal name of the injected runtime guard
-     */
     public static String ensureRuntimeGuard(ClassPool pool, long seed,
                                             Map<String, String> replacements) {
         for (int attempt = 0; attempt < 64; attempt++) {
@@ -74,7 +55,7 @@ public final class GuardSupport {
                 if (pool.isGenerated(candidate)) {
                     return candidate;
                 }
-                continue; // A real program class owns this name; try the next one.
+                continue;
             }
             CryptoSupport.injectWithCrypto(pool, UmbraRuntimeGuard.class, candidate, null,
                     replacements);
@@ -83,12 +64,10 @@ public final class GuardSupport {
         throw new IllegalStateException("Unable to allocate a name for the unified runtime guard");
     }
 
-    /** Internal-name prefix of the guard call-site dispatcher. */
     private static String dispatchPrefix() {
         return RuntimeNames.path("D");
     }
 
-    /** Bootstrap descriptor of {@link UmbraGuardCall#bootstrap}. */
     private static final String DISPATCH_DESCRIPTOR =
             "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;"
                     + "Ljava/lang/invoke/MethodType;Ljava/lang/String;)"
@@ -100,16 +79,6 @@ public final class GuardSupport {
         return runtimeGuardPrefix() + names.random(10);
     }
 
-    /**
-     * Ensures the indirect call-site dispatcher exists and returns its internal name.
-     *
-     * <p>The name is derived from the target class, so the independent passes that
-     * emit calls into the same injected helper reuse one copy.</p>
-     *
-     * @param pool   program pool
-     * @param target internal name of the class the call sites target
-     * @return internal name of the injected dispatcher
-     */
     public static String ensureGuardDispatch(ClassPool pool, String target) {
         String base = dispatchPrefix() + Integer.toHexString(target.hashCode() & 0x7FFFFFFF);
         for (int attempt = 0; attempt < 64; attempt++) {
@@ -119,7 +88,7 @@ public final class GuardSupport {
                 if (pool.isGenerated(candidate)) {
                     return candidate;
                 }
-                continue; // A real program class owns this name; try the next one.
+                continue;
             }
             CryptoSupport.injectWithCrypto(pool, UmbraGuardCall.class, candidate, null, null);
             return candidate;
@@ -127,19 +96,6 @@ public final class GuardSupport {
         throw new IllegalStateException("Unable to allocate a name for the call dispatcher");
     }
 
-    /**
-     * Builds an {@code invokedynamic} that replaces a direct {@code invokestatic}
-     * into an injected runtime helper.
-     *
-     * <p>The call site carries no reference to the target in the method body: the
-     * bootstrap resolves the method once while the site links.</p>
-     *
-     * @param dispatch internal name returned by {@link #ensureGuardDispatch}
-     * @param owner    internal name of the target class
-     * @param name     target method name
-     * @param desc     target method descriptor
-     * @return the call-site instruction
-     */
     public static AbstractInsnNode indirectCall(String dispatch, String owner, String name,
                                                 String desc) {
         return new InvokeDynamicInsnNode(name, desc,
@@ -148,25 +104,10 @@ public final class GuardSupport {
                 owner);
     }
 
-    /**
-     * Builds the {@code invokedynamic} that replaces {@code invokestatic
-     * guard.check()}.
-     *
-     * @param dispatch internal name returned by {@link #ensureGuardDispatch}
-     * @param guard    internal name of the guard class
-     * @return the call-site instruction
-     */
     public static AbstractInsnNode guardCall(String dispatch, String guard) {
         return indirectCall(dispatch, guard, "check", "()V");
     }
 
-    /**
-     * Inserts the guard check at the start of every program main method
-     * and - when {@code entryOwner}/{@code entryMethod} are given - at that
-     * entry point (used by the encrypted-archive loader).
-     *
-     * @return number of instrumented methods
-     */
     public static int instrumentEntryPoints(ClassPool pool, String guard, String entryOwner,
                                             String entryMethod) {
         int instrumented = 0;
@@ -203,12 +144,10 @@ public final class GuardSupport {
         return instrumented;
     }
 
-    /** Convenience overload without an explicit loader entry point. */
     public static int instrumentMains(ClassPool pool, String guard) {
         return instrumentEntryPoints(pool, guard, null, null);
     }
 
-    /** Parses {@code class#method} into a two-element array ({@code class}, {@code method}). */
     public static String[] parseEntryPoint(String value) {
         if (value == null || value.trim().isEmpty()) {
             return null;
@@ -240,7 +179,7 @@ public final class GuardSupport {
             first = first.getNext();
         }
         if (first instanceof InvokeDynamicInsnNode) {
-            // Current form: invokedynamic check()V with the guard as bootstrap argument.
+
             InvokeDynamicInsnNode indy = (InvokeDynamicInsnNode) first;
             return "check".equals(indy.name) && "()V".equals(indy.desc)
                     && indy.bsmArgs != null && indy.bsmArgs.length == 1
@@ -249,7 +188,7 @@ public final class GuardSupport {
         if (!(first instanceof MethodInsnNode)) {
             return false;
         }
-        // Legacy form kept for pools instrumented by an older pass run.
+
         MethodInsnNode call = (MethodInsnNode) first;
         return call.getOpcode() == Opcodes.INVOKESTATIC && guard.equals(call.owner)
                 && "check".equals(call.name) && "()V".equals(call.desc);

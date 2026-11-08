@@ -12,15 +12,9 @@ public final class ConfigWriter {
     private ConfigWriter() {
     }
 
-    /**
-     * @param config configuration to serialize
-     * @return YAML text with a trailing newline
-     */
     public static String toYaml(UmbraConfig config) {
         StringBuilder out = new StringBuilder();
-        // quote() is mandatory here: a Windows path may contain " #" (which
-        // starts a YAML comment) or other plain-scalar special characters, and
-        // an unquoted value would be silently truncated on reload.
+
         line(out, 0, "input", quote(config.input().toString()));
         line(out, 0, "output", quote(config.output().toString()));
         list(out, "libraries", config.libraries().toString().isEmpty()
@@ -206,8 +200,7 @@ public final class ConfigWriter {
         if (!config.options().isEmpty()) {
             out.append("options:\n");
             for (java.util.Map.Entry<String, String> entry : config.options().entrySet()) {
-                // Keys are quoted too: --set accepts arbitrary keys and an
-                // unquoted key containing ':' would break the YAML mapping.
+
                 out.append("  ").append(quote(entry.getKey())).append(": ")
                         .append(quote(entry.getValue())).append('\n');
             }

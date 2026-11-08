@@ -22,16 +22,11 @@ import java.util.Map;
  */
 public final class GuiConfig {
 
-    /** Stable version string shown by the desktop GUI. */
-    public static final String VERSION = "3.2.2";
+    public static final String VERSION = "3.4.0";
 
     private GuiConfig() {
     }
 
-    /**
-     * Default output next to the input: {@code app.jar} -> {@code app-obf.jar}.
-     * Returns an empty string when no input is selected.
-     */
     public static String defaultOutput(Path input) {
         if (input == null) {
             return "";
@@ -50,27 +45,12 @@ public final class GuiConfig {
         return suggested.toAbsolutePath().toString();
     }
 
-    /**
-     * Builds the run configuration.
-     *
-     * @param input         input JAR
-     * @param output        output JAR
-     * @param seed          deterministic seed
-     * @param options       advanced options (same keys as the CLI {@code --set})
-     * @param mappingTarget mapping file path; a directory resolves to
-     *                      {@code umbra-mapping.txt} inside it, {@code null}
-     *                      places the mapping next to the output
-     * @return validated configuration
-     * @throws Exception when the configuration is incomplete
-     */
     public static UmbraConfig build(Path input, Path output, long seed,
                                     Map<String, String> options, Path mappingTarget)
             throws Exception {
         Map<String, String> opts = options == null
                 ? new LinkedHashMap<String, String>() : new LinkedHashMap<String, String>(options);
 
-        // Anti-debug is expressed as a level in the engine; the GUI exposes a
-        // single switch that maps to level 2.
         if (!opts.containsKey("antiDebug.level") && opts.containsKey("antiDebug.enabled")) {
             opts.put("antiDebug.level", bool(opts, "antiDebug.enabled", false) ? "2" : "0");
         }
@@ -80,9 +60,6 @@ public final class GuiConfig {
             opts.put("antiDebug.nativeGuard", "true");
         }
 
-        // Conservative defaults for the 3.0 option surface. The GUI normally
-        // sends every one of these explicitly through its switches; the defaults
-        // keep programmatic and legacy callers working.
         defaultPut(opts, "string.strength", "2");
         defaultPut(opts, "nocturne.encoding", "arx");
         defaultPut(opts, "string.engine", "auto");
@@ -167,15 +144,10 @@ public final class GuiConfig {
         return b.build();
     }
 
-    /** Serializes a configuration to the YAML dialect the CLI reads back. */
     public static String toYaml(UmbraConfig config) {
         return ConfigWriter.toYaml(config);
     }
 
-    /**
-     * Effective option map of a configuration: typed sections first, then the
-     * raw advanced options (which win, exactly like the CLI).
-     */
     public static Map<String, String> describe(UmbraConfig config) {
         Map<String, String> map = new LinkedHashMap<String, String>();
         map.put("renamer.enabled", String.valueOf(config.renamer().enabled()));
@@ -264,7 +236,6 @@ public final class GuiConfig {
         }
     }
 
-    /** Returns true when the output path is usable and not the input itself. */
     public static String validate(Path input, Path output) {
         if (input == null || !Files.isRegularFile(input)) {
             return "Select an existing input JAR.";
@@ -280,7 +251,7 @@ public final class GuiConfig {
                 return "Input and output must be different files.";
             }
         } catch (Exception ignored) {
-            // A non-existent output cannot be the same file.
+
         }
         Path parent = output.toAbsolutePath().getParent();
         if (parent == null) {

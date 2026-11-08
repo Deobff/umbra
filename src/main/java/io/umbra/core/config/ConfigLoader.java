@@ -21,32 +21,13 @@ public final class ConfigLoader {
     private ConfigLoader() {
     }
 
-    /**
-     * Reads and validates a configuration file.
-     *
-     * @param file YAML configuration
-     * @return immutable configuration
-     * @throws IOException     if the file cannot be read
-     * @throws ConfigException if the document is malformed or incomplete
-     */
     public static UmbraConfig load(Path file) throws IOException, ConfigException {
         return load(file, true);
     }
 
-    /**
-     * Reads a configuration file, optionally allowing {@code input}/{@code output}
-     * to stay unset so a front end (CLI) can supply them as overrides.
-     *
-     * @param file         YAML configuration
-     * @param requirePaths whether {@code input} and {@code output} must be present
-     * @return immutable configuration
-     * @throws IOException     if the file cannot be read
-     * @throws ConfigException if the document is malformed or incomplete
-     */
     public static UmbraConfig load(Path file, boolean requirePaths) throws IOException, ConfigException {
         String text = new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
-        // Editors on Windows often save UTF-8 with a BOM; the BOM would otherwise
-        // become part of the first key and silently hide that section.
+
         if (!text.isEmpty() && text.charAt(0) == '\uFEFF') {
             text = text.substring(1);
         }
@@ -55,27 +36,10 @@ public final class ConfigLoader {
         return fromMap(root, base, requirePaths);
     }
 
-    /**
-     * Builds a configuration from an already parsed YAML tree.
-     *
-     * @param root parsed root mapping
-     * @param base base directory for relative paths, or {@code null} for the CWD
-     * @return immutable configuration
-     * @throws ConfigException if required keys are missing or malformed
-     */
     public static UmbraConfig fromMap(Map<String, Object> root, Path base) throws ConfigException {
         return fromMap(root, base, true);
     }
 
-    /**
-     * Builds a configuration from an already parsed YAML tree.
-     *
-     * @param root         parsed root mapping
-     * @param base         base directory for relative paths, or {@code null} for the CWD
-     * @param requirePaths whether {@code input} and {@code output} must be present
-     * @return immutable configuration
-     * @throws ConfigException if required keys are missing or malformed
-     */
     public static UmbraConfig fromMap(Map<String, Object> root, Path base, boolean requirePaths)
             throws ConfigException {
         Map<String, Object> map = normalize(root);
@@ -83,8 +47,7 @@ public final class ConfigLoader {
 
         String input = str(map, "input", null);
         String output = str(map, "output", null);
-        // An empty value ("input:") is a missing path, not the configuration
-        // directory; treat it as unset so build() reports the missing key.
+
         if (input != null && input.trim().isEmpty()) {
             input = null;
         }
@@ -116,8 +79,6 @@ public final class ConfigLoader {
         b.keepPublicApi(bool(map, "keepPublicApi", false));
         b.softKeepPublicApi(bool(map, "softKeepPublicApi", false));
 
-        // Free-form advanced options (options: section). Keys are preserved
-        // verbatim (dots included); only scalar values are accepted.
         Map<String, Object> options = asMap(map.get("options"));
         for (Map.Entry<String, Object> entry : options.entrySet()) {
             Object value = entry.getValue();
@@ -308,7 +269,6 @@ public final class ConfigLoader {
         return new LinkedHashMap<String, Object>();
     }
 
-    /** Normalizes keys to lower camel case plus case/underscore-insensitive aliases. */
     private static Map<String, Object> normalize(Map<String, Object> raw) {
         Map<String, Object> out = new LinkedHashMap<String, Object>();
         if (raw == null) {

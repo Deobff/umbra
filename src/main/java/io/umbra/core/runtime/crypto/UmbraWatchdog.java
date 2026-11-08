@@ -34,7 +34,6 @@ public final class UmbraWatchdog extends Thread {
                 + Integer.toHexString((int) (System.nanoTime() & 0xFFFF)));
     }
 
-    /** Randomized sleep so the re-check period is not a constant. */
     private long nextDelayMillis() {
         long jitter = (long) (random.nextDouble() * Math.max(1L, delayMillis / 2L));
         return delayMillis + jitter;
@@ -57,14 +56,14 @@ public final class UmbraWatchdog extends Thread {
                 method.setAccessible(true);
                 method.invoke(null);
             } catch (java.lang.reflect.InvocationTargetException e) {
-                // The guard itself decided that the process must stop.
+
                 Throwable cause = e.getCause();
                 if (cause != null) {
                     cause.printStackTrace();
                 }
                 Runtime.getRuntime().halt(1);
             } catch (Throwable ignored) {
-                // A watch iteration must never crash the program by itself.
+
             }
         }
     }

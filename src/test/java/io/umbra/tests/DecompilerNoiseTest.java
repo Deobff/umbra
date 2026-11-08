@@ -69,8 +69,6 @@ public final class DecompilerNoiseTest {
         System.out.println("DecompilerNoiseTest: " + checks + " checks passed");
     }
 
-    // ------------------------------------------------------------- unit tests
-
     private static void testLevelsMetadataAndJvm() throws Exception {
         for (int level = 1; level <= ClassNoise.LEVEL_HOSTILE; level++) {
             ClassNode node = targetClass(TARGET);
@@ -187,12 +185,9 @@ public final class DecompilerNoiseTest {
                 new Random(7), ProgressListener.NONE);
         check(!pass.enabled(offContext), "pass can be disabled");
 
-        // Level clamping keeps hostile values safe.
         check(ClassNoise.clampLevel(0) == 1, "level 0 clamps to 1");
         check(ClassNoise.clampLevel(9) == 3, "level 9 clamps to 3");
     }
-
-    // ---------------------------------------------------------- end to end
 
     private static void testDemoJarEndToEnd() throws Exception {
         Path root = findProjectRoot();
@@ -204,9 +199,6 @@ public final class DecompilerNoiseTest {
         Path dir = Files.createTempDirectory("umbra-noise-test");
         String java = Paths.get(System.getProperty("java.home"), "bin", "java").toString();
 
-        // The engine runs in-process (same classes this test was compiled
-        // against), so no child-process classpath is involved at all: only the
-        // produced jar is started as a subprocess later.
         Path baseline = dir.resolve("demo-noise-off.jar");
         EngineResult baselineResult = runEngine(demoJar, baseline, false, 1);
         check(Files.exists(baseline), "baseline jar produced");
@@ -235,26 +227,33 @@ public final class DecompilerNoiseTest {
         check(Files.size(jars[3]) > Files.size(jars[1]), "level 3 is larger than level 1");
         check(Files.size(baseline) < Files.size(jars[1]), "level 1 grows the archive over baseline");
 
-        // Same seed -> identical archive (engine-level determinism).
         Path repeat = dir.resolve("demo-noise-1-repeat.jar");
         runEngine(demoJar, repeat, true, 1);
         check(sha256(jars[1]).equals(sha256(repeat)),
                 "engine output is deterministic for the same seed");
 
-        // JDK 21 / 26 load, link and execute the hostile level.
+        Path wmOne = dir.resolve("demo-wm-1.jar");
+        Path wmTwo = dir.resolve("demo-wm-2.jar");
+        runEngineWithWatermark(demoJar, wmOne, 1);
+        runEngineWithWatermark(demoJar, wmTwo, 1);
+        check(!sha256(wmOne).equals(sha256(wmTwo)),
+                "RSA-blind watermark differs per build (blind payload is randomised)");
+
         for (String candidate : new String[] {
                 "C:\\Program Files\\Java\\jdk-21.0.10\\bin\\java.exe",
                 "C:\\Program Files\\Java\\jdk-26.0.1\\bin\\java.exe",
                 "C:\\Program Files\\Zulu\\zulu-21\\bin\\java.exe"
         }) {
-            if (!Files.exists(Paths.get(candidate))) {
+            // A truncated install leaves a zero-byte java.exe behind: it exists but
+            // cannot be executed, so launching it fails with Win32 error 193. Skip it
+            // and try the next candidate instead of failing the whole run.
+            if (!Files.exists(Paths.get(candidate)) || Files.size(Paths.get(candidate)) == 0L) {
                 continue;
             }
             String run = runIn(dir, candidate, "-jar", jars[3].toString());
             check(run.contains("OK"), "level 3 runs on " + candidate + ": " + tail(run));
         }
 
-        // CFR: level 1 must stay usable, level 3 must visibly lose classes.
         Path cfr = root.resolve("qa").resolve("tools").resolve("cfr-0.152.jar");
         if (!Files.exists(cfr)) {
             System.out.println("DecompilerNoiseTest: CFR not found, skipping decompiler checks");
@@ -292,12 +291,6 @@ public final class DecompilerNoiseTest {
         return count;
     }
 
-    /**
-     * Runs the whole obfuscation pipeline in-process. Deliberately avoids a
-     * child JVM for the CLI: the test must not depend on the parent test
-     * runner's classpath or working directory, which differ between build
-     * directories and concurrent shared builds.
-     */
     private static EngineResult runEngine(Path input, Path output, boolean noiseEnabled, int level)
             throws Exception {
         UmbraConfig config = new UmbraConfig.Builder()
@@ -306,11 +299,26 @@ public final class DecompilerNoiseTest {
                 .seed(424242L)
                 .option("decompilerNoise.enabled", Boolean.toString(noiseEnabled))
                 .option("decompilerNoise.level", Integer.toString(level))
+                .option("string.allowKeylessFallback", "true")
+                .watermark(new UmbraConfig.WatermarkOptions(false, "umbra"))
                 .build();
         return new UmbraEngine(new Log(null, false)).run(config, ProgressListener.NONE);
     }
 
-    // -------------------------------------------------------- class synthesis
+    private static EngineResult runEngineWithWatermark(Path input, Path output, int level)
+            throws Exception {
+        UmbraConfig config = new UmbraConfig.Builder()
+                .input(input)
+                .output(output)
+                .seed(424242L)
+                .option("decompilerNoise.enabled", "true")
+                .option("decompilerNoise.level", Integer.toString(level))
+                .option("string.allowKeylessFallback", "true")
+                .option("watermark.blind", "true")
+                .watermark(new UmbraConfig.WatermarkOptions(true, "umbra"))
+                .build();
+        return new UmbraEngine(new Log(null, false)).run(config, ProgressListener.NONE);
+    }
 
     private static ClassNode targetClass(String name) {
         ClassNode node = new ClassNode();
@@ -332,8 +340,7 @@ public final class DecompilerNoiseTest {
                 new InsnNode(Opcodes.LCONST_1),
                 new InsnNode(Opcodes.LADD),
                 new InsnNode(Opcodes.LRETURN)));
-        // Real max_locals so the local-variable-table noise is actually applied;
-        // the writer still recomputes them from the final code.
+
         node.methods.get(0).maxLocals = 1;
         node.methods.get(1).maxLocals = 1;
         node.methods.get(2).maxLocals = 2;
@@ -429,8 +436,6 @@ public final class DecompilerNoiseTest {
         }
         return node.sourceDebug != null;
     }
-
-    // --------------------------------------------------------------- helpers
 
     private static String runIn(Path directory, String... command) throws Exception {
         ProcessBuilder builder = new ProcessBuilder(command);

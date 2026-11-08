@@ -66,15 +66,14 @@ import java.util.Set;
  */
 public final class AntiLlmPass implements Pass {
 
-    /** Decoy body shapes; different signatures keep the decoys from clustering. */
     private enum Shape {
-        /** {@code int hash(String)}: rolling hash with a mixing table. */
+
         INT_HASH,
-        /** {@code boolean looksLike(String)}: characteristic-bit predicate. */
+
         BOOL_PREDICATE,
-        /** {@code long checksum(String)}: weighted character sum. */
+
         LONG_CHECKSUM,
-        /** {@code String normalize(String)}: trim plus length cap. */
+
         STRING_NORMALIZE
     }
 
@@ -154,17 +153,13 @@ public final class AntiLlmPass implements Pass {
                 String seedMethod = uniqueMethodName(node, names);
                 node.methods.add(createSeed(seedMethod, random));
                 added.add(seedMethod);
-                // Anchor one visible reference in the static initializer: virtualization
-                // moves the guarded call sites of ordinary methods into VM payloads, so
-                // without this anchor a decoy looks unreferenced in the class file.
+
                 MethodNode clinit = ensureClinit(node);
                 insertDecoyCall(node, clinit, seedField, decoyNames.get(0), decoyDescs.get(0),
                         literals.get(random.nextInt(literals.size())), random);
                 addSeedInit(node, seedField, seedMethod);
                 seeds++;
 
-                // Chain the decoys so a reference-graph walk finds live-looking code
-                // instead of a set of never-called leaves.
                 for (int i = 0; i + 1 < decoyNames.size(); i++) {
                     MethodNode decoy = findMethod(node, decoyNames.get(i));
                     if (decoy != null) {
@@ -249,14 +244,7 @@ public final class AntiLlmPass implements Pass {
                         continue;
                     }
                     String[] decoy = pool.get(random.nextInt(pool.size()));
-                    // The decoy is created private because only its own class calls
-                    // it; a cross-class call site needs at least package access, and
-                    // the target must be in the same package (the flattener puts
-                    // every renamed class there). Skipping the promotion is what
-                    // produced an intermittent IllegalAccessError at runtime: the
-                    // call site is guarded by a nanoTime-seeded predicate, so the
-                    // illegal instruction only linked when the guard happened to
-                    // fire.
+
                     promoteDecoy(target, decoy[0], decoy[1]);
                     insertDecoyCall(caller, hosts.get(i), seed, target.name, decoy[0], decoy[1],
                             "", random);
@@ -305,14 +293,6 @@ public final class AntiLlmPass implements Pass {
         return method.attrs == null || method.attrs.isEmpty();
     }
 
-    /**
-     * Literals a decoy can feed its own body with.
-     *
-     * <p>Reusing constants that already occur in the same class keeps the decoy
-     * plausible and avoids shipping a fixed decoy vocabulary: earlier versions
-     * embedded strings such as {@code "AES/CBC/PKCS5Padding"}, which turned the
-     * decoys themselves into a fingerprint.</p>
-     */
     private static List<String> collectLiterals(ClassNode node) {
         List<String> literals = new ArrayList<String>();
         for (MethodNode method : node.methods) {
@@ -349,11 +329,6 @@ public final class AntiLlmPass implements Pass {
         }
     }
 
-    /**
-     * Makes a decoy callable from another class: decoys are created private
-     * because only their owner calls them, while a cross-class call site needs at
-     * least package access.
-     */
     private static void promoteDecoy(ClassNode target, String name, String desc) {
         for (MethodNode method : target.methods) {
             if (method.name.equals(name) && method.desc.equals(desc)) {
@@ -363,7 +338,6 @@ public final class AntiLlmPass implements Pass {
         }
     }
 
-    /** True when both internal names live in the same package ("" = default). */
     private static boolean samePackage(String a, String b) {
         int slashA = a.lastIndexOf('/');
         int slashB = b.lastIndexOf('/');
@@ -372,7 +346,6 @@ public final class AntiLlmPass implements Pass {
         return packageA.equals(packageB);
     }
 
-    /** Adds a private decoy with one of four plausible shapes. */
     private static MethodNode createDecoy(String name, Shape shape, String literal, Random random) {
         MethodNode method = new MethodNode(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC,
                 name, descriptorOf(shape), null, null);
@@ -393,7 +366,6 @@ public final class AntiLlmPass implements Pass {
         return method;
     }
 
-    /** {@code int hash(String)}: rolling hash plus a small mixing table. */
     private static void buildHash(MethodNode method, String literal, Random random) {
         InsnList code = method.instructions;
         int multiplier = oddMultiplier(random);
@@ -450,7 +422,6 @@ public final class AntiLlmPass implements Pass {
         method.maxStack = 4;
     }
 
-    /** {@code boolean looksLike(String)}: characteristic-bit test. */
     private static void buildPredicate(MethodNode method, String literal, Random random) {
         InsnList code = method.instructions;
         int multiplier = oddMultiplier(random);
@@ -498,7 +469,6 @@ public final class AntiLlmPass implements Pass {
         method.maxStack = 4;
     }
 
-    /** {@code long checksum(String)}: weighted character sum. */
     private static void buildChecksum(MethodNode method, String literal, Random random) {
         InsnList code = method.instructions;
         int weight = oddMultiplier(random);
@@ -536,7 +506,6 @@ public final class AntiLlmPass implements Pass {
         method.maxStack = 5;
     }
 
-    /** {@code String normalize(String)}: trim plus length cap. */
     private static void buildNormalize(MethodNode method, String literal, Random random) {
         InsnList code = method.instructions;
         int cap = 4 + random.nextInt(28);
@@ -564,10 +533,6 @@ public final class AntiLlmPass implements Pass {
         method.maxStack = 3;
     }
 
-    /**
-     * A cheap, plausible use of a literal already present in the class. Which
-     * {@code String} operation is used varies so the decoys do not share one shape.
-     */
     private static void semanticCue(InsnList code, String literal, Random random) {
         code.add(new LdcInsnNode(literal));
         switch (random.nextInt(3)) {
@@ -594,14 +559,6 @@ public final class AntiLlmPass implements Pass {
         return value == 0 ? 31 : value;
     }
 
-    /**
-     * The call-site seed.
-     *
-     * <p>It mixes {@code System.nanoTime()}, so no static analysis can fold the
-     * guarded call away: the decoy path looks reachable and must be followed. The
-     * value is read once per class during initialization, so the cost is one call
-     * per class and the decoy body only ever runs if the value happens to match.</p>
-     */
     private static MethodNode createSeed(String name, Random random) {
         MethodNode method = new MethodNode(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC,
                 name, "()I", null, null);
@@ -653,11 +610,6 @@ public final class AntiLlmPass implements Pass {
         clinit.maxStack = Math.max(clinit.maxStack, 1);
     }
 
-    /**
-     * Inserts {@code if ((seed & mask) == target) decoy(literal);} at the start of
-     * {@code method}. The predicate compares a runtime-derived seed against a
-     * random constant, so the branch is not statically decidable.
-     */
     private static void insertDecoyCall(ClassNode caller, MethodNode method, String seedField,
                                         String targetOwner, String decoyName, String decoyDesc,
                                         String literal, Random random) {
@@ -713,7 +665,6 @@ public final class AntiLlmPass implements Pass {
         return null;
     }
 
-    /** Moves the body behind {@code layers} private forwarding methods. */
     private static void wrap(ClassNode node, MethodNode method, int layers, NameGenerator names) {
         MethodNode current = method;
         for (int i = 0; i < layers; i++) {
@@ -737,8 +688,7 @@ public final class AntiLlmPass implements Pass {
             current.invisibleLocalVariableAnnotations = null;
             int forwarderSlots = argumentSlots(current);
             current.maxLocals = Math.max(current.maxLocals, forwarderSlots);
-            // A forwarder pushes receiver + arguments before the call and may keep
-            // a 2-slot return value afterwards; never leave maxStack at 0.
+
             current.maxStack = forwarderSlots + 2;
             current = body;
         }
@@ -774,10 +724,6 @@ public final class AntiLlmPass implements Pass {
         return slots;
     }
 
-    /**
-     * A member name from the renamer's own generator and dictionary, so generated
-     * members cannot be told apart from renamed program members.
-     */
     private static String uniqueMethodName(ClassNode node, NameGenerator names) {
         Set<String> existing = new HashSet<String>();
         for (MethodNode method : node.methods) {

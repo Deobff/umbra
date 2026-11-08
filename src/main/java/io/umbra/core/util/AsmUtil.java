@@ -21,23 +21,13 @@ import java.util.List;
 /** ASM helpers shared by all passes. */
 public final class AsmUtil implements Opcodes {
 
-    /** Minimum class file version for MethodHandle/MethodType/InvokeDynamic constants. */
     public static final int MIN_INVOKE_DYNAMIC_VERSION = Opcodes.V1_7;
 
-    /** Minimum class file version for {@code CONSTANT_Dynamic} (condy) constants. */
     public static final int MIN_CONSTANT_DYNAMIC_VERSION = Opcodes.V11;
 
     private AsmUtil() {
     }
 
-    /**
-     * Returns the minimum class file <em>major</em> version this class needs
-     * because of its constant pool contents: 55 for {@code ConstantDynamic}, 51
-     * for MethodHandle/MethodType/InvokeDynamic, or {@code 0} when no upgrade is
-     * required. Note that {@link ClassNode#version} stores minor version in the
-     * high 16 bits (a JDK 1.1 class reads as {@code V1_1 == 3 << 16 | 45}), so
-     * only the low 16 bits are compared.
-     */
     public static int requiredConstantVersion(ClassNode node) {
         if ((node.version & 0xFFFF) >= MIN_CONSTANT_DYNAMIC_VERSION) {
             return 0;
@@ -68,11 +58,6 @@ public final class AsmUtil implements Opcodes {
         return required;
     }
 
-    /**
-     * Safety net run just before writing: bumps every pool class whose
-     * constants require a newer class file version (51 for invoke-dynamic
-     * constants, 55 for condy). Returns the number of classes upgraded.
-     */
     public static int ensureConstantCompatibleVersions(ClassPool pool, Log log) {
         int upgraded = 0;
         for (ClassNode node : pool.classes().values()) {
@@ -94,7 +79,6 @@ public final class AsmUtil implements Opcodes {
         return upgraded;
     }
 
-    /** True when any method of the class contains a JSR or RET instruction. */
     public static boolean containsJsrOrRet(ClassNode node) {
         for (MethodNode method : node.methods) {
             if (containsJsrOrRet(method)) {
@@ -104,7 +88,6 @@ public final class AsmUtil implements Opcodes {
         return false;
     }
 
-    /** True when the method contains a JSR or RET instruction. */
     public static boolean containsJsrOrRet(MethodNode method) {
         if (method.instructions == null) {
             return false;
@@ -130,10 +113,6 @@ public final class AsmUtil implements Opcodes {
         return false;
     }
 
-    /**
-     * Reads a boolean attribute from an annotation, returning {@code null}
-     * when the annotation is absent.
-     */
     public static Boolean annotationBoolean(List<AnnotationNode> annotations, String desc, String key) {
         if (annotations == null) {
             return null;
@@ -167,7 +146,6 @@ public final class AsmUtil implements Opcodes {
         return hasAnnotation(node.visibleAnnotations, desc) || hasAnnotation(node.invisibleAnnotations, desc);
     }
 
-    /** Removes every annotation with the given descriptor. */
     public static void removeAnnotation(ClassNode node, String desc) {
         node.visibleAnnotations = remove(node.visibleAnnotations, desc);
         node.invisibleAnnotations = remove(node.invisibleAnnotations, desc);
@@ -191,7 +169,6 @@ public final class AsmUtil implements Opcodes {
         return annotations;
     }
 
-    /** Pushes a constant, using compact opcodes where possible. */
     public static void push(InsnList list, Object value) {
         if (value instanceof Integer) {
             pushInt(list, (Integer) value);
@@ -222,7 +199,6 @@ public final class AsmUtil implements Opcodes {
         }
     }
 
-    /** Pushes the default value for a type, or nothing for {@code void}. */
     public static void pushDefault(InsnList list, Type type) {
         switch (type.getSort()) {
             case Type.VOID:
@@ -291,18 +267,15 @@ public final class AsmUtil implements Opcodes {
         }
     }
 
-    /** True for instructions that are labels, line numbers or frames. */
     public static boolean isPseudo(AbstractInsnNode node) {
         return node.getOpcode() < 0;
     }
 
-    /** Converts a descriptor to a human-readable Java type for mapping files. */
     public static String descriptorToJava(String desc) {
         Type type = Type.getType(desc);
         return typeToJava(type);
     }
 
-    /** Converts a method descriptor to {@code returnType name(args)}. */
     public static String methodSignatureToJava(String name, String desc) {
         Type method = Type.getMethodType(desc);
         StringBuilder out = new StringBuilder();

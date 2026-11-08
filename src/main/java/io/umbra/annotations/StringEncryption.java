@@ -16,6 +16,6 @@ import java.lang.annotation.Target;
 @Retention(RetentionPolicy.CLASS)
 @Target({ElementType.TYPE, ElementType.METHOD})
 public @interface StringEncryption {
-    /** Whether string constants in the annotated element should be encrypted. */
+
     boolean enabled() default true;
 }

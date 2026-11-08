@@ -88,7 +88,12 @@ import java.util.concurrent.TimeUnit;
  */
 public final class UmbraRuntimeGuard implements Runnable {
 
-    // Substituted at injection time.
+    private static void say(String line) {
+        if (DEBUG) {
+            System.err.println(line);
+        }
+    }
+
     private static final String LEVEL_TEXT = "@@LEVEL@@";
     private static final String ACTION = "@@ACTION@@";
     private static final String THREAD_TEXT = "@@THREAD@@";
@@ -102,49 +107,49 @@ public final class UmbraRuntimeGuard implements Runnable {
     private static final String WATCH_MS_TEXT = "@@WATCHMS@@";
     private static final String LOG_TOKEN = "@@LOGTOKEN@@";
 
-    /** No signal. */
+    private static final String GATE_SECRET = "@@GATESECRET@@";
+
+    private static volatile byte[] lastCheckDigest;
+    private static volatile long lastCheckCounter;
+
     public static final int SIGNAL_NONE = 0;
-    /** Debugger/agent option on the JVM command line (or {@code sun.java.command}). */
+
     public static final int SIGNAL_ARGUMENTS = 1;
-    /** Suspicious environment variable (agent, Frida/Gum, preload). */
+
     public static final int SIGNAL_ENVIRONMENT = 2;
-    /** Remote JMX management properties. */
+
     public static final int SIGNAL_JMX = 3;
-    /** {@code sun.jdwp.listenerAddress} is set. */
+
     public static final int SIGNAL_LISTENER = 4;
-    /** A {@code JDWP*} debugger thread is alive. */
+
     public static final int SIGNAL_THREAD = 5;
-    /** {@code .attach_pid<pid>}/{@code .java_pid<pid>} exists for this process. */
+
     public static final int SIGNAL_ATTACH_FILE = 6;
-    /** A peer answered the JDWP handshake on a debug port. */
+
     public static final int SIGNAL_HANDSHAKE = 7;
-    /** Linux {@code TracerPid} is non-zero (ptrace/straced). */
+
     public static final int SIGNAL_TRACER = 8;
-    /** Linux {@code /proc/self/maps} maps a Frida/Gum/ptrace module. */
+
     public static final int SIGNAL_MODULE = 9;
-    /** The process was suspended across a timing window. */
+
     public static final int SIGNAL_TIMING = 10;
-    /** The watchdog interval drifted (process suspended between checks). */
+
     public static final int SIGNAL_DRIFT = 11;
-    /** A real dynamic attach was observed after startup (attach watcher). */
+
     public static final int SIGNAL_ATTACH = 12;
-    /** Heap-dump-on-OOM JVM flag is enabled (one dump exposes decrypted classes). */
+
     public static final int SIGNAL_HEAP_DUMP = 13;
-    /** {@code jdk.attach.allowAttachSelf} is enabled (self-attach debugger path). */
+
     public static final int SIGNAL_ATTACH_SELF = 14;
 
-    /** Property-gated diagnostics; no output unless {@code -Dumbra.debug=true}. */
     private static final boolean DEBUG = Boolean.getBoolean("umbra.debug");
 
-    /** Common JDWP listen ports; a peer must answer the real handshake. */
     private static final int[] COMMON_DEBUG_PORTS = {
             5005, 8000, 8001, 8002, 8003, 8004, 8005, 8006, 8007, 8008, 8009
     };
 
-    /** Default JDWP port, always probed on entry. */
     private static final int DEFAULT_DEBUG_PORT = 5005;
 
-    /** Short connect timeout (ms) for the handshake probe (~16 ms on Windows). */
     private static final int FAST_CONNECT_TIMEOUT_MS = 20;
 
     private static final byte[] JDWP_HANDSHAKE = {
@@ -156,24 +161,14 @@ public final class UmbraRuntimeGuard implements Runnable {
     private static final int PROC_STATUS_LIMIT = 64 * 1024;
     private static final int PROC_MAPS_LIMIT = 4 * 1024 * 1024;
 
-    /** Module names that indicate a Frida/Gum/ptrace injection on Linux. */
     private static final String[] SUSPICIOUS_MODULES = {
             "frida", "gum-js", "gumjs", "gum.so", "ptrace"
     };
 
-    /**
-     * Attach-watcher poll cadence (ms). A real {@code loadAgent} keeps a
-     * {@code sun.instrument} frame on the Attach Listener thread for only a few
-     * tens of milliseconds, so the watcher samples fast enough to catch it even
-     * under scheduler contention (the sample itself only enumerates threads and
-     * reads the stack of the attach/debug threads, not every thread).
-     */
     private static final int ATTACH_WATCH_POLL_MS = 1;
 
-    /** Fallback filesystem scan cadence (ms) when WatchService is unavailable. */
     private static final int ATTACH_WATCH_FALLBACK_MS = 50;
 
-    /** Full thread-snapshot every Nticks (5 ms ticks -> 50 ms) for new thread names. */
     private static final int ATTACH_WATCH_FULL_SAMPLE_TICKS = 10;
 
     private static volatile boolean installed;
@@ -190,16 +185,11 @@ public final class UmbraRuntimeGuard implements Runnable {
     private static volatile File cachedTmp;
     private static volatile long cachedPid = -2L;
 
-    /** Single watcher target (Thread needs a Runnable; no nested class allowed). */
     private static final UmbraRuntimeGuard WATCHER = new UmbraRuntimeGuard();
 
     private UmbraRuntimeGuard() {
     }
 
-    /**
-     * Full entry-point check. Idempotent: only the first invocation runs the
-     * detection and starts the watchdog; later calls return immediately.
-     */
     public static void check() {
         int level = level();
         if (level <= 0) {
@@ -221,16 +211,53 @@ public final class UmbraRuntimeGuard implements Runnable {
         }
         fullChecks++;
         int signal = detect(level);
+        recordCheckEvidence(signal);
         if (signal != SIGNAL_NONE) {
             setActive(signal);
             fail(signal);
         }
     }
 
-    /**
-     * Watchdog re-check: full detection plus a suspend/interval drift test. The
-     * watchdog calls this periodically with a randomized interval.
-     */
+    private static void recordCheckEvidence(int signal) {
+        byte[] secret = gateSecret();
+        if (secret == null) {
+            return;
+        }
+        try {
+            long counter = lastCheckCounter + 1L;
+            javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+            mac.init(new javax.crypto.spec.SecretKeySpec(secret, "HmacSHA256"));
+            mac.update("umbra.check.v1".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            byte[] counterBytes = new byte[8];
+            for (int i = 0; i < 8; i++) {
+                counterBytes[i] = (byte) (counter >>> (8 * i));
+            }
+            mac.update(counterBytes);
+            mac.update(new byte[] {
+                    (byte) signal, (byte) (signal >>> 8), (byte) (signal >>> 16),
+                    (byte) (signal >>> 24)
+            });
+            lastCheckDigest = mac.doFinal();
+            lastCheckCounter = counter;
+        } catch (Throwable unavailable) {
+
+        } finally {
+            java.util.Arrays.fill(secret, (byte) 0);
+        }
+    }
+
+    private static byte[] gateSecret() {
+        if (GATE_SECRET == null || GATE_SECRET.length() < 8 || GATE_SECRET.charAt(0) == '@') {
+            return null;
+        }
+        try {
+            byte[] secret = java.util.Base64.getDecoder().decode(GATE_SECRET.trim());
+            return secret.length == 32 ? secret : null;
+        } catch (Throwable unavailable) {
+            return null;
+        }
+    }
+
     public static void watch() {
         int level = level();
         if (level <= 0 || active) {
@@ -244,7 +271,7 @@ public final class UmbraRuntimeGuard implements Runnable {
                     return;
                 }
             } catch (Throwable ignored) {
-                // ignore
+
             }
         }
         long now = System.nanoTime();
@@ -264,18 +291,6 @@ public final class UmbraRuntimeGuard implements Runnable {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Dynamic attach watcher (WatchService + agent-load/thread signal)
-    // ------------------------------------------------------------------
-
-    /**
-     * Installs the daemon attach watcher once. It catches the transient
-     * {@code .attach_pid<pid>}/{@code .java_pid<pid>} create+delete with a
-     * {@code WatchService}, and samples the attach/debug threads for a live
-     * {@code sun.instrument}/{@code loadAgent} frame (which a real dynamic
-     * {@code loadAgent} attach leaves visible for tens of milliseconds) or a
-     * {@code JDWP*}/{@code Attach Listener} thread that did not exist at install.
-     */
     private static void startAttachWatch() {
         synchronized (UmbraRuntimeGuard.class) {
             if (attachWatchStarted) {
@@ -292,17 +307,15 @@ public final class UmbraRuntimeGuard implements Runnable {
             ATTACH_WATCHER_THREAD = watcher;
             watcher.start();
         } catch (Throwable unavailable) {
-            // Watch is best effort; the entry/periodic probes still run.
+
         }
     }
 
-    /** Runnable target of the daemon attach watcher (single instance). */
     @Override
     public void run() {
         attachWatchLoop();
     }
 
-    /** Returns the name of the daemon attach watcher thread (diagnostic/tests). */
     public static String attachWatcherThreadName() {
         Thread watcher = ATTACH_WATCHER_THREAD;
         return watcher == null ? null : watcher.getName();
@@ -328,10 +341,7 @@ public final class UmbraRuntimeGuard implements Runnable {
         while (true) {
             try {
                 if (service != null) {
-                    // Non-blocking poll: an attach artifact create+delete must never
-                    // be delayed behind a blocking wait, and the agent-load stack
-                    // sample must run on every tick (a loadAgent frame on Windows is
-                    // only visible for a few milliseconds).
+
                     WatchKey key = service.poll();
                     if (key != null) {
                         List<WatchEvent<?>> events = key.pollEvents();
@@ -345,15 +355,13 @@ public final class UmbraRuntimeGuard implements Runnable {
                         key.reset();
                     }
                 }
-                // Cheap per-tick check: read the stack of the attach/debug threads
-                // seen at install (a loadAgent frame lives there very briefly).
+
                 if (sampleAttachStacks()) {
                     attachDetected("agent-load thread");
                     return;
                 }
                 ticks++;
-                // Occasional full snapshot catches a JDWP/Attach Listener thread
-                // that appeared after install.
+
                 if (ticks % ATTACH_WATCH_FULL_SAMPLE_TICKS == 0 && sampleAttachSignal()) {
                     attachDetected("new attach thread");
                     return;
@@ -371,8 +379,7 @@ public final class UmbraRuntimeGuard implements Runnable {
                 Thread.currentThread().interrupt();
                 return;
             } catch (Throwable ignored) {
-                // Keep the agent-load sampling alive even if the WatchService/FS
-                // side is unavailable (never livelock in the catch path).
+
                 if (sampleAttachStacks()) {
                     attachDetected("agent-load thread");
                     return;
@@ -387,7 +394,6 @@ public final class UmbraRuntimeGuard implements Runnable {
         }
     }
 
-    /** True for exactly the attach artifacts of this process (prefix+pid). */
     public static boolean isAttachArtifactName(String name, long pid) {
         if (name == null || pid <= 0L) {
             return false;
@@ -421,18 +427,12 @@ public final class UmbraRuntimeGuard implements Runnable {
         }
     }
 
-    /** Cached attach/debug thread references sampled cheaply by the watcher. */
     private static volatile List<Thread> attachThreadReferences;
 
     private static boolean isAttachThreadName(String name) {
         return name != null && (name.startsWith("JDWP") || name.startsWith("Attach Listener"));
     }
 
-    /**
-     * Cheap per-tick stack sample of the attach/debug threads that existed at
-     * install: a live {@code sun.instrument}/{@code loadAgent} frame is the
-     * durable signature of a dynamic {@code loadAgent} attach.
-     */
     private static boolean sampleAttachStacks() {
         List<Thread> references = attachThreadReferences;
         if (references == null) {
@@ -454,12 +454,11 @@ public final class UmbraRuntimeGuard implements Runnable {
                     return true;
                 }
             } catch (Throwable ignored) {
-                // A thread that died mid-sample is not a signal.
+
             }
         }
         if (stale) {
-            // The Attach Listener/JDWP thread object was replaced; re-bind the
-            // cache so the (cheap) stack sampling keeps watching the live thread.
+
             refreshAttachReferences();
             references = attachThreadReferences;
             if (references != null) {
@@ -473,7 +472,7 @@ public final class UmbraRuntimeGuard implements Runnable {
                             return true;
                         }
                     } catch (Throwable ignored) {
-                        // ignore
+
                     }
                 }
             }
@@ -511,11 +510,6 @@ public final class UmbraRuntimeGuard implements Runnable {
         return false;
     }
 
-    /**
-     * Samples attach/debug threads: a new {@code JDWP*}/{@code Attach Listener}
-     * name compared to the install-time snapshot, or a live
-     * {@code sun.instrument}/{@code loadAgent} frame on such a thread.
-     */
     public static boolean sampleAttachSignal() {
         try {
             ensureAttachBaseline();
@@ -531,7 +525,7 @@ public final class UmbraRuntimeGuard implements Runnable {
                     continue;
                 }
                 if (baseline != null && !baseline.contains(name)) {
-                    return true; // dynamic attach/debug thread appeared after install
+                    return true;
                 }
                 try {
                     StackTraceElement[] stack = thread.getStackTrace();
@@ -545,11 +539,11 @@ public final class UmbraRuntimeGuard implements Runnable {
                         }
                     }
                 } catch (Throwable ignored) {
-                    // A thread that died mid-sample is not a signal.
+
                 }
             }
         } catch (Throwable unavailable) {
-            // ignore
+
         }
         return false;
     }
@@ -574,11 +568,6 @@ public final class UmbraRuntimeGuard implements Runnable {
         return threads;
     }
 
-    /**
-     * Fail-loud attach signal from the watcher/watchdog threads. A background
-     * thread cannot throw into the program's main thread, so {@code throw} halts
-     * with exit code 1 here (same observable rejection as {@code exit}).
-     */
     private static void attachDetected(String source) {
         if (active) {
             return;
@@ -600,17 +589,37 @@ public final class UmbraRuntimeGuard implements Runnable {
             System.err.println(logToken() + " attach detected"
                     + (DEBUG && source != null ? " (" + source + ")" : ""));
         } catch (Throwable ignored) {
-            // stderr may be closed.
+
         }
     }
 
-    /**
-     * Cheap fail-closed re-check used by the encrypted-archive loader before
-     * every decrypt/define and by the integrity guard. It never runs the
-     * expensive probes (thread dump, port probes, timing); a positive signal that
-     * was already observed is sticky, and the low-cost attach artifacts are
-     * re-checked. Late attaches are covered by the level-3 watchdog.
-     */
+    public static byte[] attest(long nonce) {
+
+        if (lastCheckDigest == null || lastCheckCounter == 0L) {
+            return null;
+        }
+        byte[] secret = gateSecret();
+        if (secret == null) {
+            return null;
+        }
+        try {
+            javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+            mac.init(new javax.crypto.spec.SecretKeySpec(secret, "HmacSHA256"));
+            byte[] label = "umbra.gate.v1".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            byte[] nonceBytes = new byte[8];
+            for (int i = 0; i < 8; i++) {
+                nonceBytes[i] = (byte) (nonce >>> (8 * i));
+            }
+            mac.update(label);
+            mac.update(nonceBytes);
+            byte[] response = mac.doFinal();
+            java.util.Arrays.fill(secret, (byte) 0);
+            return response;
+        } catch (Throwable unavailable) {
+            return null;
+        }
+    }
+
     public static boolean detected() {
         if (active) {
             return true;
@@ -618,9 +627,7 @@ public final class UmbraRuntimeGuard implements Runnable {
         if (level() <= 0) {
             return false;
         }
-        // The loader calls this once per class; cache the negative result for a
-        // short window so a large archive does not pay two filesystem stats per
-        // class while a late attach is still noticed within 200 ms.
+
         long now = System.nanoTime();
         long previous = lastQuickNanos;
         if (previous != 0L && now > previous && now - previous < 200000000L) {
@@ -639,39 +646,30 @@ public final class UmbraRuntimeGuard implements Runnable {
                 }
             }
         } catch (Throwable ignored) {
-            // A blocked probe is not a signal.
+
         }
         return active;
     }
 
-    /** Number of full detection passes that ran in this JVM (diagnostic). */
     public static int fullChecks() {
         return fullChecks;
     }
 
-    /** Number of detection passes (including watchdog passes) run so far (diagnostic). */
     public static int probeRuns() {
         return probes;
     }
 
-    /** True once any signal fired in this JVM. */
     public static boolean isActive() {
         return active;
     }
 
-    /** Numeric id of the last signal, {@link #SIGNAL_NONE} when clean. */
     public static int lastSignal() {
         return lastSignal;
     }
 
-    /** Human-readable name of the last signal, {@code "none"} when clean. */
     public static String lastSignalName() {
         return signalName(lastSignal);
     }
-
-    // ------------------------------------------------------------------
-    // Detection
-    // ------------------------------------------------------------------
 
     private static int detect(int level) {
         probes++;
@@ -680,7 +678,7 @@ public final class UmbraRuntimeGuard implements Runnable {
                 return SIGNAL_ARGUMENTS;
             }
         } catch (Throwable ignored) {
-            // Management API unavailable.
+
         }
         try {
             if (commandSignal(System.getProperty("sun.java.command"), isTrue(JVMTI_TEXT),
@@ -688,7 +686,7 @@ public final class UmbraRuntimeGuard implements Runnable {
                 return SIGNAL_ARGUMENTS;
             }
         } catch (Throwable ignored) {
-            // Property unavailable.
+
         }
         if (level < 2) {
             return SIGNAL_NONE;
@@ -699,42 +697,42 @@ public final class UmbraRuntimeGuard implements Runnable {
                     return SIGNAL_HANDSHAKE;
                 }
             } catch (Throwable ignored) {
-                // ignore
+
             }
             try {
                 if (attachSelfSignal(System.getProperty("jdk.attach.allowAttachSelf"))) {
                     return SIGNAL_ATTACH_SELF;
                 }
             } catch (Throwable ignored) {
-                // ignore
+
             }
             try {
                 if (jdwpListenerSignal()) {
                     return SIGNAL_LISTENER;
                 }
             } catch (Throwable ignored) {
-                // ignore
+
             }
             try {
                 if (threadSignal()) {
                     return SIGNAL_THREAD;
                 }
             } catch (Throwable ignored) {
-                // ignore
+
             }
             try {
                 if (attachFileSignal(tmpDirectory(), currentPid())) {
                     return SIGNAL_ATTACH_FILE;
                 }
             } catch (Throwable ignored) {
-                // ignore
+
             }
             try {
                 if (sampleAttachSignal()) {
                     return SIGNAL_ATTACH;
                 }
             } catch (Throwable ignored) {
-                // ignore
+
             }
         }
         if (isTrue(JVMTI_TEXT)) {
@@ -743,7 +741,7 @@ public final class UmbraRuntimeGuard implements Runnable {
                     return SIGNAL_JMX;
                 }
             } catch (Throwable ignored) {
-                // ignore
+
             }
         }
         try {
@@ -751,7 +749,7 @@ public final class UmbraRuntimeGuard implements Runnable {
                 return SIGNAL_HEAP_DUMP;
             }
         } catch (Throwable ignored) {
-            // ignore
+
         }
         if (isTrue(ENV_TEXT)) {
             try {
@@ -759,7 +757,7 @@ public final class UmbraRuntimeGuard implements Runnable {
                     return SIGNAL_ENVIRONMENT;
                 }
             } catch (Throwable ignored) {
-                // Security manager / unsupported environment.
+
             }
         }
         try {
@@ -768,7 +766,7 @@ public final class UmbraRuntimeGuard implements Runnable {
                 return platform;
             }
         } catch (Throwable ignored) {
-            // /proc is not available.
+
         }
         if (isTrue(TIMING_TEXT)) {
             try {
@@ -776,16 +774,12 @@ public final class UmbraRuntimeGuard implements Runnable {
                     return SIGNAL_TIMING;
                 }
             } catch (Throwable ignored) {
-                // ignore
+
             }
         }
         return SIGNAL_NONE;
     }
 
-    /**
-     * JVM input-argument policy (public for the guard unit tests). A plain
-     * {@code -Xmx}/{@code -D} option never matches.
-     */
     public static boolean argumentsSignal(List<String> arguments, boolean jvmti, boolean attach) {
         if (arguments == null) {
             return false;
@@ -797,9 +791,7 @@ public final class UmbraRuntimeGuard implements Runnable {
             }
             String lower = argument.toLowerCase(Locale.ROOT);
             if (lower.startsWith("-d")) {
-                // A -D system property (for example -Dsun.jdwp.listenerAddress)
-                // does not enable an agent by itself; the listener property is
-                // checked separately at level 2. Avoid mis-labelling it here.
+
                 continue;
             }
             if (lower.indexOf("jdwp") >= 0 || lower.indexOf("-xdebug") >= 0) {
@@ -817,10 +809,6 @@ public final class UmbraRuntimeGuard implements Runnable {
         return false;
     }
 
-    /**
-     * {@code sun.java.command} policy: an agent argument smuggled after the main
-     * class name is still detected.
-     */
     public static boolean commandSignal(String command, boolean jvmti, boolean attach) {
         if (command == null || command.isEmpty()) {
             return false;
@@ -846,11 +834,6 @@ public final class UmbraRuntimeGuard implements Runnable {
         return false;
     }
 
-    /**
-     * Environment-marker policy (public for the guard unit tests): agent/debug
-     * flags in the standard JAVA options variables, {@code FRIDA_*}/{@code GUM_*}
-     * variables, and Frida/Gum preloads.
-     */
     public static boolean environmentSignal(Map<String, String> environment) {
         if (environment == null) {
             return false;
@@ -895,9 +878,6 @@ public final class UmbraRuntimeGuard implements Runnable {
                 || lower.indexOf("gum") >= 0 || lower.indexOf("startattachlistener") >= 0;
     }
 
-    /**
-     * Attach-pid artifact policy (public for the guard unit tests).
-     */
     public static boolean attachFileSignal(File directory, long pid) {
         if (directory == null || pid <= 0L) {
             return false;
@@ -913,16 +893,11 @@ public final class UmbraRuntimeGuard implements Runnable {
                 return true;
             }
         } catch (Throwable ignored) {
-            // A blocked filesystem is not a signal.
+
         }
         return false;
     }
 
-    /**
-     * Thread-name policy (public for the guard unit tests). Only {@code JDWP*}
-     * threads count: a clean HotSpot JVM already runs a daemon
-     * {@code Attach Listener} thread, so that name alone is deliberately ignored.
-     */
     public static boolean threadNamesSignal(List<String> names) {
         if (names == null) {
             return false;
@@ -936,10 +911,6 @@ public final class UmbraRuntimeGuard implements Runnable {
         return false;
     }
 
-    /**
-     * Raw {@code /proc/self/status} policy: a non-zero {@code TracerPid} means
-     * the process is traced (public for the guard unit tests).
-     */
     public static boolean procStatusSignal(String statusText) {
         if (statusText == null || statusText.isEmpty()) {
             return false;
@@ -960,10 +931,6 @@ public final class UmbraRuntimeGuard implements Runnable {
         return false;
     }
 
-    /**
-     * Raw {@code /proc/self/maps} policy: a mapped Frida/Gum/ptrace module
-     * indicates instrumentation (public for the guard unit tests).
-     */
     public static boolean procMapsSignal(String mapsText) {
         if (mapsText == null || mapsText.isEmpty()) {
             return false;
@@ -977,28 +944,17 @@ public final class UmbraRuntimeGuard implements Runnable {
         return false;
     }
 
-    /**
-     * Suspend/breakpoint drift policy: an elapsed time larger than the expected
-     * window plus a generous slack means the process was stopped (public for the
-     * guard unit tests).
-     */
     public static boolean driftExceeded(long observedMs, long expectedMs, long slackMs) {
         if (observedMs < 0L || expectedMs < 0L || slackMs < 0L) {
             return false;
         }
         long allowed = expectedMs + slackMs;
         if (allowed < expectedMs) {
-            return false; // overflow: impossible window
+            return false;
         }
         return observedMs > allowed;
     }
 
-    /**
-     * Extracts the ports advertised by this JVM either through the
-     * {@code sun.jdwp.listenerAddress} property or through the
-     * {@code address=...} clause of a JDWP agent option (public for the guard
-     * unit tests). Port 0 (ephemeral) is ignored.
-     */
     public static int[] advertisedPorts(String listenerAddress, List<String> arguments) {
         List<Integer> ports = new ArrayList<Integer>();
         addPort(ports, listenerAddress);
@@ -1044,15 +1000,10 @@ public final class UmbraRuntimeGuard implements Runnable {
                 ports.add(Integer.valueOf(port));
             }
         } catch (NumberFormatException ignored) {
-            // A host name/IPv6 form without a port number.
+
         }
     }
 
-    /**
-     * Probes {@code host:port} with the real JDWP handshake. An arbitrary open
-     * port is not reported, only a peer that echoes {@code JDWP-Handshake}
-     * (public for the guard unit tests).
-     */
     public static boolean handshakeSignal(String host, int port, int timeoutMs) {
         if (host == null || host.isEmpty() || port <= 0 || port > 65535) {
             return false;
@@ -1090,14 +1041,10 @@ public final class UmbraRuntimeGuard implements Runnable {
             try {
                 socket.close();
             } catch (Throwable ignored) {
-                // ignore
+
             }
         }
     }
-
-    // ------------------------------------------------------------------
-    // Probe implementations
-    // ------------------------------------------------------------------
 
     private static List<String> managementArguments() {
         try {
@@ -1120,7 +1067,7 @@ public final class UmbraRuntimeGuard implements Runnable {
                     java.lang.management.ManagementFactory.getThreadMXBean();
             long[] ids = bean.getAllThreadIds();
             if (ids != null && ids.length > 0) {
-                // depth 0 avoids the expensive full stack capture.
+
                 java.lang.management.ThreadInfo[] infos = bean.getThreadInfo(ids, 0);
                 if (infos != null) {
                     List<String> dumped = new ArrayList<String>();
@@ -1136,7 +1083,7 @@ public final class UmbraRuntimeGuard implements Runnable {
                 }
             }
         } catch (Throwable unavailable) {
-            // Fall through to the stack-trace based scan.
+
         }
         try {
             List<String> names = new ArrayList<String>();
@@ -1152,16 +1099,6 @@ public final class UmbraRuntimeGuard implements Runnable {
         }
     }
 
-    /**
-     * Optional diagnostic JDWP port probe (disabled by default via
-     * {@code @@PORTPROBE@@}): probes the ports this JVM advertises
-     * ({@code sun.jdwp.listenerAddress} / agent {@code address=} clauses) and the
-     * common debug ports with the real {@code JDWP-Handshake}. It is not part of
-     * the default detection policy because a hardcoded common port can belong to
-     * a *different* local JVM that happens to be debugged, which would flag a
-     * clean protected process; startup JDWP is already covered by the JVM
-     * argument and listener-property signals.
-     */
     private static boolean handshakeProbe() {
         String listener = System.getProperty("sun.jdwp.listenerAddress");
         int[] advertised = advertisedPorts(listener, managementArguments());
@@ -1191,11 +1128,6 @@ public final class UmbraRuntimeGuard implements Runnable {
         return value != null && value.trim().length() > 0 && !"false".equalsIgnoreCase(value.trim());
     }
 
-    /**
-     * Heap-dump-on-OOM flag policy (public for the guard unit tests). A heap dump
-     * exposes every decrypted class currently in memory; a clean JVM does not set
-     * this flag, so there is no false positive.
-     */
     public static boolean heapDumpSignal(List<String> arguments) {
         if (arguments == null) {
             return false;
@@ -1217,11 +1149,6 @@ public final class UmbraRuntimeGuard implements Runnable {
         return false;
     }
 
-    /**
-     * {@code jdk.attach.allowAttachSelf} policy (public for the guard unit tests):
-     * enabling self-attach opens jcmd/agent attach from inside the same JVM, which
-     * bypasses the external attach path.
-     */
     public static boolean attachSelfSignal(String allowAttachSelfProperty) {
         return allowAttachSelfProperty != null
                 && "true".equalsIgnoreCase(allowAttachSelfProperty.trim());
@@ -1230,7 +1157,7 @@ public final class UmbraRuntimeGuard implements Runnable {
     private static int platformSignal() {
         String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
         if (os.indexOf("linux") < 0) {
-            // Windows/macOS platform checks are delegated to the native guard.
+
             return SIGNAL_NONE;
         }
         String status = readTextFile("/proc/self/status", PROC_STATUS_LIMIT);
@@ -1272,17 +1199,12 @@ public final class UmbraRuntimeGuard implements Runnable {
                 try {
                     in.close();
                 } catch (Throwable ignored) {
-                    // ignore
+
                 }
             }
         }
     }
 
-    /**
-     * Randomised suspend/breakpoint check: a short sleep and a short busy window
-     * must take roughly the expected time; a debugger that stops the process
-     * inside this window produces an obvious multi-second gap.
-     */
     private static boolean timingSignal() {
         long start = System.nanoTime();
         try {
@@ -1299,7 +1221,7 @@ public final class UmbraRuntimeGuard implements Runnable {
         }
         long elapsedMs = (System.nanoTime() - start) / 1000000L;
         if (sink == Long.MIN_VALUE) {
-            return false; // never true; keeps the loop observable
+            return false;
         }
         return driftExceeded(elapsedMs, 10L, TIMING_SLACK_MS);
     }
@@ -1339,10 +1261,6 @@ public final class UmbraRuntimeGuard implements Runnable {
         return pid;
     }
 
-    // ------------------------------------------------------------------
-    // Lifecycle / actions
-    // ------------------------------------------------------------------
-
     private static void startWatchdog() {
         synchronized (UmbraRuntimeGuard.class) {
             if (watchdogStarted) {
@@ -1359,7 +1277,7 @@ public final class UmbraRuntimeGuard implements Runnable {
                             Long.valueOf(watchIntervalMs()), Integer.valueOf(0));
             ((Thread) watchdog).start();
         } catch (Throwable unavailable) {
-            // The watchdog is best effort; entry checks already ran.
+
         }
     }
 
@@ -1393,7 +1311,7 @@ public final class UmbraRuntimeGuard implements Runnable {
         try {
             System.err.println(logToken() + " " + name + " detected");
         } catch (Throwable ignored) {
-            // stderr may be closed by the caller.
+
         }
     }
 
@@ -1444,10 +1362,6 @@ public final class UmbraRuntimeGuard implements Runnable {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Placeholder parsing
-    // ------------------------------------------------------------------
-
     private static int level() {
         int cached = cachedLevel;
         if (cached >= 0) {
@@ -1480,7 +1394,6 @@ public final class UmbraRuntimeGuard implements Runnable {
         return "true".equalsIgnoreCase(value);
     }
 
-    /** True when an injected placeholder was substituted with a non-empty value. */
     private static boolean substituted(String value) {
         return value != null && value.length() > 1 && value.charAt(0) != '@';
     }

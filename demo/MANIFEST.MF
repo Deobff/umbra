@@ -1,0 +1,5 @@
+Manifest-Version: 1.0
+Main-Class: demo.Main
+Implementation-Title: Umbra demo
+Implementation-Version: 1.0.0
+Created-By: qa/build-demo.ps1

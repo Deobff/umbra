@@ -25,7 +25,6 @@ public final class InjectionTargets {
     private InjectionTargets() {
     }
 
-    /** Parses an annotation element value; never throws. */
     public static List<MixinMemberRef> parse(Object raw, MixinCollector collector, String where) {
         List<MixinMemberRef> out = new ArrayList<MixinMemberRef>();
         collect(raw, out, collector, where);
@@ -60,10 +59,6 @@ public final class InjectionTargets {
                 + raw.getClass().getSimpleName() + " in " + where);
     }
 
-    /**
-     * Parses one method specification. Returns {@code null} for empty entries
-     * and constructor/initializer targets.
-     */
     public static MixinMemberRef parseSpec(String spec, MixinCollector collector, String where) {
         if (spec == null || spec.isEmpty()) {
             return null;
@@ -120,7 +115,6 @@ public final class InjectionTargets {
         return new MixinMemberRef(owner, name, desc);
     }
 
-    /** A method descriptor starts with {@code (} and closes the arguments. */
     private static boolean looksLikeDescriptor(String desc) {
         return desc.length() >= 3 && desc.charAt(0) == '(' && desc.indexOf(')') > 0;
     }

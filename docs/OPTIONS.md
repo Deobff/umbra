@@ -70,7 +70,7 @@ Requires `methodVirtualization.enabled=true` and `vm2.enabled=true`. See
 
 | key | type | default | meaning |
 |---|---|---|---|
-| `native.enabled` | bool | false | transpile eligible methods to C and bind them back with JNI |
+| `native.enabled` | bool | false | transpile eligible methods to C and bind them back with JNI. **The transpiled method bodies are a code library that must be sealed** (V15): the key bridge stays plaintext because it carries the key root, but any `.dat` code payload is sealed through the class-encryption resource channel and the build refuses to emit an unsealed PE. Cost note: java2c is a **cost-type** protection - a disassembler recovers symbols and the `xor` constants statically, so treat it as "harder to read", not "unreadable" |
 | `native.compiler` | path | auto | C compiler (`gcc`/`clang`/`cc`); auto-detected when empty |
 | `native.compilerFlags` | string | "" | extra flags appended to the compile command |
 | `native.maxInstructions` | int | 400 / 800 / 1600 | per-method bytecode budget; the presets scale it with the tier |
@@ -124,6 +124,8 @@ defeats the standard "dump the DLL and rebind it with a costume loader" attack.
 | `string.otpMaxSites` | int | 16 (`maximum`, `aggressive`: 32) | per-class cap on dual-ciphertext sites (bounded size growth: `sites × length`, about +33 % after base64 per converted site) |
 | `string.wipe` | bool | false | decrypt into a temporary buffer and wipe it after the value is copied |
 | `string.encryptAll` | bool | false | encrypt every string constant regardless of length/known-safe heuristics |
+| `string.key` | base64 (16+ bytes) | empty | **weak tier only**: explicit secret for builds that have **no** key root (no class encryption / no native bridge, e.g. `light`). It is embedded in the artifact, so it is obfuscation, not a secret boundary (`strings.keyTier=embedded` + WARN). In a build that already has the native key root the option is **ignored** (INFO + `strings.keyIgnored=1`): the root is strictly stronger, so setting it can never make the output stronger |
+| `string.allowKeylessFallback` | bool | false | accept the **secret-free** tier (site keys derived from build constants only). Without a root, without `string.key` and without this flag the build fails (V8/I1) |
 
 ### `classEncryption.*` — archive encryption + bootstrap loader (crypto)
 
@@ -274,8 +276,8 @@ same value.
 
 Repackaging is why `--preset maximum` output has no `com/yourcompany/...` tree: every renamed class
 ends up in one short random package, while the generated runtime helpers use their own seed-derived
-package (`runtime.package`). Zelix KlassMaster reaches the same goal by moving everything into the
-default package; the difference is cosmetic, both remove the vendor package structure from the listing.
+package (`runtime.package`). Moving everything into one package is deliberate: it removes the vendor
+package structure from a directory listing, which is what an analyst scans first.
 Classes frozen by keep rules, the loader manifest entry point and module descriptors are never moved.
 
 Note: `--set renamer.*` (and the other typed sections, e.g.
@@ -401,6 +403,55 @@ renaming and before string encryption and virtualization.
 | `vm2.indy` | bool | true | generate indy bridges so methods with lambdas/string concat can be virtualized |
 | `vm2.constructors` | bool | false | extract constructor bodies after `super()` into virtualizable helpers |
 | `vm2.holders` | int 1..8 | 2 | payload holder classes per virtualized method; 0 = default |
+
+### 3.3 hardening keys — P0..P9 (see `docs/REPORT-3.3.md`)
+
+Keys added by the 3.3 hardening round. Every one of them defaults to the
+behaviour the matching preset already shipped, so an old YAML keeps producing
+the same archive unless a key is set explicitly.
+
+| key | type | default | meaning |
+|---|---|---|---|
+| `classEncryption.nativeKey` | bool | true on `maximum` | bind the archive master key to the per-build native key root (`PassContext.keyRoot()`); when the key-bridge library cannot be built the pass falls back and reports `classEncryption.nativeKey=fallback` |
+| `classEncryption.nativeKey.fallback` | bool | true | allow the seed-bound fallback at all; `false` makes a native-root build fail instead of silently degrading |
+| `classEncryption.libraryMode` | bool | false | seal a **library jar** (no `main`): the archive keeps the plaintext bootstrap `io.umbra.bootstrap.UmbraLibrary` and the host opens it with `UmbraLibrary.open(File)`; no entry point is required and no trampoline is injected. See `docs/LIBRARY-MODE.md` and qa/impl/crypto.md §R10-B |
+| `classEncryption.libraryKey` | base64 (32 bytes) | empty | external key root for a sealed library: every layer (strings, flow tables, integrity, class payloads) derives from it, the archive stores **no** seed, and the host passes the same root to `UmbraLibrary.open(File, byte[])`. Library mode **requires** this or a native bridge - without either the build fails (V6) |
+| `classEncryption.allowSkip` | bool | false | accept an **unsealed** archive when the layout/structure cannot be sealed (no entry point, Eclipse runnable jar, loader-name collision). Without it the build fails; with it the skip is loud (`[WARN] ... UNENCRYPTED`) and counted in `layout.classEncryptionSkipped` |
+| `vm2.perPayloadOpcodes` | bool | true | derive the opcode permutation per payload from its own key (8-bit Feistel); `false` restores the shared 256-entry table of <=3.2.2 |
+| `vm2.callShadow` | bool | true | hide the call target of pure-forwarder payloads behind a computed id (`SUPER_CALL`), so the target is no longer a constant in the payload |
+| `vm2.forwarderQuota` | int | 0 | extra per-class budget for pure-forwarder methods on top of `vm2.forwarderQuota`-ranked real bodies |
+| `vm2.smallPayloadInts` | int | 512 | payload size below which a single block holder is used (bigger payloads use `vm2.holders`) |
+| `vm2.fusion.skipRate` | double 0..1 | 0.05 | chance a matched superinstruction is left unfused, so the fused set differs per build |
+| `vm2.fusion.variants` | bool | true | use the equivalence families (`if_icmpXX` mirrored, `+c` vs `-(-c)`, commutative operand swap) when fusing |
+| `flow.tablePairs` | int | 256 | per-class runtime table pairs available to the flow pass |
+| `cff.tablePairs` | int | 512 | per-class runtime table pairs for flattened state values |
+| `mba.tablePairs` | int | 256 | per-class runtime table pairs for MBA constant encoding |
+| `flow.irreducible` | bool | true | add a table-keyed always-false second entry to a loop block, so the CFG gains an irreducible edge that a decompiler cannot structure |
+| `flow.crossClass` | bool | true | let a guarded class read its second guard field from **another** protected class (`public static int z$x<n>` on a host). A single-class constant propagation can no longer fold the pair, because the host's `<clinit>` value is not in the analysed class. Statistics: `flow.crossClassPredicates`, `flow.crossClassHosts`, `flow.crossClassPairs` |
+| `flow.groupScope` | enum | package | scope used to group classes for the shared accessor guard (`package` or `root`) |
+| `flow.mbaPredicates` | bool | true | emit the 4-term MBA opaque predicate (`x&~y`, `x|y`, `x^y`, `~x&y` solved by Gaussian elimination against `y*5`, compared through `DCMPL`). Slot pair is allocated per method. Statistics: `flow.mbaPredicates` |
+| `flow.entryShuffle` | bool | **false** | prepend a block that initialises every unused local slot to its default value and `GOTO`s the real entry. Statistics: `flow.entryShuffles` |
+| `flow.bogusPops` | bool | **false** (experimental) | emit `INVOKESTATIC` to a non-existent owner purely to balance the stack. **Does not pass the transform gate today** — enabling it makes every method roll back (coverage 0%). Kept for reference; do not enable |
+| `renamer.dictionary` | enum | *(alphabet)* | `keywords` renames members to Java keywords (`private`, `synchronized`, `goto`, `const` …); `spaces` uses `U+2000`..`U+200F`. Member names only — class/package names keep the alphabet |
+| `renamer.strategy` | enum | flat | `flat` (legacy), `disguise` (library-looking names and packages) or `mixed` |
+| `renamer.baitNames` | list | `main,run,start` | method names kept verbatim as decoys |
+| `watermark.manifest` | bool | false | write a vendor-neutral `Build-Marker: wm1|<hash>` manifest attribute; **off by default** — a protected archive no longer carries `Umbra-Watermark`, `Umbra-Version` or `Created-By: Umbra`, and never carries the build seed |
+| `watermark.key` | base64 | *(unset)* | vendor secret for leak tracing. Set it to embed `wm1|<32 hex>` = `HMAC-SHA256(key, id\|seed)[:16]`, which a dictionary cannot reverse. **Unset means the marker is a build fingerprint only and carries no customer id** — a plain `sha256(id\|seed)` digest let a 1181-word dictionary recover low-entropy customer ids |
+
+**Manifest hygiene (3.3)** — earlier builds stamped the output with
+`Umbra-Watermark: UMBRA|<id>|1.0.0|seed=<hex>` and `Umbra-Version`, which named
+the tool, its version and the build seed that drives class naming. Those
+attributes are gone. The watermark is now a vendor-neutral `wm1|<16 hex>`
+constant inside a synthetic field named `z$<hex>`, i.e. a keyed digest of the
+customer id and the seed; the seed itself is never written. `--trace-watermark`
+still finds it on plain archives and explains why an encrypted archive hides it
+(set `watermark.manifest=true` to keep a manifest marker for leak tracing).
+
+Statistics added with these keys: `classEncryption.nativeKey` (1 native / 0 fallback),
+`virtualization.vm2.opcodes` (text: `per-payload` / `shared`), `virtualization.vm2.forwarders`,
+`flow.runtimeTables`, `flow.maskedConstants`, `flow.irreducibleEntries`,
+`flow.intervalPredicates`, `flow.tablePredicates`, `flow.differentialBranches`,
+`cff.runtimeStates`, `mba.runtimeConstants`.
 
 ### `antiDebug.nativeGuard` / `antiDebug.frida` — native guard (native)
 

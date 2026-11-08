@@ -26,7 +26,7 @@ public final class GuiConfigTest {
     public static void main(String[] args) throws Exception {
         Path dir = Files.createTempDirectory("umbra-gui-test-");
         try {
-            check("3.2.2".equals(GuiConfig.VERSION), "GUI version is 3.2.2");
+            check("3.4.0".equals(GuiConfig.VERSION), "GUI version is 3.4.0");
 
             Path input = dir.resolve("app.jar");
             Files.write(input, new byte[0]);
@@ -85,7 +85,6 @@ public final class GuiConfigTest {
             check(!keep.antiDebug(), "anti-debug disabled at level 0");
             check("0".equals(keep.option("antiDebug.level", "")), "level 0 stored");
 
-            // 3.0 option surface: the GUI sends these; defaults stay conservative.
             check("true".equals(keep.option("layout.springBoot", "")),
                     "Spring Boot layout defaults on");
             check("true".equals(keep.option("layout.war", "")), "WAR layout defaults on");
@@ -128,8 +127,6 @@ public final class GuiConfigTest {
             check("true".equals(explicitConfig.option("flow.aggressive", "")),
                     "explicit aggressive flow respected");
 
-            // Mapping path resolution: a directory gets umbra-mapping.txt, a
-            // *.txt path is used verbatim.
             UmbraConfig dirMapping = GuiConfig.build(input, dir.resolve("m.jar"), 1L,
                     new LinkedHashMap<String, String>(), dir);
             check(dirMapping.mapping().file().equals(
@@ -143,7 +140,6 @@ public final class GuiConfigTest {
             check(fileMapping.mapping().file().equals(mappingFile.toAbsolutePath().toString()),
                     "explicit mapping file used verbatim");
 
-            // YAML round trip, as used by the GUI's Save/Load buttons.
             String yaml = GuiConfig.toYaml(config);
             check(yaml.contains("layout.springBoot"), "saved YAML contains 3.0 layout options");
             check(yaml.contains("options:"), "saved YAML contains the advanced option section");
@@ -158,7 +154,6 @@ public final class GuiConfigTest {
                             || "true".equals(reloaded.option("classEncryption.enabled", "")),
                     "advanced options survive the YAML round trip");
 
-            // Preset maps must be complete and detectable.
             check(GuiSwitches.defaults().size() == GuiSwitches.allToggles().size(),
                     "every toggle has a default");
             check("Balanced".equals(io.umbra.gui.GuiPresets.detect(
@@ -169,8 +164,7 @@ public final class GuiConfigTest {
                     "Light preset is detectable");
             check("Balanced".equals(io.umbra.gui.GuiPresets.detect(GuiSwitches.defaults())),
                     "catalogue defaults equal the Balanced preset");
-            // Per-mode detailed options: defaults must mirror the GUI presets
-            // and the typed renamer/antiLlm values must survive a YAML trip.
+
             for (String mode : new String[]{"Light", "Balanced", "Aggressive", "Maximum",
                     "Nocturne"}) {
                 java.util.Map<String, Boolean> synced = io.umbra.gui.GuiModeOptions
@@ -246,8 +240,7 @@ public final class GuiConfigTest {
                     "YAML round trip keeps the detailed anti-LLM decoy count");
             check("true".equals(detailedReloaded.get("typeConfusion.enabled")),
                     "YAML round trip keeps the type-confusion mode default");
-            // WS24: integer mode options are sliders; ranges and defaults are
-            // consistent for every mode, and the panel exposes them.
+
             int integerSpecs = 0;
             for (io.umbra.gui.GuiModeOptions.Spec spec
                     : io.umbra.gui.GuiModeOptions.allSpecs()) {
@@ -295,11 +288,11 @@ public final class GuiConfigTest {
                         try {
                             Files.deleteIfExists(p);
                         } catch (Exception ignored) {
-                            // Best effort temp cleanup.
+
                         }
                     });
         } catch (Exception ignored) {
-            // Best effort temp cleanup.
+
         }
     }
 }

@@ -67,10 +67,6 @@ public final class NativeTest {
         System.out.println("NativeTest: " + checks + " checks passed");
     }
 
-    // ------------------------------------------------------------------
-    // JNI name mangling
-    // ------------------------------------------------------------------
-
     private static void testMangling() {
         check("java_lang_String".equals(JniNames.mangle("java/lang/String")),
                 "slash becomes underscore");
@@ -102,10 +98,6 @@ public final class NativeTest {
                         JniNames.shortName("umbra/runtime/Nabc", "method")),
                 "generated runtime class names mangle like any other class");
     }
-
-    // ------------------------------------------------------------------
-    // Descriptor splitter
-    // ------------------------------------------------------------------
 
     private static void testDescriptors() {
         List<String> types = JniNames.splitTypes("(IJ[Ljava/lang/String;[[D)Z");
@@ -147,11 +139,6 @@ public final class NativeTest {
                 "quote escaped inside C string literal");
     }
 
-    // ------------------------------------------------------------------
-    // Translation of synthetic methods
-    // ------------------------------------------------------------------
-
-    /** Instruction count reported by the last {@link #translate} call (diagnostics). */
     private static int lastInstructionCount;
 
     private static CGenerator.MethodC translate(ClassNode owner, MethodNode method)
@@ -215,12 +202,7 @@ public final class NativeTest {
     }
 
     private static void testOverloadExports() throws Exception {
-        // Two native methods with the same name but different descriptors used to be
-        // ambiguous under JNI name mangling: only the descriptor-mangled long names
-        // could be exported, or the VM would bind every overload to the first
-        // function it found (this regressed demo.Checks.eq overloads when renaming
-        // was disabled). Registration passes (name, descriptor) pairs, so both
-        // overloads are listed unambiguously in one table.
+
         ClassNode owner = syntheticClass();
         MethodNode intOverload = syntheticMethod("eq", "(II)V",
                 Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, 0, 2);
@@ -243,8 +225,6 @@ public final class NativeTest {
                         && source.contains("m[1].fnPtr = (void*)(&umbra_native_1)"),
                 "each overload binds a distinct wrapper");
 
-        // A class with one native method still registers exactly one entry and
-        // exports nothing.
         ClassNode owner2 = syntheticClass();
         MethodNode unique = syntheticMethod("only", "()V",
                 Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, 0, 0);
@@ -259,7 +239,7 @@ public final class NativeTest {
 
     private static void testTranslatorControlFlow() throws Exception {
         ClassNode owner = syntheticClass();
-        // static int loop(int n) { int s = 0; while (n > 0) { s += n; n--; } return s; }
+
         MethodNode method = syntheticMethod("loop", "(I)I", Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
                 2, 2);
         LabelNode head = new LabelNode();
@@ -285,7 +265,7 @@ public final class NativeTest {
 
     private static void testTranslatorCallsAndFields() throws Exception {
         ClassNode owner = syntheticClass();
-        // static String call(String s) { return String.valueOf(s.length()) + System.out; }
+
         MethodNode method = syntheticMethod("call", "(Ljava/lang/String;)Ljava/lang/String;",
                 Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, 4, 1);
         method.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
@@ -333,7 +313,7 @@ public final class NativeTest {
 
     private static void testTranslatorArrays() throws Exception {
         ClassNode owner = syntheticClass();
-        // static int arrays(int[] a) { int[][] m = new int[2][3]; return a[0] + m[1][2]; }
+
         MethodNode method = syntheticMethod("arrays", "([I)I", Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
                 4, 2);
         method.instructions.add(new InsnNode(Opcodes.ICONST_2));
@@ -374,7 +354,7 @@ public final class NativeTest {
 
     private static void testTranslatorExceptions() throws Exception {
         ClassNode owner = syntheticClass();
-        // static int safe(int x) { try { return 10 / x; } catch (ArithmeticException e) { return -1; } }
+
         MethodNode method = syntheticMethod("safe", "(I)I", Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
                 2, 2);
         LabelNode start = new LabelNode();
@@ -408,7 +388,6 @@ public final class NativeTest {
         check(throwGenerated.body.contains("Throw(env"), "athrow translated to JNI Throw");
         check(throwGenerated.body.contains("ThrowNew"), "null athrow throws NullPointerException");
 
-        // try/finally is a catch-all handler with a null catch type.
         ClassNode owner2 = syntheticClass();
         MethodNode finallyMethod = syntheticMethod("fin", "(Ljava/lang/Object;)V",
                 Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, 2, 2);
@@ -433,7 +412,7 @@ public final class NativeTest {
                 "catch-all handler needs no type dispatch");
     }
 
-    private static void testTranslatorRejections() {
+    private static void testTranslatorRejections() throws Exception {
         ClassNode owner = syntheticClass();
         MethodNode indy = syntheticMethod("indy", "()V", Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, 1, 0);
         indy.instructions.add(new InvokeDynamicInsnNode("run", "()V",
@@ -450,7 +429,17 @@ public final class NativeTest {
         monitor.instructions.add(new InsnNode(Opcodes.ACONST_NULL));
         monitor.instructions.add(new InsnNode(Opcodes.MONITORENTER));
         monitor.instructions.add(new InsnNode(Opcodes.RETURN));
-        checkRejected(syntheticClass(), monitor, "monitor");
+        CGenerator.MethodC monitorGenerated = translate(syntheticClass(), monitor);
+        check(monitorGenerated.body.contains("MonitorEnter(env,"), "monitorenter becomes MonitorEnter");
+        check(monitorGenerated.body.contains("UMBRA_C_NPE"), "null monitor throws NPE");
+
+        MethodNode monitorExit = syntheticMethod("monitorExit", "()V",
+                Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, 1, 1);
+        monitorExit.instructions.add(new InsnNode(Opcodes.ACONST_NULL));
+        monitorExit.instructions.add(new InsnNode(Opcodes.MONITOREXIT));
+        monitorExit.instructions.add(new InsnNode(Opcodes.RETURN));
+        CGenerator.MethodC exitGenerated = translate(syntheticClass(), monitorExit);
+        check(exitGenerated.body.contains("MonitorExit(env,"), "monitorexit becomes MonitorExit");
 
         MethodNode constructor = syntheticMethod("<init>", "()V", Opcodes.ACC_PUBLIC, 1, 1);
         constructor.instructions.add(new InsnNode(Opcodes.RETURN));
@@ -469,7 +458,7 @@ public final class NativeTest {
 
     private static void testTranslatorSwitch() throws Exception {
         ClassNode owner = syntheticClass();
-        // static String pick(int x) { switch (x) { case 1: return "one"; case 2: return "two"; } }
+
         MethodNode method = syntheticMethod("pick", "(I)Ljava/lang/String;",
                 Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, 1, 1);
         LabelNode caseOne = new LabelNode();
@@ -503,10 +492,6 @@ public final class NativeTest {
             throw new AssertionError("FAILED: " + label + " rejected with unexpected " + other, other);
         }
     }
-
-    // ------------------------------------------------------------------
-    // Filters
-    // ------------------------------------------------------------------
 
     private static void testFilters() throws Exception {
         UmbraConfig defaults = new UmbraConfig.Builder()
@@ -544,10 +529,6 @@ public final class NativeTest {
         check(NativeSettings.wildcard("get*", "getName"), "wildcard matcher matches prefix");
         check(!NativeSettings.wildcard("get*", "setName"), "wildcard matcher rejects other names");
     }
-
-    // ------------------------------------------------------------------
-    // Toolchain smoke test
-    // ------------------------------------------------------------------
 
     private static void testToolchainCompile() throws Exception {
         Log log = new Log(null, false);
@@ -626,11 +607,11 @@ public final class NativeTest {
                         try {
                             Files.deleteIfExists(p);
                         } catch (java.io.IOException ignored) {
-                            // best effort
+
                         }
                     });
         } catch (java.io.IOException ignored) {
-            // best effort
+
         }
     }
 

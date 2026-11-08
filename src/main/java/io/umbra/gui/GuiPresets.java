@@ -17,10 +17,6 @@ import java.util.Map;
  */
 public final class GuiPresets {
 
-    /**
-     * Ordered names shown by the preset selector (immutable: shared by the GUI
-     * panels and public API, so a caller must not be able to mutate the list).
-     */
     public static final List<String> NAMES = Collections.unmodifiableList(Arrays.asList(
             "Light", "Balanced", "Aggressive", "Maximum", "Nocturne", "Custom"));
 
@@ -29,8 +25,36 @@ public final class GuiPresets {
     private GuiPresets() {
     }
 
-    /** Full switch-state map for a preset name; unknown names mean Custom. */
+    private static final java.util.Set<String> CORE_SYNCED = new java.util.HashSet<String>(
+            java.util.Arrays.asList("semanticCodes", "localCallIds", "perPayloadOpcodes",
+                    "keylessFallback", "nativeKey", "nativeKeyFallback", "constantPool",
+                    "libraryMode", "allowSkip"));
+
     public static Map<String, Boolean> states(String name) {
+        Map<String, Boolean> states = fallbackStates(name);
+        Map<String, String> options;
+        try {
+            java.nio.file.Path in = java.nio.file.Paths.get("in.jar");
+            java.nio.file.Path out = java.nio.file.Paths.get("out.jar");
+            io.umbra.core.config.UmbraConfig base = new io.umbra.core.config.UmbraConfig
+                    .Builder().input(in).output(out).build();
+            options = io.umbra.core.config.Presets.apply(base, coreName(name), false).options();
+        } catch (Throwable unsupported) {
+            return states;
+        }
+        for (GuiSwitches.Toggle toggle : GuiSwitches.allToggles()) {
+            if (toggle.key == null || !CORE_SYNCED.contains(toggle.id)) {
+                continue;
+            }
+            String value = options.get(toggle.key);
+            if (value != null) {
+                states.put(toggle.id, Boolean.valueOf(toggle.onValue.equalsIgnoreCase(value)));
+            }
+        }
+        return states;
+    }
+
+    private static Map<String, Boolean> fallbackStates(String name) {
         Map<String, Boolean> states = GuiSwitches.defaults();
         String preset = name == null ? "custom" : name.toLowerCase(java.util.Locale.ROOT);
         if ("light".equals(preset)) {
@@ -85,7 +109,6 @@ public final class GuiPresets {
         }
     }
 
-    /** Returns the preset name matching the states exactly, or "Custom". */
     public static String detect(Map<String, Boolean> states) {
         for (String name : NAMES) {
             if ("Custom".equals(name)) {
@@ -98,10 +121,6 @@ public final class GuiPresets {
         return "Custom";
     }
 
-    /**
-     * Extra scalar options implied by a preset (string strength, noise level,
-     * MBA). Custom keeps the conservative balanced values.
-     */
     public static Map<String, String> extraOptions(String name) {
         Map<String, String> options = new LinkedHashMap<String, String>();
         String preset = name == null ? "custom" : name.toLowerCase(java.util.Locale.ROOT);
@@ -129,7 +148,6 @@ public final class GuiPresets {
         return options;
     }
 
-    /** Canonical preset name for a GUI-selected label (CLI-compatible). */
     public static String coreName(String guiName) {
         if (guiName == null) {
             return "balanced";

@@ -55,8 +55,6 @@ public final class MixinAnalyzerTest {
         System.out.println("MixinAnalyzerTest: " + checks + " checks passed");
     }
 
-    // ------------------------------------------------------------------ tests
-
     private static void testMixinTargets() {
         ClassNode mixinA = newClass("mod/mixins/MixinA");
         addClassAnnotation(mixinA, true, annotation(MIXIN,
@@ -310,7 +308,6 @@ public final class MixinAnalyzerTest {
         check(emptyPool.mixinClasses().isEmpty() && emptyPool.keepRules().isEmpty(),
                 "empty pool yields no rules");
 
-        // Classification of a real annotation must tolerate a null descriptor too.
         ClassNode nullDesc = newClass("mod/NullDesc");
         AnnotationNode weird = new AnnotationNode((String) null);
         if (nullDesc.visibleAnnotations == null) {
@@ -321,8 +318,6 @@ public final class MixinAnalyzerTest {
         check(stillFine.mixinClasses().isEmpty(), "annotation with null descriptor ignored");
         checkUniqueAndSorted(analysis);
     }
-
-    // ---------------------------------------------------------------- helpers
 
     private static ClassNode newClass(String name) {
         ClassNode node = new ClassNode();

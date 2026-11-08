@@ -11,76 +11,23 @@ import io.umbra.core.model.ClassPool;
  */
 public interface RuntimeSupport {
 
-    /**
-     * Ensures a string decryptor class exists in the pool.
-     *
-     * @param pool program pool
-     * @param seed deterministic seed
-     * @return internal name of the decryptor class
-     */
     String ensureStringDecryptor(ClassPool pool, long seed);
 
-    /**
-     * Ensures an invokedynamic bootstrap helper exists in the pool.
-     *
-     * @param pool program pool
-     * @param seed deterministic seed
-     * @return internal name of the bootstrap class
-     */
     String ensureIndyBootstrap(ClassPool pool, long seed);
 
-    /**
-     * Ensures the bytecode interpreter used by virtualized methods exists.
-     *
-     * @param pool program pool
-     * @param seed deterministic seed
-     * @return internal name of the interpreter class
-     */
     String ensureVirtualMachine(ClassPool pool, long seed);
 
-    /**
-     * Ensures the one-time-program state class exists in the pool.
-     *
-     * <p>The generated class exposes {@code public static long next()} and
-     * {@code public static int carrier()}. {@code FlowObfuscationPass} calls the
-     * carrier at the entry of every protected method, so the state advances once
-     * per protected call and the guards resolve differently on every invocation
-     * with identical arguments.</p>
-     *
-     * @param pool program pool
-     * @param seed deterministic seed
-     * @return internal name of the state class, or {@code null} when the runtime
-     *         support does not provide one
-     */
     default String ensureOtp(ClassPool pool, long seed) {
         return null;
     }
 
-    /**
-     * Ensures the server-backed authorization gate class exists in the pool.
-     *
-     * <p>The generated gate exposes {@code public static void guard()}; the
-     * {@code AuthGatePass} calls it at the start of entry points. The returned
-     * class is a renamed copy of the runtime template with the configured server,
-     * software, title, cache file, registration flag, timeout and entry points
-     * substituted in.</p>
-     *
-     * @param pool    program pool
-     * @param seed    deterministic seed
-     * @param options authorization gate configuration
-     * @return internal name of the gate class, or {@code null} when the runtime
-     *         support does not provide one
-     */
+    default String ensureKeyRootMask(ClassPool pool, long seed) {
+        return null;
+    }
+
     default String ensureAuthGate(ClassPool pool, long seed, UmbraConfig.AuthGateOptions options) {
         return null;
     }
 
-    /**
-     * Embeds a watermark in the program.
-     *
-     * @param pool       program pool
-     * @param watermark  watermark payload
-     * @return description of where the mark was written, or {@code null}
-     */
     String embedWatermark(ClassPool pool, String watermark);
 }

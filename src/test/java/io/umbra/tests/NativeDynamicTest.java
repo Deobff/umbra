@@ -102,11 +102,6 @@ public final class NativeDynamicTest {
         System.out.println("NativeDynamicTest: " + checks + " checks passed");
     }
 
-    // ------------------------------------------------------------------
-    // Child JVM modes (fresh native bindings + real cross-JDK evidence)
-    // ------------------------------------------------------------------
-
-    /** Args: child level dll secretHex hash checkPrologue tokenPrologue. */
     private static int runCleanChild(String[] args) throws Exception {
         int level = Integer.parseInt(args[1]);
         System.load(Paths.get(args[2]).toAbsolutePath().toString());
@@ -126,7 +121,6 @@ public final class NativeDynamicTest {
         return init == 0 && selfTest == 0 && actual == expected && mask == 0 ? 0 : 2;
     }
 
-    /** Args: positive dll secretHex hash checkPrologue tokenPrologue. */
     private static int runPositiveChild(String[] args) throws Exception {
         System.load(Paths.get(args[1]).toAbsolutePath().toString());
         long secret = Long.parseUnsignedLong(args[2], 16);
@@ -156,6 +150,14 @@ public final class NativeDynamicTest {
         int tamper = Hooks.testTamperPage();
         int deepPage = Hooks.testDeep();
         int rotationRepaired = Hooks.testPageRotation();
+        int textClean = Hooks.testTextGuard();
+        int textTamper = Hooks.testTamperText();
+        int textAfter = Hooks.testTextGuard();
+        int quickAfterText = Hooks.testQuick();
+        int probeClean = Hooks.testGuardProbe();
+        int probeTamper = Hooks.testTamperProbe();
+        int probeAfter = Hooks.testGuardProbe();
+        int segments = Hooks.testCodeSegments();
         System.out.println("POS quick=" + GuardOptions.describeMask(cleanQuick)
                 + " deep=" + GuardOptions.describeMask(cleanDeep)
                 + " timing=" + GuardOptions.describeMask(timing)
@@ -171,13 +173,17 @@ public final class NativeDynamicTest {
                 + " rotationClean=" + rotationClean
                 + " tamper=" + tamper
                 + " deepPage=" + GuardOptions.describeMask(deepPage)
-                + " rotationRepaired=" + rotationRepaired);
+                + " rotationRepaired=" + rotationRepaired
+                + " textClean=" + textClean
+                + " textTamper=" + textTamper
+                + " textAfter=" + textAfter
+                + " quickAfterText=" + GuardOptions.describeMask(quickAfterText)
+                + " probeClean=" + probeClean
+                + " probeTamper=" + probeTamper
+                + " probeAfter=" + probeAfter
+                + " segments=" + segments);
         return 0;
     }
-
-    // ------------------------------------------------------------------
-    // Feature / level model
-    // ------------------------------------------------------------------
 
     private static void testFeatureModel() {
         GuardFeatures level1 = GuardFeatures.forLevel(1).build();
@@ -188,8 +194,7 @@ public final class NativeDynamicTest {
                         && level2.codeSampling && level2.moduleIntegrity && level2.timing,
                 "level 2 enables the dynamic check set");
         check(!level2.handleDump, "handle/dump scan stays opt-in on level 2");
-        // The executable-memory scan is opt-in since 3.2.1: AWT/Swing map JIT
-        // code in anonymous executable regions and trip it as a false positive.
+
         check(!level2.execMemoryScan, "executable-memory scan stays opt-in on level 2");
         GuardFeatures level3 = GuardFeatures.forLevel(3).build();
         check(level3.handleDump, "level 3 enables the handle/dump scan");
@@ -201,6 +206,10 @@ public final class NativeDynamicTest {
                 "code CRC / page rotation stay off on level 1");
         check(level2.codeCrc && level2.pageGuard,
                 "code CRC readback and page rotation are part of the level 2 set");
+        check(!level1.textGuard && !level1.guardProbe,
+                "own-code-page protection and the PAGE_GUARD probe stay off on level 1");
+        check(level2.textGuard && level2.guardProbe,
+                "own-code-page protection and the PAGE_GUARD probe are part of the level 2 set");
         check(GuardOptions.DEFAULT_EXEC_WHITELIST.equals(level2.execWhitelist),
                 "the default exec whitelist covers the JVM/AWT modules");
         check(GuardFeatures.forLevel(2).execWhitelist("custom.dll").build()
@@ -220,9 +229,12 @@ public final class NativeDynamicTest {
                         && GuardOptions.DETECT_CODE_SAMPLE == 1 << 23
                         && GuardOptions.DETECT_LINUX == 1 << 24
                         && GuardOptions.DETECT_CODE_CRC == 1 << 25
-                        && GuardOptions.DETECT_PAGE_GUARD == 1 << 26,
+                        && GuardOptions.DETECT_PAGE_GUARD == 1 << 26
+                        && GuardOptions.DETECT_TEXT_RWX == 1 << 27
+                        && GuardOptions.DETECT_GUARD_PROBE == 1 << 28
+                        && GuardOptions.DETECT_PAIR == 1 << 29,
                 "new detection mask bits are stable and distinct");
-        // Whitelist matching (mirrored by the generated C matcher).
+
         check(GuardOptions.execWhitelistMatches(GuardOptions.DEFAULT_EXEC_WHITELIST,
                         "C:\\Program Files\\Zulu\\zulu-8\\bin\\awt.dll"),
                 "whitelist matches a whitelisted module by path fragment");
@@ -239,10 +251,6 @@ public final class NativeDynamicTest {
                         != GuardOptions.fnv1a32("NtQueryInformationProcess"),
                 "different API names hash differently");
     }
-
-    // ------------------------------------------------------------------
-    // Generated C source
-    // ------------------------------------------------------------------
 
     private static void testGeneratedSourceContainsChecks() {
         String level1 = GuardCodeGenerator.generate("umbra/runtime/Gtest", 42L,
@@ -267,7 +275,13 @@ public final class NativeDynamicTest {
                 "umbra_handle_dump(", "PROCESS_VM_READ",
                 "umbra_linux_tracer(", "PTRACE_TRACEME",
                 "umbra_guard_tick(", "JNI_OnLoad",
-                // P1-5.1 synthetic import table.
+
+                "umbra_text_protection_ok(", "umbra_text_baseline(", "UMBRA_DETECT_TEXT_RWX 134217728",
+                "umbra_guard_probe_intact(", "umbra_guard_probe_baseline(", "PAGE_GUARD",
+                "umbra_code_crc_segments(", "g_code_segment_crc[UMBRA_CRC_SEGMENTS]",
+                "UMBRA_CRC_SEGMENTS 8",
+                "umbra_text_sections(", "g_action == 3",
+
                 "umbra_api_check_remote_debugger_present(",
                 "umbra_api_create_toolhelp32_snapshot(",
                 "umbra_api_get_file_attributes_a(",
@@ -275,15 +289,15 @@ public final class NativeDynamicTest {
                 "umbra_api_nt_query_system_information(",
                 "umbra_api_get_tick_count64(", "umbra_api_get_thread_description(",
                 "umbra_fnv1a32(", "LoadLibraryA(", "GetProcAddress(",
-                // P1-5.2 sealed literals.
+
                 "umbra_unseal(", "umbra_sealed_", "umbra_lit_",
-                // P1-6.1 code CRC readback.
+
                 "umbra_code_range(", "umbra_code_crc_baseline(", "umbra_code_crc_ok(",
                 "umbra_crc32(", "UMBRA_F_CODE_CRC 1",
-                // P1-6.2 page rotation.
+
                 "umbra_sealed_page", "umbra_page_rotation(", "PAGE_NOACCESS",
                 "InterlockedCompareExchange", "UMBRA_F_PAGE_GUARD 1",
-                // P1-6.3 whitelist + JVM-owned exec pages.
+
                 "umbra_whitelist_match(", "umbra_whitelist_match(entry.szModule)",
                 "umbra_capture_exec_baseline(", "umbra_exec_baseline_known(",
                 "umbra_region_has_code(", "umbra_in_whitelisted_range("
@@ -291,9 +305,7 @@ public final class NativeDynamicTest {
         for (String marker : required) {
             check(level3.contains(marker), "generated guard C contains " + marker);
         }
-        // P1-5: the sensitive import names and the detection markers are sealed at
-        // build time, so the source carries the FNV hash of each API instead of the
-        // plaintext name, and no plaintext marker literal at all.
+
         String[] apiHashes = {
                 "NtQueryInformationThread", "NtQuerySystemInformation",
                 "NtQueryInformationProcess", "CheckRemoteDebuggerPresent",
@@ -327,8 +339,7 @@ public final class NativeDynamicTest {
         check(level1.equals(GuardCodeGenerator.generate("umbra/runtime/Gtest", 42L,
                         GuardFeatures.forLevel(1).build())),
                 "guard source generation is deterministic");
-        // P0-2-b: the one-time-state advance is bound to native code when the build
-        // has an injected OTP class, and the guard source stays unchanged otherwise.
+
         String withOtp = GuardCodeGenerator.generate(GUARD_CLASS, 42L,
                 GuardFeatures.forLevel(1).build(), null, "ru/otp/Otest");
         check(withOtp.contains("umbra_native_otp") && withOtp.contains("umbra_register_otp")
@@ -342,10 +353,6 @@ public final class NativeDynamicTest {
         check(level1.indexOf("umbra_register_otp") < 0,
                 "guard source stays unchanged when no OTP class is given");
     }
-
-    // ------------------------------------------------------------------
-    // Linux parser units (pure Java, testable on Windows)
-    // ------------------------------------------------------------------
 
     private static void testLinuxParsers() {
         check(UmbraNativeGuard.evaluateProcStatus(LINUX_STATUS) == 0,
@@ -364,10 +371,6 @@ public final class NativeDynamicTest {
         check(UmbraNativeGuard.evaluateProcMaps(null) == 0,
                 "missing maps data is ignored");
     }
-
-    // ------------------------------------------------------------------
-    // Latent-bug regressions
-    // ------------------------------------------------------------------
 
     private static void testJniSymbolMangling() {
         String nested = GuardCodeGenerator.exportSymbol("umbra/runtime/G$test", "nativeCheck");
@@ -393,7 +396,6 @@ public final class NativeDynamicTest {
                 "guard suffix matches the host OS: " + suffix);
     }
 
-    /** Concurrent guard entry points must not load/initialize twice or hang. */
     private static void testConcurrentGuardInitialization() throws Exception {
         final CountDownLatch start = new CountDownLatch(1);
         final CountDownLatch done = new CountDownLatch(8);
@@ -426,10 +428,6 @@ public final class NativeDynamicTest {
         UmbraNativeGuard.ensureGuard();
         check(true, "repeated ensureGuard() calls are idempotent");
     }
-
-    // ------------------------------------------------------------------
-    // Temp-library cleanup (Windows cannot delete a mapped DLL)
-    // ------------------------------------------------------------------
 
     private static void testTempLibraryCleanup() throws Exception {
         File tmp = new File(System.getProperty("java.io.tmpdir", "."));
@@ -477,9 +475,6 @@ public final class NativeDynamicTest {
         field.setAccessible(true);
         return (String) field.get(null);
     }
-    // ------------------------------------------------------------------
-    // Compiled guard: clean-JVM matrix, positives, rebuilt refusal
-    // ------------------------------------------------------------------
 
     private static void testCleanJvmNoFalsePositives(Path work) throws Exception {
         String compiler = compiler();
@@ -549,8 +544,7 @@ public final class NativeDynamicTest {
     }
 
     private static void testPositiveDetections(Path work, String compiler) throws Exception {
-        // The executable-memory scan is opt-in since 3.2.1, so the positive
-        // detection test asks for it explicitly instead of relying on a level.
+
         GuardFeatures features = GuardFeatures.forLevel(2).execMemoryScan(true)
                 .testHooks(HOOK_CLASS).build();
         GuardArtifact artifact = buildGuard(work, compiler, GUARD_CLASS, features,
@@ -571,7 +565,7 @@ public final class NativeDynamicTest {
                 "private read+execute memory outside the image is detected");
         check(output.contains("patched=0x00800000"),
                 "patched randomized code sample is detected");
-        // P1-6.1: the guard hashes its own code section and notices an inline patch.
+
         check(output.contains("crcClean=0"),
                 "clean guard code section passes the CRC readback: " + firstLine(output));
         check(output.contains("patchCode=1") && output.contains("crcAfter=1"),
@@ -579,7 +573,7 @@ public final class NativeDynamicTest {
         check(maskHas(output, "deepCrc", GuardOptions.DETECT_CODE_CRC),
                 "the CRC mismatch is reported through the deep detection mask: "
                         + firstLine(output));
-        // P1-6.2: the guard-owned data page is rotated and its protection verified.
+
         check(output.contains("sealAligned=1"),
                 "the sealed data page is page aligned (rotation active)");
         check(output.contains("rotationClean=0"),
@@ -590,9 +584,26 @@ public final class NativeDynamicTest {
                         + firstLine(output));
         check(output.contains("rotationRepaired=0"),
                 "the rotation restores the measured protection (no sticky false positive)");
+
+        check(output.contains("textClean=0"),
+                "the untouched code-page protection passes the baseline check: "
+                        + firstLine(output));
+        check(output.contains("textTamper=1") && output.contains("textAfter=1"),
+                "an unprotect of the guard's own .text is detected (write-access trace): "
+                        + firstLine(output));
+        check(maskHas(output, "quickAfterText", GuardOptions.DETECT_TEXT_RWX),
+                "the writable-code-page trace is reported through the quick detection mask: "
+                        + firstLine(output));
+
+        check(output.contains("probeClean=0"),
+                "the guard-owned PAGE_GUARD probe page is intact on a clean JVM: "
+                        + firstLine(output));
+        check(output.contains("probeTamper=1") && output.contains("probeAfter=1"),
+                "clearing the PAGE_GUARD flag of the probe page is detected: " + firstLine(output));
+        check(output.contains("segments=8"),
+                "the code section is hashed in 8 independent segments: " + firstLine(output));
     }
 
-    /** True when the {@code field=0x........} mask printed by the child has {@code bit}. */
     private static boolean maskHas(String output, String field, int bit) {
         java.util.regex.Matcher matcher = java.util.regex.Pattern
                 .compile(field + "=0x([0-9a-fA-F]{8})").matcher(output);
@@ -654,10 +665,6 @@ public final class NativeDynamicTest {
                 "non-ASCII path guard library is non-empty");
     }
 
-    // ------------------------------------------------------------------
-    // Guard build and child process helpers
-    // ------------------------------------------------------------------
-
     private static final class GuardArtifact {
         final byte[] library;
         final String source;
@@ -714,7 +721,6 @@ public final class NativeDynamicTest {
                 secret, libraryFile);
     }
 
-    /** One installed JDK runtime. */
     private static final class Jdk {
         final String name;
         final Path java;
@@ -786,10 +792,6 @@ public final class NativeDynamicTest {
         return lines.length == 0 ? "" : lines[lines.length - 1].trim();
     }
 
-    // ------------------------------------------------------------------
-    // JNI bindings for the guard class (library loaded by the child/parent)
-    // ------------------------------------------------------------------
-
     private static Method lookup(String name, Class<?>... types) {
         try {
             Method method = UmbraNativeGuard.class.getDeclaredMethod(name, types);
@@ -819,7 +821,6 @@ public final class NativeDynamicTest {
         }
     }
 
-    /** Test hooks: plain nested class so the JNI symbols bind through the app loader. */
     public static final class Hooks {
         public static native int testQuick();
         public static native int testDeep();
@@ -837,11 +838,13 @@ public final class NativeDynamicTest {
         public static native int testTamperPage();
         public static native int testPageRotation();
         public static native int testSealAligned();
-    }
 
-    // ------------------------------------------------------------------
-    // Helpers
-    // ------------------------------------------------------------------
+        public static native int testTextGuard();
+        public static native int testTamperText();
+        public static native int testGuardProbe();
+        public static native int testTamperProbe();
+        public static native int testCodeSegments();
+    }
 
     private static String compiler() {
         if (!isWindows()) {
@@ -885,11 +888,11 @@ public final class NativeDynamicTest {
                 try {
                     Files.deleteIfExists(path);
                 } catch (Exception ignored) {
-                    // best effort
+
                 }
             });
         } catch (Exception ignored) {
-            // best effort
+
         }
     }
 

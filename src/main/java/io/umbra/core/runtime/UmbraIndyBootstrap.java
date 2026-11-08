@@ -30,7 +30,6 @@ import java.util.List;
  */
 public final class UmbraIndyBootstrap {
 
-    /** 0 = xorshift, 1 = ChaCha20, 2 = AES-256-CTR; replaced at injection time. */
     private static final String ALGORITHM = "@@ALG@@";
 
     private static final int ALG = parse(ALGORITHM);
@@ -38,7 +37,6 @@ public final class UmbraIndyBootstrap {
     private UmbraIndyBootstrap() {
     }
 
-    /** Static method call sites. */
     public static CallSite bootstrap(MethodHandles.Lookup caller, String name, MethodType type,
                                      String encOwner, long ownerKey,
                                      String encMethod, long methodKey) throws Exception {
@@ -48,7 +46,6 @@ public final class UmbraIndyBootstrap {
         return new ConstantCallSite(handle);
     }
 
-    /** Virtual / interface call sites; the receiver is the first argument. */
     public static CallSite bootstrapVirtual(MethodHandles.Lookup caller, String name, MethodType type,
                                             String encOwner, long ownerKey,
                                             String encMethod, long methodKey) throws Exception {
@@ -59,7 +56,6 @@ public final class UmbraIndyBootstrap {
         return new ConstantCallSite(handle.asType(type));
     }
 
-    /** Static field read. */
     public static CallSite bootstrapFieldGetStatic(MethodHandles.Lookup caller, String name,
                                                    MethodType type, String encOwner, long ownerKey,
                                                    String encField, long fieldKey) throws Exception {
@@ -69,7 +65,6 @@ public final class UmbraIndyBootstrap {
         return new ConstantCallSite(handle.asType(type));
     }
 
-    /** Instance field read; the receiver is the first argument. */
     public static CallSite bootstrapFieldGet(MethodHandles.Lookup caller, String name,
                                              MethodType type, String encOwner, long ownerKey,
                                              String encField, long fieldKey) throws Exception {
@@ -79,7 +74,6 @@ public final class UmbraIndyBootstrap {
         return new ConstantCallSite(handle.asType(type));
     }
 
-    /** Static field write. */
     public static CallSite bootstrapFieldSetStatic(MethodHandles.Lookup caller, String name,
                                                    MethodType type, String encOwner, long ownerKey,
                                                    String encField, long fieldKey) throws Exception {
@@ -89,7 +83,6 @@ public final class UmbraIndyBootstrap {
         return new ConstantCallSite(handle.asType(type));
     }
 
-    /** Instance field write; the receiver is the first argument. */
     public static CallSite bootstrapFieldSet(MethodHandles.Lookup caller, String name,
                                              MethodType type, String encOwner, long ownerKey,
                                              String encField, long fieldKey) throws Exception {
@@ -99,25 +92,12 @@ public final class UmbraIndyBootstrap {
         return new ConstantCallSite(handle.asType(type));
     }
 
-    /**
-     * String literal call site: the indy instruction has descriptor
-     * {@code ()Ljava/lang/String;} and the bootstrap returns a constant
-     * {@code CallSite} holding the decrypted, interned value.
-     *
-     * @param packed      Base64 payload parts joined with {@code '|'}
-     * @param classKeySpec name of the synthetic {@code private static final
-     *                    String} field holding the per-class Base64 key, or an
-     *                    empty string for per-site keys
-     * @param siteSeed    64-bit per-site seed
-     * @param siteId      call-site index
-     */
     public static CallSite bootstrapString(MethodHandles.Lookup caller, String name, MethodType type,
                                            String packed, String classKeySpec, long siteSeed,
                                            int siteId) throws Throwable {
         String classKeyBase64 = null;
         if (classKeySpec != null && classKeySpec.length() > 0) {
-            // The lookup class is the class that contains this indy instruction,
-            // so it may read its own private synthetic key field.
+
             MethodHandle getter = caller.findStaticGetter(caller.lookupClass(), classKeySpec, String.class);
             classKeyBase64 = (String) getter.invoke();
         }
@@ -131,11 +111,6 @@ public final class UmbraIndyBootstrap {
         return Class.forName(owner.replace('/', '.'), true, caller.lookupClass().getClassLoader());
     }
 
-    /**
-     * Literal domain separators (rewritten per build by template injection) and
-     * their mutable counterparts, set by the build side through
-     * {@link #applyDomainTags(java.util.Map)}.
-     */
     private static final String LIT_LEGACY_KEY = "io.umbra.cipher.legacy.key.v2";
     private static final String LIT_LEGACY_NONCE = "io.umbra.cipher.legacy.nonce.v2";
     private static final String LIT_SITE_KEY = "io.umbra.string.site.key.v1";
@@ -150,7 +125,6 @@ public final class UmbraIndyBootstrap {
     private static String TAG_CLASS_NONCE = LIT_CLASS_NONCE;
     private static String TAG_AES_IV = LIT_AES_IV;
 
-    /** Build-side hook: installs the per-build separators (never called at runtime). */
     public static void applyDomainTags(java.util.Map<String, String> tags) {
         TAG_LEGACY_KEY = pick(tags, LIT_LEGACY_KEY);
         TAG_LEGACY_NONCE = pick(tags, LIT_LEGACY_NONCE);
@@ -165,7 +139,6 @@ public final class UmbraIndyBootstrap {
         return value == null ? literal : value;
     }
 
-    /** Decrypts a legacy ChaCha20 payload (matches {@code Cipher.encrypt(String,long)}). */
     private static String decrypt(String payload, long key) {
         byte[] data = Base64.getDecoder().decode(payload);
         byte[] derivedKey = sha256(concat(utf8(TAG_LEGACY_KEY), le64(key)));
@@ -196,10 +169,6 @@ public final class UmbraIndyBootstrap {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Payload plumbing
-    // ------------------------------------------------------------------
-
     private static List<String> split(String packed) {
         List<String> parts = new ArrayList<String>();
         int start = 0;
@@ -228,10 +197,6 @@ public final class UmbraIndyBootstrap {
         }
         return out;
     }
-
-    // ------------------------------------------------------------------
-    // String payload decryption (mirrors UmbraCrypto.stringPlain)
-    // ------------------------------------------------------------------
 
     private static byte[] stringPlain(byte[] ciphertext, byte[] classKey, long siteSeed, int siteId) {
         if (ALG == 0) {
@@ -276,10 +241,6 @@ public final class UmbraIndyBootstrap {
         }
         return 1;
     }
-
-    // ------------------------------------------------------------------
-    // Self-contained crypto (mirrors io.umbra.core.util.Cipher)
-    // ------------------------------------------------------------------
 
     private static byte[] sha256(byte[] data) {
         try {

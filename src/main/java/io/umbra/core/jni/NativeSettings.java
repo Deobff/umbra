@@ -75,16 +75,15 @@ public final class NativeSettings {
     public String arch() { return arch; }
     public boolean atomic() { return atomic; }
     public boolean keepDll() { return keepDll; }
-    /** Verify the embedded library fingerprint and native backfill table before use. */
+
     public boolean antiDump() { return antiDump; }
-    /** Emit/verify the native method backfill table and keyed challenge. */
+
     public boolean antiBackfill() { return antiBackfill; }
-    /** Extract constructor bodies after super()/this() into translatable helpers. */
+
     public boolean constructors() { return constructors; }
-    /** Bridge invokedynamic (lambdas, string concat) through Java helper methods. */
+
     public boolean indy() { return indy; }
 
-    /** True when the method passes {@code native.methods}/{@code native.exclude}. */
     public boolean accepts(String owner, String originalOwner, String name, String descriptor) {
         boolean included = false;
         for (Entry entry : include) {
@@ -183,7 +182,6 @@ public final class NativeSettings {
         }
     }
 
-    /** Simple glob match: {@code *} any sequence, {@code ?} one character. */
     public static boolean wildcard(String pattern, String value) {
         int p = 0;
         int v = 0;

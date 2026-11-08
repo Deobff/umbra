@@ -23,11 +23,28 @@ public final class UmbraGuardLauncher {
         ClassLoader loader = UmbraGuardLauncher.class.getClassLoader();
         Class<?> guard = Class.forName(GUARD, true, loader);
         guard.getMethod("check").invoke(null);
+        attest(guard);
         Class<?> target = Class.forName(TARGET, true, loader);
         try {
             target.getMethod("main", String[].class).invoke(null, (Object) args);
         } catch (java.lang.reflect.InvocationTargetException failure) {
             throw failure.getCause();
+        }
+    }
+
+    private static void attest(Class<?> guard) throws Throwable {
+        int mask;
+        try {
+            Object value = guard.getMethod("attest").invoke(null);
+            mask = value instanceof Integer ? ((Integer) value).intValue() : 1;
+        } catch (NoSuchMethodException missing) {
+
+            mask = 1;
+        } catch (java.lang.reflect.InvocationTargetException failure) {
+            throw failure.getCause();
+        }
+        if (mask != 0) {
+            guard.getMethod("onDetection", int.class).invoke(null, Integer.valueOf(mask));
         }
     }
 }

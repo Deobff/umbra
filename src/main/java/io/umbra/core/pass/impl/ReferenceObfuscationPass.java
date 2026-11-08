@@ -72,9 +72,7 @@ public final class ReferenceObfuscationPass implements Pass {
             if (!context.rules().transformClass(node)) {
                 continue;
             }
-            // invokedynamic needs class file version >= 51 (constant tags 15/18).
-            // Legacy classes are upgraded unless they still use JSR/RET, which is
-            // illegal in version 51+ class files; those keep direct references.
+
             boolean rewriteIndy = true;
             if ((node.version & 0xFFFF) < Opcodes.V1_7) {
                 if (AsmUtil.containsJsrOrRet(node)) {
@@ -437,7 +435,6 @@ public final class ReferenceObfuscationPass implements Pass {
         return slash < 0 ? "" : name.substring(0, slash);
     }
 
-    /** Small adapter to keep the pass readable. */
     private static final class UmbraConfigAccess {
         private final PassContext context;
 

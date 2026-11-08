@@ -52,7 +52,6 @@ public final class RiskReport {
     public Map<String, Integer> frameworkAnnotations() { return frameworkAnnotations; }
     public List<String> suggestions() { return suggestions; }
 
-    /** Scans the loaded program. */
     public static RiskReport scan(ClassPool pool, Hierarchy hierarchy) {
         int serializable = 0;
         int natives = 0;

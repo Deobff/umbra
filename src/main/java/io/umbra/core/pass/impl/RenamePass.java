@@ -7,15 +7,20 @@ import io.umbra.core.engine.MappingSet;
 import io.umbra.core.model.ClassInfo;
 import io.umbra.core.model.ClassPool;
 import io.umbra.core.model.Hierarchy;
+import io.umbra.core.modern.ModernBytecodeSupport;
 import io.umbra.core.rules.Glob;
 import io.umbra.core.rules.RuleSet;
+import io.umbra.core.util.DecoyNames;
 import io.umbra.core.util.MappingWriter;
 import io.umbra.core.util.NameGenerator;
 import io.umbra.core.util.Jars;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.commons.ClassRemapper;
 import org.objectweb.asm.commons.Remapper;
+import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.LdcInsnNode;
+import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.MethodNode;
 
@@ -69,24 +74,19 @@ public final class RenamePass implements Pass {
         List<String> names = new ArrayList<String>(original.keySet());
         Collections.sort(names);
 
+        boolean renameRecordMembers = "true".equalsIgnoreCase(
+                String.valueOf(config.option("renamer.records", "false")).trim());
         Set<String> memberRenamable = new HashSet<String>();
         for (String name : names) {
             ClassNode node = original.get(name);
             if (!pool.isFrozen(name) && rules.allowClassRename(node)
                     && (node.access & Opcodes.ACC_ANNOTATION) == 0
-                    && (node.access & Opcodes.ACC_RECORD) == 0) {
-                // Annotation element names and record component names are part
-                // of their binary contract; leaving them untouched is safer.
+                    && (renameRecordMembers || (node.access & Opcodes.ACC_RECORD) == 0)) {
+
                 memberRenamable.add(name);
             }
         }
 
-        // Java agent entry classes are resolved by exact class name from the
-        // manifest after the agent JAR shares the target's class path. Renaming
-        // a different app/agent class in the same package to the same
-        // obfuscated name makes the app class shadow the agent class (the JVM
-        // then looks for premain/agentmain in the wrong class), so agent entry
-        // classes keep their original names and members.
         Set<String> agentEntryClasses = agentEntryClasses(pool, original);
         if (!agentEntryClasses.isEmpty()) {
             for (String entry : agentEntryClasses) {
@@ -132,13 +132,23 @@ public final class RenamePass implements Pass {
         }
 
         Map<String, String> packageOnly = new LinkedHashMap<String, String>();
+        Map<String, String> decoyPackages = new LinkedHashMap<String, String>();
         Map<String, String> classMap = renameClasses(context, original, names, memberRenamable,
-                seededClasses, usedClassNames, packageMap, packageOnly);
+                seededClasses, usedClassNames, packageMap, packageOnly, decoyPackages);
 
         Set<String> pinnedMethods = new HashSet<String>();
+        Set<String> reflectiveNames = reflectiveNamePins(original.values());
+        if (!reflectiveNames.isEmpty()) {
+            context.stats().add("rename.reflectivePins", reflectiveNames.size());
+            context.log().info("rename: keeping %d member name(s) stable for reflective "
+                    + "lookups: %s", Integer.valueOf(reflectiveNames.size()), reflectiveNames);
+        }
         Set<String> pinnedFields = new HashSet<String>();
+
+        Set<String> baitNames = baitNames(context);
         if (options.renameMethods() || options.renameFields()) {
-            pinMembers(hierarchy, rules, original, names, memberRenamable, pinnedMethods, pinnedFields);
+            pinMembers(hierarchy, rules, original, names, memberRenamable, pinnedMethods,
+                    pinnedFields, baitNames);
         }
 
         if (previous != null) {
@@ -168,8 +178,15 @@ public final class RenamePass implements Pass {
                     if (method.name.startsWith("<")) {
                         continue;
                     }
+                    if (ModernBytecodeSupport.isLambdaSerializationHook(method.name)) {
+                        continue;
+                    }
                     String key = method.name + method.desc;
-                    if (pinnedMethods.contains(key)) {
+                    if (pinnedMethods.contains(key) || reflectiveNames.contains(method.name)) {
+                        continue;
+                    }
+                    if ((method.access & Opcodes.ACC_NATIVE) != 0 && pool.isGenerated(name)) {
+
                         continue;
                     }
                     String assigned = mappings.mappedMethod(method.name, method.desc);
@@ -186,7 +203,7 @@ public final class RenamePass implements Pass {
             if (options.renameFields()) {
                 for (FieldNode field : node.fields) {
                     String key = field.name + ":" + field.desc;
-                    if (pinnedFields.contains(key)) {
+                    if (pinnedFields.contains(key) || reflectiveNames.contains(field.name)) {
                         continue;
                     }
                     String assigned = mappings.mappedField(field.name, field.desc);
@@ -200,6 +217,17 @@ public final class RenamePass implements Pass {
                     }
                 }
             }
+        }
+
+        ModernBytecodeSupport.Report modern = new ModernBytecodeSupport.Report();
+        for (String name : names) {
+            ModernBytecodeSupport.linkRecordComponents(original.get(name), mappings, modern);
+            ModernBytecodeSupport.countRemappedAttributes(original.get(name), mappings, modern);
+        }
+        for (String name : names) {
+            ModernBytecodeSupport.rewriteInvokeDynamic(original.get(name), pool, mappings,
+                    memberRenamable, modern);
+            ModernBytecodeSupport.rewriteDeserializeLambda(original.get(name), mappings, modern);
         }
 
         UmbraRemapper remapper = new UmbraRemapper(hierarchy, mappings, memberRenamable, packageMap,
@@ -216,12 +244,21 @@ public final class RenamePass implements Pass {
             remapped.put(name, out);
         }
         pool.applyRenames(classMap, remapped);
-        // Package-only renames keep the class bytecode intact; freeze the new
-        // names so later passes do not transform framework/script boundaries.
+        Set<String> removedClasses = new HashSet<String>();
+        for (String oldName : names) {
+            String newName = classMap.containsKey(oldName) ? classMap.get(oldName) : oldName;
+            if (!pool.classes().containsKey(newName)) {
+                removedClasses.add(newName);
+            }
+        }
+        for (ClassNode node : pool.classes().values()) {
+            ModernBytecodeSupport.rewriteAttributes(node, removedClasses, modern);
+        }
+
         for (String newName : packageOnly.values()) {
             pool.freeze(newName);
         }
-        // Refresh hierarchy entries under their new names for frame computation.
+
         for (ClassNode node : pool.classes().values()) {
             hierarchy.addInput(node);
         }
@@ -235,15 +272,26 @@ public final class RenamePass implements Pass {
         context.stats().add("classes.renamed", classMap.size());
         context.stats().add("methods.renamed", renamedMethods);
         context.stats().add("fields.renamed", renamedFields);
-        context.log().info("rename: %d classes, %d methods, %d fields renamed",
-                classMap.size(), renamedMethods, renamedFields);
+        context.stats().add("modern.records", modern.records);
+        context.stats().add("modern.sealed", modern.sealed);
+        context.stats().add("modern.nest", modern.nest);
+        context.stats().add("modern.indy", modern.indy);
+        context.stats().add("modern.skipped", modern.skipped);
+        context.stats().add("rename.strategy." + strategyName(context), 1);
+        context.stats().add("rename.decoy.packages", decoyPackages.size());
+        context.stats().add("rename.bait.methods", baitNames.size());
+        context.log().info("rename: %d classes, %d methods, %d fields renamed "
+                        + "(strategy=%s, %d decoy packages, %d bait names)",
+                classMap.size(), renamedMethods, renamedFields, strategyName(context),
+                decoyPackages.size(), baitNames.size());
     }
 
     private Map<String, String> renameClasses(PassContext context, Map<String, ClassNode> original,
                                               List<String> names, Set<String> memberRenamable,
                                               Map<String, String> seeded, Set<String> used,
                                               Map<String, String> packageMap,
-                                              Map<String, String> packageOnly) {
+                                              Map<String, String> packageOnly,
+                                              Map<String, String> decoyPackages) {
         UmbraConfig.RenamerOptions options = context.config().renamer();
         Map<String, String> classMap = new LinkedHashMap<String, String>();
         if (!options.renameClasses()) {
@@ -251,11 +299,11 @@ public final class RenamePass implements Pass {
         }
         classMap.putAll(seeded);
         NameGenerator classNames = new NameGenerator(context.random(), options.prefix(),
-                options.dictionary(), options.minimumNameLength());
+                "keywords".equalsIgnoreCase(options.dictionary()) ? "" : options.dictionary(),
+                options.minimumNameLength());
         boolean randomPackages = options.repackage()
                 && "*".equals(options.repackagePackage().trim());
-        NameGenerator packageNames = new NameGenerator(context.random(), "",
-                options.dictionary(), 1);
+        NameGenerator packageNames = new NameGenerator(context.random(), "", "", 1);
         Set<String> usedPackages = new HashSet<String>();
         for (String name : names) {
             String pkg = packageOf(name);
@@ -276,6 +324,26 @@ public final class RenamePass implements Pass {
                 return a.compareTo(b);
             }
         });
+
+        List<String> assignmentOrder = new ArrayList<String>(ordered.size());
+        List<String> depthGroup = new ArrayList<String>();
+        int currentDepth = -1;
+        for (String name : ordered) {
+            int d = depth(name);
+            if (d != currentDepth) {
+                if (!depthGroup.isEmpty()) {
+                    Collections.shuffle(depthGroup, context.random());
+                    assignmentOrder.addAll(depthGroup);
+                    depthGroup = new ArrayList<String>();
+                }
+                currentDepth = d;
+            }
+            depthGroup.add(name);
+        }
+        if (!depthGroup.isEmpty()) {
+            Collections.shuffle(depthGroup, context.random());
+            assignmentOrder.addAll(depthGroup);
+        }
 
         if (randomPackages && !options.repackageKept().isEmpty()) {
             List<Glob> globs = new ArrayList<Glob>();
@@ -317,7 +385,51 @@ public final class RenamePass implements Pass {
             }
         }
 
-        for (String name : ordered) {
+        String strategy = strategyName(context);
+        boolean decoys = "disguise".equals(strategy) || "mixed".equals(strategy);
+        boolean mixedStrategy = "mixed".equals(strategy);
+        if (decoys) {
+            String segment = DecoyNames.buildSegment(context.config().seed());
+            Map<String, List<String>> byPackage = new LinkedHashMap<String, List<String>>();
+            for (String name : names) {
+                if (!memberRenamable.contains(name) || classMap.containsKey(name)) {
+                    continue;
+                }
+                int slash = name.lastIndexOf('/');
+                int dollar = name.lastIndexOf('$');
+                if (dollar > slash) {
+                    continue;
+                }
+                String pkg = packageOf(name);
+                if (pkg.isEmpty()) {
+                    continue;
+                }
+                List<String> members = byPackage.get(pkg);
+                if (members == null) {
+                    members = new ArrayList<String>();
+                    byPackage.put(pkg, members);
+                }
+                members.add(name);
+            }
+            for (String pkg : byPackage.keySet()) {
+                if (mixedStrategy && context.random().nextInt(100) >= 50) {
+                    continue;
+                }
+                for (int attempt = 0; attempt < 8; attempt++) {
+                    String candidate = DecoyNames.packageName(context.random(), segment);
+                    if (DecoyNames.reservedPackage(candidate)) {
+                        continue;
+                    }
+                    if (usedPackages.contains(candidate) || decoyPackages.containsValue(candidate)) {
+                        continue;
+                    }
+                    decoyPackages.put(pkg, candidate);
+                    break;
+                }
+            }
+        }
+
+        for (String name : assignmentOrder) {
             ClassNode node = original.get(name);
             if (!memberRenamable.contains(name) || classMap.containsKey(name)) {
                 continue;
@@ -345,15 +457,19 @@ public final class RenamePass implements Pass {
                 }
             } else {
                 String pkg = packageOf(name);
-                if (randomPackages && !pkg.isEmpty()) {
-                    pkg = mapPackage(pkg, randomPackageMap, usedPackages, packageNames);
-                } else if (options.repackage()) {
-                    // Empty target means "flatten into the default package", the
-                    // same layout Zelix KlassMaster produces: no package tree is
-                    // left to cluster the original modules by.
-                    pkg = NameGenerator.normalizePackage(options.repackagePackage());
+                String decoy = decoyPackages.get(pkg);
+                if (decoy != null) {
+                    newName = uniqueDecoy(context.hierarchy(), used, classNames, decoy,
+                            context.random());
+                } else {
+                    if (randomPackages && !pkg.isEmpty()) {
+                        pkg = mapPackage(pkg, randomPackageMap, usedPackages, packageNames);
+                    } else if (options.repackage()) {
+
+                        pkg = NameGenerator.normalizePackage(options.repackagePackage());
+                    }
+                    newName = uniqueClass(context.hierarchy(), used, classNames, pkg);
                 }
-                newName = uniqueClass(context.hierarchy(), used, classNames, pkg);
             }
             if (!newName.equals(name)) {
                 classMap.put(name, newName);
@@ -367,9 +483,52 @@ public final class RenamePass implements Pass {
         return classMap;
     }
 
+    private static final Set<String> REFLECTIVE_OWNERS = new HashSet<String>(java.util.Arrays.asList(
+            "java/lang/invoke/MethodHandles$Lookup", "java/lang/Class", "java/lang/invoke/MethodType"));
+
+    private static final Set<String> REFLECTIVE_METHODS = new HashSet<String>(java.util.Arrays.asList(
+            "findStatic", "findVirtual", "findSpecial", "findConstructor", "findGetter",
+            "findSetter", "findStaticGetter", "findStaticSetter", "findVarHandle",
+            "findStaticVarHandle", "unreflect", "unreflectSpecial", "unreflectConstructor",
+            "getMethod", "getDeclaredMethod", "getField", "getDeclaredField"));
+
+    private static Set<String> reflectiveNamePins(java.util.Collection<ClassNode> classes) {
+        Set<String> names = new HashSet<String>();
+        for (ClassNode node : classes) {
+            for (MethodNode method : node.methods) {
+                if (method.instructions == null || method.instructions.size() == 0) {
+                    continue;
+                }
+                AbstractInsnNode[] insns = method.instructions.toArray();
+                for (int i = 0; i < insns.length; i++) {
+                    if (!(insns[i] instanceof MethodInsnNode)) {
+                        continue;
+                    }
+                    MethodInsnNode call = (MethodInsnNode) insns[i];
+                    if (!REFLECTIVE_OWNERS.contains(call.owner)
+                            || !REFLECTIVE_METHODS.contains(call.name)) {
+                        continue;
+                    }
+                    for (int j = i - 1; j >= 0 && j >= i - 6; j--) {
+                        if (insns[j] instanceof LdcInsnNode) {
+                            Object constant = ((LdcInsnNode) insns[j]).cst;
+                            if (constant instanceof String) {
+                                String text = (String) constant;
+                                if (!text.isEmpty() && text.indexOf('/') < 0 && text.indexOf('.') < 0) {
+                                    names.add(text);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return names;
+    }
     private void pinMembers(Hierarchy hierarchy, RuleSet rules, Map<String, ClassNode> original,
                             List<String> names, Set<String> memberRenamable,
-                            Set<String> pinnedMethods, Set<String> pinnedFields) {
+                            Set<String> pinnedMethods, Set<String> pinnedFields,
+                            Set<String> baitNames) {
         for (String name : names) {
             ClassNode node = original.get(name);
             boolean renamable = memberRenamable.contains(name);
@@ -379,6 +538,7 @@ public final class RenamePass implements Pass {
                         || (node.access & Opcodes.ACC_INTERFACE) != 0
                         || rules.keepMethod(name, method)
                         || isEnumSynthetic(node, method)
+                        || baitNames.contains(method.name)
                         || overridesLibrary(hierarchy, node, method);
                 if (pin) {
                     pinnedMethods.add(key);
@@ -531,6 +691,49 @@ public final class RenamePass implements Pass {
         return true;
     }
 
+    private static String strategyName(PassContext context) {
+        String value = context.config().option("renamer.strategy", "mixed");
+        if (value == null) {
+            return "mixed";
+        }
+        String normalized = value.trim().toLowerCase(java.util.Locale.ROOT);
+        if ("disguise".equals(normalized) || "flat".equals(normalized)) {
+            return normalized;
+        }
+        return "mixed";
+    }
+
+    private static Set<String> baitNames(PassContext context) {
+        Set<String> result = new HashSet<String>();
+        if ("flat".equals(strategyName(context))) {
+            return result;
+        }
+        String raw = context.config().option("renamer.baitNames", "main,run,start");
+        if (raw == null) {
+            return result;
+        }
+        for (String part : raw.split(",")) {
+            String name = part.trim();
+            if (!name.isEmpty()) {
+                result.add(name);
+            }
+        }
+        return result;
+    }
+
+    private static String uniqueDecoy(Hierarchy hierarchy, Set<String> used, NameGenerator fallback,
+                                      String pkg, java.util.Random random) {
+        for (int i = 0; i < 64; i++) {
+            String candidate = pkg + "/" + DecoyNames.simpleName(random);
+            if (!used.contains(candidate) && !hierarchy.isKnown(candidate)
+                    && !DecoyNames.existsInJdk(candidate)) {
+                used.add(candidate);
+                return candidate;
+            }
+        }
+        return uniqueClass(hierarchy, used, fallback, pkg);
+    }
+
     private static String uniqueClass(Hierarchy hierarchy, Set<String> used, NameGenerator names, String pkg) {
         for (int i = 0; i < 10000; i++) {
             String simple = names.next();
@@ -578,7 +781,6 @@ public final class RenamePass implements Pass {
         return parent == null ? path : parent.resolve(path);
     }
 
-    /** Remapper backed by the global member maps and the hierarchy. */
     static final class UmbraRemapper extends Remapper {
         private final Hierarchy hierarchy;
         private final MappingSet mappings;
@@ -642,7 +844,7 @@ public final class RenamePass implements Pass {
 
         @Override
         public String mapInvokeDynamicMethodName(String name, String descriptor) {
-            return mappings.mappedMethod(name, descriptor);
+            return name;
         }
 
         @Override
@@ -651,11 +853,6 @@ public final class RenamePass implements Pass {
         }
     }
 
-    /**
-     * Returns the classes referenced by Java agent manifest attributes. Their
-     * names must stay stable so that a separately protected agent JAR cannot be
-     * shadowed by a same-named obfuscated class from the target application.
-     */
     private static Set<String> agentEntryClasses(ClassPool pool, Map<String, ClassNode> original) {
         Set<String> entries = new HashSet<String>();
         ClassPool.Resource manifest = pool.resource("META-INF/MANIFEST.MF");

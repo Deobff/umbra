@@ -25,16 +25,6 @@ public final class UmbraGuardCall {
     private UmbraGuardCall() {
     }
 
-    /**
-     * Resolves {@code owner.check()} for one call site.
-     *
-     * @param caller lookup of the class containing the call site
-     * @param name   method name, always {@code check}
-     * @param type   call-site type, always {@code ()V}
-     * @param owner  internal name of the guard class
-     * @return constant call site bound to the guard's check method
-     * @throws Throwable when the guard cannot be resolved
-     */
     public static CallSite bootstrap(MethodHandles.Lookup caller, String name, MethodType type,
                                      String owner) throws Throwable {
         Class<?> target = Class.forName(owner.replace('/', '.'), false,

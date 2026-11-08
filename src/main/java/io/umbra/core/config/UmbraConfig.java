@@ -50,15 +50,7 @@ public final class UmbraConfig {
     private final WatermarkOptions watermark;
     private final MappingOptions mapping;
     private final JunkOptions junk;
-    /**
-     * Free-form advanced options ({@code options:} YAML section).
-     *
-     * <p>Each newer protection pass owns its own namespaced keys (for example
-     * {@code native.enabled}, {@code vm2.encryptPayload},
-     * {@code classEncryption.integrity}). Keeping them in one typed map avoids a
-     * schema change for every knob while still giving the CLI, YAML, JSON and
-     * GUI one shared representation.</p>
-     */
+
     private final Map<String, String> options;
 
     private UmbraConfig(Builder b) {
@@ -99,33 +91,6 @@ public final class UmbraConfig {
         this.options = Collections.unmodifiableMap(new LinkedHashMap<String, String>(b.options));
     }
 
-    // ------------------------------------------------- advanced option bridge
-    //
-    // `--set renamer.enabled=false` and friends name a typed section directly, but
-    // the engine reads the typed sections (config.renamer(), config.flow(), ...),
-    // so the CLI has to translate them. That happens during the CLI's own assembly
-    // and not in the constructor: a derived configuration (a preset, nocturne's
-    // exclusive mode) deliberately tightens a typed section on top of a base whose
-    // option map still carries the old keys, and a constructor-level override
-    // would reopen the section it just closed.
-    //
-    // Keys use the YAML section names (`renamer.*`, `flowObfuscation.*`,
-    // `memberShuffle.*`) plus the `register`/`cache` aliases the YAML loader also
-    // accepts. An absent or unparsable value keeps the typed setter's value, and
-    // unknown keys stay untouched in the option map for the passes that own them.
-
-    /**
-     * Copies {@code <typed section>.*} advanced options over the builder's typed
-     * sections.
-     *
-     * <p>Only the keys passed to this call are applied, so the CLI can pass its
-     * {@code --set} assignments and keep the order preset &lt; {@code --set}
-     * &lt; explicit switches such as {@code --no-flow}. YAML {@code options:}
-     * entries are not translated: the YAML typed sections decide those.</p>
-     *
-     * @param builder builder to update
-     * @param options advanced options to translate (may be {@code null})
-     */
     public static void applyTypedOverrides(Builder builder, Map<String, String> options) {
         if (builder == null || options == null || options.isEmpty()) {
             return;
@@ -154,7 +119,6 @@ public final class UmbraConfig {
         builder.junk(junkOptions(builder.junk, options));
     }
 
-    /** True when the option map holds at least one key of the given sections. */
     private static boolean sectionPresent(Map<String, String> options, String... prefixes) {
         if (options.isEmpty()) {
             return false;
@@ -169,7 +133,6 @@ public final class UmbraConfig {
         return false;
     }
 
-    /** First present option value among {@code keys}, or {@code null}. */
     private static String firstValue(Map<String, String> options, String... keys) {
         for (String key : keys) {
             String value = options.get(key);
@@ -193,7 +156,6 @@ public final class UmbraConfig {
         return value == null ? def : value.trim();
     }
 
-    /** Parses a comma-separated list; {@code def} when no key is present. */
     private static List<String> overrideList(Map<String, String> options, List<String> def,
                                             String... keys) {
         String value = firstValue(options, keys);
@@ -210,7 +172,6 @@ public final class UmbraConfig {
         return out;
     }
 
-    /** Parses a boolean option value; returns {@code def} when absent or unknown. */
     private static boolean parseBool(String value, boolean def) {
         if (value == null) {
             return def;
@@ -225,7 +186,6 @@ public final class UmbraConfig {
         return def;
     }
 
-    /** Parses an int option value; returns {@code def} when absent or malformed. */
     private static int parseInt(String value, int def) {
         if (value == null) {
             return def;
@@ -518,26 +478,21 @@ public final class UmbraConfig {
     public MappingOptions mapping() { return mapping; }
     public JunkOptions junk() { return junk; }
 
-    /** Immutable advanced-option map (never {@code null}). */
     public Map<String, String> options() { return options; }
 
-    /** Returns an advanced option or {@code def} when it is absent. */
     public String option(String key, String def) {
         String value = options.get(key);
         return value == null ? def : value;
     }
 
-    /** Returns a boolean advanced option (accepts true/false/yes/no/1/0/on/off). */
     public boolean optionBool(String key, boolean def) {
         return parseBool(options.get(key), def);
     }
 
-    /** Returns an int advanced option or {@code def} when absent or malformed. */
     public int optionInt(String key, int def) {
         return parseInt(options.get(key), def);
     }
 
-    /** Returns a long advanced option or {@code def} when absent or malformed. */
     public long optionLong(String key, long def) {
         String value = options.get(key);
         if (value == null) {
@@ -550,7 +505,6 @@ public final class UmbraConfig {
         }
     }
 
-    /** Returns a double advanced option or {@code def} when absent or malformed. */
     public double optionDouble(String key, double def) {
         String value = options.get(key);
         if (value == null) {
@@ -563,7 +517,6 @@ public final class UmbraConfig {
         }
     }
 
-    /** Returns a builder pre-populated with this configuration. */
     public Builder toBuilder() {
         Builder b = new Builder();
         b.input = input;
@@ -604,7 +557,6 @@ public final class UmbraConfig {
         return b;
     }
 
-    /** Mutable builder with production defaults. */
     public static final class Builder {
         private Path input;
         private Path output;
@@ -680,7 +632,7 @@ public final class UmbraConfig {
         public Builder watermark(WatermarkOptions value) { this.watermark = value; return this; }
         public Builder mapping(MappingOptions value) { this.mapping = value; return this; }
         public Builder junk(JunkOptions value) { this.junk = value; return this; }
-        /** Replaces the advanced-option map. */
+
         public Builder options(Map<String, String> values) {
             this.options.clear();
             if (values != null) {
@@ -692,7 +644,7 @@ public final class UmbraConfig {
             }
             return this;
         }
-        /** Adds or replaces one advanced option. */
+
         public Builder option(String key, String value) {
             if (key != null && !key.trim().isEmpty()) {
                 this.options.put(key.trim(), value == null ? "" : value);
@@ -704,16 +656,6 @@ public final class UmbraConfig {
             return build(true);
         }
 
-        /**
-         * Builds a configuration, optionally allowing {@code input}/{@code output}
-         * to stay unset. The lenient mode exists for configuration-file loading in
-         * front ends (CLI) that apply {@code -i}/{@code -o} overrides afterwards;
-         * callers must build strictly again before running the engine.
-         *
-         * @param requirePaths whether {@code input} and {@code output} are mandatory
-         * @return immutable configuration
-         * @throws ConfigException when a required path is missing
-         */
         public UmbraConfig build(boolean requirePaths) throws ConfigException {
             if (requirePaths) {
                 if (input == null) {
@@ -777,7 +719,7 @@ public final class UmbraConfig {
         public String mappingFile() { return mappingFile; }
         public String dictionary() { return dictionary; }
         public int minimumNameLength() { return minimumNameLength; }
-        /** Kept class globs that still receive a package-only rename. */
+
         public List<String> repackageKept() { return repackageKept; }
     }
 
@@ -836,7 +778,7 @@ public final class UmbraConfig {
         public String level() { return level; }
         public int maxInstructions() { return maxInstructions; }
         public boolean flattening() { return flattening; }
-        /** Class globs (original names) that are not flattened. */
+
         public List<String> flatteningExclude() { return flatteningExclude; }
     }
 
@@ -911,7 +853,7 @@ public final class UmbraConfig {
 
         public boolean enabled() { return enabled; }
         public String file() { return file; }
-        /** Optional previous mapping used to keep names stable across builds. */
+
         public String inputFile() { return inputFile; }
     }
 
@@ -945,10 +887,7 @@ public final class UmbraConfig {
         }
 
         public boolean enabled() { return enabled; }
-        /**
-         * When true, class names found by {@code Class.forName} are renamed and
-         * their string constants are rewritten instead of being kept.
-         */
+
         public boolean rewriteClassStrings() { return rewriteClassStrings; }
     }
 
@@ -1007,7 +946,7 @@ public final class UmbraConfig {
         public String publicKey() { return publicKey; }
         public boolean require() { return require; }
         public List<String> requiredFeatures() { return requiredFeatures; }
-        /** Optional online license server base URL. */
+
         public String server() { return server; }
     }
 
@@ -1029,9 +968,9 @@ public final class UmbraConfig {
         }
 
         public boolean rewriteContent() { return rewriteContent; }
-        /** Rename {@code assets/<domain>} directories and rewrite matching path strings. */
+
         public boolean obfuscatePaths() { return obfuscatePaths; }
-        /** Bare domain strings to rewrite (for ResourceLocation-style lookups). */
+
         public List<String> rewriteDomains() { return rewriteDomains; }
     }
 
@@ -1102,11 +1041,10 @@ public final class UmbraConfig {
 
         public boolean enabled() { return enabled; }
         public int maxInstructions() { return maxInstructions; }
-        /** Maximum virtualized methods per class; {@code 0} means unlimited. */
+
         public int maxMethods() { return maxMethods; }
     }
 
-    /** Countermeasures aimed at automated / LLM-assisted static analysis. */
     public static final class AntiLlmOptions {
         private final boolean enabled;
         private final int decoyMethodsPerClass;
@@ -1148,14 +1086,6 @@ public final class UmbraConfig {
         public int fields() { return fields; }
     }
 
-    /**
-     * Server-backed authorization gate settings ({@code authGate:} YAML section).
-     *
-     * <p>A protected program calls the injected gate before its {@code main} (and
-     * configured entry points); the gate validates a per-software token against
-     * the authorization server, falling back to an interactive login / register /
-     * card-activation dialog.</p>
-     */
     public static final class AuthGateOptions {
         private final boolean enabled;
         private final String server;
@@ -1186,10 +1116,10 @@ public final class UmbraConfig {
         public String software() { return software; }
         public String title() { return title; }
         public boolean allowRegister() { return allowRegister; }
-        /** Explicit token cache file; empty means {@code ~/.umbra-auth/<software>.token}. */
+
         public String cacheFile() { return cacheFile; }
         public int timeoutMs() { return timeoutMs; }
-        /** Additional entry points in {@code owner#method} or {@code owner#method#desc} form. */
+
         public List<String> entryPoints() { return entryPoints; }
     }
 }

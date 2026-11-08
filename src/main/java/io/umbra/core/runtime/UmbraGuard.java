@@ -19,7 +19,6 @@ public final class UmbraGuard extends Thread {
         setDaemon(true);
     }
 
-    /** Starts the single watchdog thread; called once by the guard class. */
     public static void startGuard(long intervalMs) {
         UmbraGuard thread = new UmbraGuard(intervalMs);
         thread.start();

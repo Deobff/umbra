@@ -26,7 +26,6 @@ import java.util.Map;
  */
 public final class MinecraftProfile {
 
-    /** Empty profile for ordinary jars. */
     public static final MinecraftProfile NONE = new MinecraftProfile(false, "",
             Collections.<String>emptyList(), Collections.<String>emptyList(),
             Collections.<String>emptyList(), Collections.<String>emptyList(),
@@ -76,7 +75,6 @@ public final class MinecraftProfile {
         return detected;
     }
 
-    /** Comma separated loader list, for example {@code "fabric,mixin"}. */
     public String loader() {
         return loader;
     }
@@ -89,7 +87,6 @@ public final class MinecraftProfile {
         return evidence;
     }
 
-    /** Keep rules in the format understood by {@code DefaultRuleSet}. */
     public List<String> keepRules() {
         return keepRules;
     }
@@ -98,7 +95,6 @@ public final class MinecraftProfile {
         return softKeepRules;
     }
 
-    /** Ant-style class globs whose method bodies must not be rewritten. */
     public List<String> bodySkipGlobs() {
         return bodySkipGlobs;
     }
@@ -107,7 +103,6 @@ public final class MinecraftProfile {
         return frozenClasses;
     }
 
-    /** Resource paths that must not be renamed or rewritten. */
     public List<String> preservedResources() {
         return preservedResources;
     }
@@ -124,22 +119,6 @@ public final class MinecraftProfile {
         return targetCount;
     }
 
-    /**
-     * Applies the mod-container downgrade policy.
-     *
-     * <p>A mod loader loads and patches a mod before (and independently of) the
-     * protected program, so archive-level protections break it. The defaults
-     * therefore disable class encryption, standalone integrity, native code,
-     * resource path/content rewriting, reference hiding and member trimming,
-     * and disable virtualization unless {@code minecraft.forceVmp} is true.
-     * Renaming, string/integer encryption, control flow, anti-LLM and the
-     * watermark stay enabled; classes that are externally visible (entry
-     * points, mixin classes and targets, coremods) are exempted through the
-     * keep/body-skip rules instead of through global switches.</p>
-     *
-     * <p>{@code minecraft.allowConflicts=true} skips the downgrade for users who
-     * know exactly what they are doing.</p>
-     */
     public UmbraConfig adjust(UmbraConfig base) {
         if (base == null || !detected || base.optionBool("minecraft.allowConflicts", false)) {
             return base;
@@ -165,12 +144,11 @@ public final class MinecraftProfile {
         try {
             return b.build();
         } catch (ConfigException e) {
-            // The base configuration is already valid; a rebuild cannot fail.
+
             return base;
         }
     }
 
-    /** Summary map for logs, reports and the GUI state. */
     public Map<String, Object> asMap() {
         Map<String, Object> out = new LinkedHashMap<String, Object>();
         out.put("detected", Boolean.valueOf(detected));

@@ -28,29 +28,26 @@ import java.util.Set;
  */
 public final class CGenerator {
 
-    /** Runtime classes that generated code and helpers need; indices are stable. */
     static final String[] RUNTIME_CLASSES = {
-            "java/lang/NullPointerException",   // 0
-            "java/lang/ClassCastException",     // 1
-            "java/lang/ArithmeticException",    // 2
-            "java/lang/reflect/Array",          // 3
-            "java/lang/Integer",                // 4
-            "java/lang/Long",                   // 5
-            "java/lang/Float",                  // 6
-            "java/lang/Double",                 // 7
-            "java/lang/Byte",                   // 8
-            "java/lang/Character",              // 9
-            "java/lang/Short",                  // 10
-            "java/lang/Boolean"                 // 11
+            "java/lang/NullPointerException",
+            "java/lang/ClassCastException",
+            "java/lang/ArithmeticException",
+            "java/lang/reflect/Array",
+            "java/lang/Integer",
+            "java/lang/Long",
+            "java/lang/Float",
+            "java/lang/Double",
+            "java/lang/Byte",
+            "java/lang/Character",
+            "java/lang/Short",
+            "java/lang/Boolean"
     };
 
-    /** Macro suffix used by the runtime C code for every runtime class index. */
     private static final String[] RUNTIME_MACROS = {
             "NPE", "CLASSCASTEXCEPTION", "ARITHMETICEXCEPTION", "ARRAY",
             "INTEGER", "LONG", "FLOAT", "DOUBLE", "BYTE", "CHARACTER", "SHORT", "BOOLEAN"
     };
 
-    /** One translated method (C statements only; the wrapper is emitted by {@link #finish}). */
     public static final class MethodC {
         public String functionName;
         public String owner;
@@ -73,64 +70,74 @@ public final class CGenerator {
     private final List<MethodC> methods = new ArrayList<MethodC>();
     private int nextIdSite;
 
-    /**
-     * Key of the encrypted name/descriptor pool. The generated translation unit
-     * carries the same constant, so the pool is always self-consistent; the pass
-     * randomizes it per build so two builds of the same source do not share it.
-     */
     private long literalKey = 0x6A09E667F3BCC908L;
 
-    /** Length budget of one decoded name/descriptor literal (names and descriptors are short). */
     private static final int LITERAL_MAX = 256;
 
-    // ---- anti-dump configuration (set by NativeCodePass before finish()) ----
     private String antiDumpLoader;
     private long antiDumpKey;
     private boolean antiBackfill;
     private int bindingCount;
+    private int reflectClassLiteral;
+    private int reflectModifiersLiteral;
+    private int reflectModifiersSignature;
 
-    /** Internal name of the injected loader that owns the registration entry point. */
     private String registerLoader;
 
-    /** Name of the JNI method the injected loader calls after {@code System.load}. */
+    private static byte[] loaderDigestKey;
+
+    public static void configureLoaderDigestKey(byte[] key) {
+        loaderDigestKey = key == null ? null : key.clone();
+    }
+
+    private byte[] keyRoot;
+
+    private byte[] gateSecret;
+
+    private boolean gateEnabled;
+
+    public void configureKeyRoot(byte[] root) {
+        this.keyRoot = root == null ? null : root.clone();
+    }
+
+    public boolean hasKeyRoot() {
+        return keyRoot != null && registerLoader != null;
+    }
+
+    public byte[] keyRootBytes() {
+        return keyRoot == null ? null : keyRoot.clone();
+    }
+
+    public void configureGate(byte[] secret, boolean enabled) {
+        this.gateSecret = secret == null ? null : secret.clone();
+        this.gateEnabled = enabled && this.gateSecret != null
+                && this.gateSecret.length == KeyRootCode.KEY_SIZE;
+    }
+
     public static final String CHALLENGE_METHOD = "verifyChallenge";
-    /** Descriptor of the challenge method (int nonce -> long response). */
+
     public static final String CHALLENGE_DESCRIPTOR = "(I)J";
-    /** Name of the registration entry point the loader declares as a native method. */
+
     public static final String REGISTER_METHOD = "register";
-    /** Descriptor of the registration entry point (class id + owning Class). */
+
     public static final String REGISTER_DESCRIPTOR = "(ILjava/lang/Class;)I";
 
-    /**
-     * Enables the anti-dump layer of the generated library.
-     *
-     * @param loaderInternalName internal name of the injected loader class
-     * @param key                per-program secret shared with the Java loader
-     * @param backfill           emit and verify the native registration-table check
-     */
+    private static final String REFLECT_METHOD_CLASS = "java/lang/reflect/Method";
+
+    private static final String REFLECT_MODIFIERS = "getModifiers";
+
+    private static final String REFLECT_MODIFIERS_DESCRIPTOR = "()I";
+
     public void configureAntiDump(String loaderInternalName, long key, boolean backfill) {
         this.antiDumpLoader = loaderInternalName;
         this.antiDumpKey = key;
         this.antiBackfill = backfill;
     }
 
-    /**
-     * Sets the loader that receives the {@code register} and {@code verifyChallenge}
-     * natives from {@code JNI_OnLoad}.
-     *
-     * <p>Business classes are not registered from {@code JNI_OnLoad}: doing so
-     * {@code FindClass}es them and therefore runs their static initializers before
-     * the program asks for them. Instead every owning class calls back into the
-     * loader from its own {@code <clinit>}, which is the moment the class would
-     * have initialized anyway.</p>
-     *
-     * @param loaderInternalName internal name of the injected loader class
-     */
     public void configureRegistration(String loaderInternalName) {
         this.registerLoader = loaderInternalName;
     }
 
-    /** Number of method bindings the native registration table covers (0 when off). */
     public int bindingCount() {
         return bindingCount;
     }
@@ -142,7 +149,6 @@ public final class CGenerator {
         }
     }
 
-    /** Interns a {@code FindClass} argument (internal name or array descriptor). */
     int classRef(String name) {
         Integer existing = classIndex.get(name);
         if (existing != null) {
@@ -154,7 +160,6 @@ public final class CGenerator {
         return index;
     }
 
-    /** Interns a string constant; returns the index of its {@code umbra_str_N} array. */
     int stringRef(String value) {
         Integer existing = stringIndex.get(value);
         if (existing != null) {
@@ -166,18 +171,6 @@ public final class CGenerator {
         return index;
     }
 
-    /**
-     * Interns a name or descriptor into the encrypted literal pool.
-     *
-     * <p>Class names, member names and descriptors are the only plaintext in a
-     * native image that still maps the Java side onto the C functions; keeping
-     * them as readable C string literals let {@code strings} rebuild that map
-     * without touching the class files. They are therefore stored XOR-encrypted
-     * and decoded on use by {@code umbra_l}.</p>
-     *
-     * @param value name or descriptor
-     * @return index passed to {@code umbra_l}
-     */
     int literalRef(String value) {
         Integer existing = literalIndex.get(value);
         if (existing != null) {
@@ -189,12 +182,10 @@ public final class CGenerator {
         return index;
     }
 
-    /** Sets the per-build key of the encrypted literal pool. */
     public void configureLiteralKey(long key) {
         this.literalKey = key;
     }
 
-    /** Allocates one lazily resolved method/field id slot. */
     int newIdSite() {
         return nextIdSite++;
     }
@@ -207,7 +198,6 @@ public final class CGenerator {
         return methods.size();
     }
 
-    /** Assembles the complete translation unit. */
     public String finish() {
         StringBuilder out = new StringBuilder(1 << 16);
         out.append("#include <jni.h>\n");
@@ -217,12 +207,10 @@ public final class CGenerator {
         out.append("#ifdef _WIN32\n");
         out.append("#include <windows.h>\n");
         out.append("#endif\n\n");
-        // Java-compatible unsigned arithmetic helpers (JNI headers do not define
-        // fixed-width unsigned types on every platform).
+
         out.append("typedef unsigned int umbra_u32;\n");
         out.append("typedef unsigned long long umbra_u64;\n\n");
-        // A failed JNI_OnLoad only surfaces as "unsupported JNI version" from the
-        // VM, so each refusal point reports itself when UMBRA_NATIVE_DEBUG is set.
+
         out.append("static int umbra_trace(const char* what, int value) {\n");
         out.append("    if (getenv(\"UMBRA_NATIVE_DEBUG\") != NULL) {\n");
         out.append("        fprintf(stderr, \"[umbra-native] %s=%d\\n\", what, value);\n");
@@ -241,8 +229,7 @@ public final class CGenerator {
         for (int i = 0; i < classNames.size(); i++) {
             classNameLiterals[i] = literalRef(classNames.get(i));
         }
-        // The pool is emitted with a fixed count, so every literal used by the
-        // registration and JNI_OnLoad emitters has to be interned first.
+
         for (MethodC method : methods) {
             literalRef(method.name);
             literalRef(method.descriptor);
@@ -255,6 +242,12 @@ public final class CGenerator {
                 literalRef(CHALLENGE_METHOD);
                 literalRef(CHALLENGE_DESCRIPTOR);
             }
+
+        }
+        if (antiBackfill) {
+            reflectClassLiteral = literalRef(REFLECT_METHOD_CLASS);
+            reflectModifiersLiteral = literalRef(REFLECT_MODIFIERS);
+            reflectModifiersSignature = literalRef(REFLECT_MODIFIERS_DESCRIPTOR);
         }
         appendLiteralPool(out);
         appendClassTable(out, classNameLiterals);
@@ -267,7 +260,13 @@ public final class CGenerator {
         }
         List<String> bindings = appendNativeBindings(out);
         appendAntiDump(out, bindings);
+        if (hasKeyRoot()) {
+
+        KeyRootCode.emit(out, keyRoot, literalKey, registerLoader, false,
+                    gateSecret, gateEnabled, null);
+        }
         appendOnLoad(out);
+        appendBindLoaderExport(out);
         return out.toString();
     }
 
@@ -284,14 +283,6 @@ public final class CGenerator {
         out.append("static UMBRA_ID umbra_ids[UMBRA_ID_COUNT];\n\n");
     }
 
-    /**
-     * Emits the encrypted name/descriptor pool and its decoder.
-     *
-     * <p>Every class name, member name and descriptor the generated code needs is
-     * stored XOR-encrypted with a per-build key and decoded on use by
-     * {@code umbra_l}. This is what keeps {@code strings} from rebuilding the
-     * Java-to-native map out of a dumped library.</p>
-     */
     private void appendLiteralPool(StringBuilder out) {
         ByteArrayOutputStream pool = new ByteArrayOutputStream();
         StringBuilder offsets = new StringBuilder();
@@ -341,11 +332,7 @@ public final class CGenerator {
         out.append("static char umbra_boot_reg_sig[UMBRA_LIT_MAX];\n");
         out.append("static char umbra_boot_ch[UMBRA_LIT_MAX];\n");
         out.append("static char umbra_boot_ch_sig[UMBRA_LIT_MAX];\n\n");
-        // Decodes into a caller-provided buffer. There is deliberately no shared
-        // decode buffer: the translated methods run on application threads, and a
-        // shared scratch area would let one thread overwrite a name another thread
-        // is still passing to a JNI lookup (which showed up as NoSuchFieldError and
-        // as JVM crashes on a NULL method id).
+
         out.append("static void umbra_lit_copy(int index, char* out) {\n");
         out.append("    umbra_u64 state;\n");
         out.append("    int len;\n");
@@ -368,7 +355,6 @@ public final class CGenerator {
         out.append("}\n\n");
     }
 
-    /** Mirror of the {@code umbra_lit_copy} keystream: XOR of the modified UTF-8 bytes. */
     static byte[] encryptLiteral(long key, int index, byte[] plain) {
         byte[] out = new byte[plain.length];
         long state = key ^ (long) index;
@@ -438,10 +424,7 @@ public final class CGenerator {
             out.append("    lc[0].l = (jobject)_self;\n");
         }
         out.append("    (void)lc;\n");
-        // Optional guard tick: the anti-debug guard library (when present) is
-        // discovered through the "umbra.guard.path" system property that the
-        // guard template sets before the native library is loaded. Without a
-        // guard this is a single NULL check per native call.
+
         out.append("    if (umbra_guard_tick_fn != NULL) {\n");
         out.append("        if (umbra_guard_tick_fn() != 0) {\n");
         out.append("            ").append(defaultReturn(method.cReturn)).append("\n");
@@ -452,19 +435,6 @@ public final class CGenerator {
         out.append("}\n\n");
     }
 
-    /**
-     * Emits the JNI wrappers, the per-owning-class registration functions and the
-     * dispatcher behind {@code loader.register(classId, Class)}.
-     *
-     * <p>Nothing here is exported. The wrappers are {@code static} functions whose
-     * addresses are registered with {@code RegisterNatives}, so the PE export
-     * table exposes no {@code Java_*} symbol and a dumped library no longer
-     * carries a ready-made Java-to-native map. Because registration is keyed by
-     * (name, descriptor) pairs instead of mangled symbol lookup, overloads are
-     * unambiguous and the old short/long export rules disappear.</p>
-     *
-     * @return {@code name + descriptor} of every binding, in registration order
-     */
     private List<String> appendNativeBindings(StringBuilder out) {
         Map<String, List<Integer>> byOwner = new LinkedHashMap<String, List<Integer>>();
         for (int i = 0; i < methods.size(); i++) {
@@ -527,21 +497,35 @@ public final class CGenerator {
             out.append("    ").append(byOwner.get(ownerName(byOwner, i)).size()).append(",\n");
         }
         out.append("};\n\n");
+        if (antiBackfill) {
+            out.append("static int umbra_backfill_ok(JNIEnv* env, jclass owner, int class_id);\n\n");
+        }
         out.append("static jint JNICALL umbra_register(JNIEnv* env, jclass self, jint classId,");
         out.append(" jclass owner) {\n");
+        out.append("    jint rc;\n");
         out.append("    (void)self;\n");
         out.append("    switch (classId) {\n");
         for (int i = 0; i < ownerCount; i++) {
-            out.append("        case ").append(i).append(": return umbra_bind_").append(i)
-                    .append("(env, owner);\n");
+            out.append("        case ").append(i).append(":\n");
+            out.append("            rc = umbra_bind_").append(i).append("(env, owner);\n");
+            out.append("            if (rc != 0) {\n");
+            out.append("                return rc;\n");
+            out.append("            }\n");
+            if (antiBackfill) {
+                out.append("            if (!umbra_backfill_ok(env, owner, ").append(i)
+                        .append(")) {\n");
+                out.append("                return -8;\n");
+                out.append("            }\n");
+            }
+            out.append("            return 0;\n");
         }
-        out.append("        default: return -1;\n");
+        out.append("        default:\n");
+        out.append("            return -1;\n");
         out.append("    }\n");
         out.append("}\n\n");
         return bindings;
     }
 
-    /** Owner internal name at position {@code index} of the insertion-ordered map. */
     private static String ownerName(Map<String, List<Integer>> byOwner, int index) {
         int i = 0;
         for (String name : byOwner.keySet()) {
@@ -577,23 +561,6 @@ public final class CGenerator {
         }
     }
 
-    /**
-     * Emits the anti-dump layer requested by {@link #configureAntiDump}:
-     *
-     * <ul>
-     *   <li>a <b>backfill table</b> listing every exported native method
-     *       (XOR-encrypted symbol name + this image's function address),</li>
-     *   <li>a <b>table self-check</b> that resolves each entry through the
-     *       module export table and compares it with the table pointer, so a
-     *       patched export table / forwarded proxy library is detected,</li>
-     *   <li>a <b>keyed challenge</b> ({@code verifyChallenge(int)}) the Java
-     *       loader calls after {@code System.load}; the response mixes the
-     *       per-program key with the caller nonce, so a library built for a
-     *       different program (or rebuilt without the key) cannot answer,</li>
-     *   <li>{@code JNI_OnLoad} refuses the load ({@code JNI_ERR}) when the
-     *       backfill table does not match.</li>
-     * </ul>
-     */
     private void appendAntiDump(StringBuilder out, List<String> bindings) {
         if (antiDumpLoader == null) {
             return;
@@ -619,32 +586,110 @@ public final class CGenerator {
         }
     }
 
-    /**
-     * Emits the registration-table self-check used when {@code native.antiBackfill}
-     * is on.
-     *
-     * <p>The previous design verified the PE export table through
-     * {@code GetProcAddress}, which no longer exists now that nothing is exported.
-     * A rebuilt or patched library is instead caught by the SHA-256 fingerprint
-     * the Java loader verifies before {@code System.load}, and this check keeps a
-     * second line of defence inside the image itself: a library whose registrar
-     * table has been patched to route bindings elsewhere fails the load.</p>
-     */
     private void appendRegistrationCheck(StringBuilder out) {
-        out.append("static int umbra_backfill_ok(void) {\n");
-        out.append("    int i;\n");
-        out.append("    if (UMBRA_OWNER_COUNT <= 0) {\n");
+        out.append("static jmethodID umbra_backfill_modifiers(JNIEnv* env) {\n");
+        out.append("    static jmethodID cached = NULL;\n");
+        out.append("    jclass method_class;\n");
+        out.append("    char class_name[UMBRA_LIT_MAX];\n");
+        out.append("    char method_name[UMBRA_LIT_MAX];\n");
+        out.append("    char method_sig[UMBRA_LIT_MAX];\n");
+        out.append("    if (cached != NULL) {\n");
+        out.append("        return cached;\n");
+        out.append("    }\n");
+        out.append("    umbra_lit_copy(").append(reflectClassLiteral).append(", class_name);\n");
+        out.append("    umbra_lit_copy(").append(reflectModifiersLiteral).append(", method_name);\n");
+        out.append("    umbra_lit_copy(").append(reflectModifiersSignature).append(", method_sig);\n");
+        out.append("    method_class = (*env)->FindClass(env, class_name);\n");
+        out.append("    if (method_class == NULL) {\n");
+        out.append("        (*env)->ExceptionClear(env);\n");
+        out.append("        return NULL;\n");
+        out.append("    }\n");
+        out.append("    cached = (*env)->GetMethodID(env, method_class, method_name, method_sig);\n");
+        out.append("    (*env)->DeleteLocalRef(env, method_class);\n");
+        out.append("    if (cached == NULL) {\n");
+        out.append("        (*env)->ExceptionClear(env);\n");
+        out.append("    }\n");
+        out.append("    return cached;\n");
+        out.append("}\n\n");
+        out.append("static int umbra_backfill_method(JNIEnv* env, jclass owner, int name_index,");
+        out.append(" int sig_index, int is_static, jmethodID modifiers_id) {\n");
+        out.append("    char name[UMBRA_LIT_MAX];\n");
+        out.append("    char sig[UMBRA_LIT_MAX];\n");
+        out.append("    jmethodID mid;\n");
+        out.append("    jobject reflected;\n");
+        out.append("    jint modifiers;\n");
+        out.append("    umbra_lit_copy(name_index, name);\n");
+        out.append("    umbra_lit_copy(sig_index, sig);\n");
+        out.append("    if (is_static) {\n");
+        out.append("        mid = (*env)->GetStaticMethodID(env, owner, name, sig);\n");
+        out.append("    } else {\n");
+        out.append("        mid = (*env)->GetMethodID(env, owner, name, sig);\n");
+        out.append("    }\n");
+        out.append("    if (mid == NULL) {\n");
+        out.append("        (*env)->ExceptionClear(env);\n");
+        out.append("        umbra_trace(name, -1);\n");
         out.append("        return 0;\n");
         out.append("    }\n");
-        out.append("    for (i = 0; i < UMBRA_OWNER_COUNT; i++) {\n");
-        out.append("        if (umbra_registrars[i] == NULL) {\n");
-        out.append("            return 0;\n");
-        out.append("        }\n");
-        out.append("        if (umbra_owner_counts[i] <= 0) {\n");
-        out.append("            return 0;\n");
-        out.append("        }\n");
+        out.append("    reflected = (*env)->ToReflectedMethod(env, owner, mid, ");
+        out.append("is_static ? JNI_TRUE : JNI_FALSE);\n");
+        out.append("    if (reflected == NULL) {\n");
+        out.append("        (*env)->ExceptionClear(env);\n");
+        out.append("        umbra_trace(name, -2);\n");
+        out.append("        return 0;\n");
+        out.append("    }\n");
+        out.append("    modifiers = (*env)->CallIntMethod(env, reflected, modifiers_id);\n");
+        out.append("    (*env)->DeleteLocalRef(env, reflected);\n");
+        out.append("    if ((*env)->ExceptionCheck(env)) {\n");
+        out.append("        (*env)->ExceptionClear(env);\n");
+        out.append("        umbra_trace(name, -3);\n");
+        out.append("        return 0;\n");
+        out.append("    }\n");
+        out.append("    if ((modifiers & 0x100) == 0 || (modifiers & 0x400) != 0) {\n");
+        out.append("        umbra_trace(name, (int)modifiers);\n");
+        out.append("        return 0;\n");
         out.append("    }\n");
         out.append("    return 1;\n");
+        out.append("}\n\n");
+        Map<String, List<Integer>> byOwner = new LinkedHashMap<String, List<Integer>>();
+        for (int i = 0; i < methods.size(); i++) {
+            MethodC entry = methods.get(i);
+            List<Integer> indexes = byOwner.get(entry.owner);
+            if (indexes == null) {
+                indexes = new ArrayList<Integer>();
+                byOwner.put(entry.owner, indexes);
+            }
+            indexes.add(Integer.valueOf(i));
+        }
+        out.append("static int umbra_backfill_ok(JNIEnv* env, jclass owner, int class_id) {\n");
+        out.append("    jmethodID modifiers_id;\n");
+        out.append("    if (owner == NULL || UMBRA_OWNER_COUNT <= 0) {\n");
+        out.append("        umbra_trace(\"backfill-owner\", 0);\n");
+        out.append("        return 0;\n");
+        out.append("    }\n");
+        out.append("    modifiers_id = umbra_backfill_modifiers(env);\n");
+        out.append("    if (modifiers_id == NULL) {\n");
+        out.append("        umbra_trace(\"backfill-reflect\", 0);\n");
+        out.append("        return 0;\n");
+        out.append("    }\n");
+        out.append("    switch (class_id) {\n");
+        int ownerCount = 0;
+        for (Map.Entry<String, List<Integer>> ownerEntry : byOwner.entrySet()) {
+            out.append("    case ").append(ownerCount).append(":\n");
+            for (Integer index : ownerEntry.getValue()) {
+                MethodC method = methods.get(index.intValue());
+                out.append("        if (!umbra_backfill_method(env, owner, ")
+                        .append(literalRef(method.name)).append(", ")
+                        .append(literalRef(method.descriptor)).append(", ")
+                        .append(method.staticMethod ? 1 : 0).append(", modifiers_id)) {\n");
+                out.append("            return 0;\n");
+                out.append("        }\n");
+            }
+            out.append("        return 1;\n");
+            ownerCount++;
+        }
+        out.append("    default:\n");
+        out.append("        return 0;\n");
+        out.append("    }\n");
         out.append("}\n\n");
     }
 
@@ -652,25 +697,122 @@ public final class CGenerator {
         return "0x" + String.format(java.util.Locale.ROOT, "%016x", Long.valueOf(value));
     }
 
+    private void appendBindLoaderExport(StringBuilder out) {
+        out.append("static void umbra_bind_stderr(const char* text) {\n");
+        out.append("#ifdef _WIN32\n");
+        out.append("    HANDLE handle = GetStdHandle(STD_ERROR_HANDLE);\n");
+        out.append("    DWORD written = 0;\n");
+        out.append("    if (handle != NULL && handle != INVALID_HANDLE_VALUE) {\n");
+        out.append("        WriteFile(handle, text, (DWORD)strlen(text), &written, NULL);\n");
+        out.append("    }\n");
+        out.append("#else\n");
+        out.append("    (void)text;\n");
+        out.append("#endif\n");
+        out.append("}\n\n");
+        // appendOneBinding() prints the length of the bound name through this helper;
+        // it was referenced but never emitted, so the whole unit failed to link and
+        // native-code silently fell back to Java (native.methods=0).
+        out.append("static void umbra_bind_stderr_int(int value) {\n");
+        out.append("    char digits[16];\n");
+        out.append("    int i = 0;\n");
+        out.append("    unsigned int magnitude;\n");
+        out.append("    if (value < 0) {\n");
+        out.append("        umbra_bind_stderr(\"-\");\n");
+        out.append("        magnitude = (unsigned int)(-(value + 1)) + 1u;\n");
+        out.append("    } else {\n");
+        out.append("        magnitude = (unsigned int)value;\n");
+        out.append("    }\n");
+        out.append("    if (magnitude == 0) {\n");
+        out.append("        digits[i++] = '0';\n");
+        out.append("    }\n");
+        out.append("    while (magnitude > 0) {\n");
+        out.append("        digits[i++] = (char)('0' + (magnitude % 10u));\n");
+        out.append("        magnitude /= 10u;\n");
+        out.append("    }\n");
+        out.append("    while (i > 0) {\n");
+        out.append("        char one[2];\n");
+        out.append("        one[0] = digits[--i];\n");
+        out.append("        one[1] = 0;\n");
+        out.append("        umbra_bind_stderr(one);\n");
+        out.append("    }\n");
+        out.append("}\n\n");
+        out.append("JNIEXPORT jint JNICALL umbra_bind_loader(JNIEnv* env, jclass loader,\n");
+        out.append("        const char* registerName, const char* challengeName) {\n");
+        if (registerLoader == null) {
+            out.append("    (void)env;\n");
+            out.append("    (void)loader;\n");
+            out.append("    return 0;\n");
+            out.append("}\n");
+            return;
+        }
+        out.append("    JNINativeMethod _m;\n");
+        out.append("    char _name[UMBRA_LIT_MAX];\n");
+        out.append("    char _sig[UMBRA_LIT_MAX];\n");
+        out.append("    jmethodID _mid;\n");
+        out.append("    int _rc;\n");
+        out.append("    if (loader == NULL) {\n");
+        out.append("        umbra_bind_stderr(\"umbra-bind-null-loader\\n\");\n");
+        out.append("        return -2;\n");
+        out.append("    }\n");
+        out.append("    umbra_bind_stderr(\"umbra-bind-names register=[\");\n");
+        out.append("    umbra_bind_stderr(registerName == NULL ? \"(null)\" : registerName);\n");
+        out.append("    umbra_bind_stderr(\"] challenge=[\");\n");
+        out.append("    umbra_bind_stderr(challengeName == NULL ? \"(null)\" : challengeName);\n");
+        out.append("    umbra_bind_stderr(\"]\\n\");\n");
+        appendOneBinding(out, REGISTER_METHOD, REGISTER_DESCRIPTOR, "umbra_register", "registerName", true);
+        if (antiBackfill) {
+            appendOneBinding(out, CHALLENGE_METHOD, CHALLENGE_DESCRIPTOR, "umbra_challenge", "challengeName", false);
+        }
+        out.append("    return 0;\n");
+        out.append("}\n\n");
+    }
+
+    private void appendOneBinding(StringBuilder out, String name, String descriptor, String fn,
+                                          String cName, boolean required) {
+        out.append("    strcpy(_sig, \"").append(descriptor).append("\");\n");
+        out.append("    if (_sig[0] == 0) { return -6; }\n");
+        out.append("    if (").append(cName).append(" == NULL || ").append(cName).append("[0] == 0) { return -7; }\n");
+        out.append("    _m.name = (char*)").append(cName).append(";\n");
+        out.append("    umbra_bind_stderr(\"umbra-name-len=\");\n");
+        out.append("    umbra_bind_stderr_int((int)strlen(_m.name));\n");
+        out.append("    umbra_bind_stderr(\"umbra-name-value=\");\n");
+        out.append("    umbra_bind_stderr(_m.name);\n");
+        out.append("    umbra_bind_stderr(\"\\n\");\n");
+        out.append("    _m.signature = _sig;\n");
+        out.append("    _m.fnPtr = (void*)(&").append(fn).append(");\n");
+        out.append("    umbra_bind_stderr(\"umbra-bind-check ").append(name).append("\\n\");\n");
+        out.append("    umbra_bind_stderr(\"umbra-bind-sig=\");\n");
+        out.append("    umbra_bind_stderr(_sig);\n");
+        out.append("    umbra_bind_stderr(\"]\\n\");\n");
+        out.append("    _mid = (*env)->GetMethodID(env, loader, _m.name, _sig);\n");
+        out.append("    umbra_bind_stderr(\"umbra-bind-mid=\");\n");
+        out.append("    umbra_bind_stderr(_mid == NULL ? \"0\\n\" : \"1\\n\");\n");
+        out.append("    if (_mid == NULL) {\n");
+        out.append("        (*env)->ExceptionDescribe(env);\n");
+        out.append("        (*env)->ExceptionClear(env);\n");
+        out.append("        umbra_bind_stderr(\"umbra-bind-skip ").append(name).append("\\n\");\n");
+        out.append("    } else {\n");
+        out.append("        _rc = (*env)->RegisterNatives(env, loader, &_m, 1);\n");
+        out.append("        umbra_bind_stderr(\"umbra-bind-rn=\");\n");
+        out.append("        umbra_bind_stderr(_rc == 0 ? \"0\\n\" : \"1\\n\");\n");
+        out.append("        if (_rc != 0) {\n");
+        out.append("            (*env)->ExceptionDescribe(env);\n");
+        out.append("            (*env)->ExceptionClear(env);\n");
+        out.append("            umbra_bind_stderr(\"umbra-bind-fail ").append(name).append("\\n\");\n");
+        out.append("            return -5;\n");
+        out.append("        }\n");
+        out.append("        umbra_bind_stderr(\"umbra-bind-ok ").append(name).append("\\n\");\n");
+        out.append("    }\n");
+    }
+
     private void appendOnLoad(StringBuilder out) {
-        // Only the loader class is registered here. FindClass runs a class's static
-        // initializer, so registering the business classes from JNI_OnLoad would
-        // initialize them at library-load time; each owning class instead calls
-        // loader.register(classId, Owner.class) from its own <clinit>, which is the
-        // moment the class would have initialized anyway.
+
         out.append("JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {\n");
         out.append("    JNIEnv* env = NULL;\n");
         out.append("    (void)reserved;\n");
         out.append("    if ((*vm)->GetEnv(vm, (void**)&env, JNI_VERSION_1_6) != JNI_OK) {\n");
         out.append("        return JNI_ERR;\n");
         out.append("    }\n");
-        if (antiDumpLoader != null && antiBackfill) {
-            // Refuse a library whose registrar table was patched to route the
-            // bindings elsewhere (the byte-level check is the loader's fingerprint).
-            out.append("    if (!umbra_trace(\"backfill\", umbra_backfill_ok())) {\n");
-            out.append("        return JNI_ERR;\n");
-            out.append("    }\n");
-        }
         if (registerLoader != null) {
             int count = antiBackfill ? 2 : 1;
             out.append("    {\n");
@@ -708,6 +850,14 @@ public final class CGenerator {
             out.append("            (*env)->ExceptionClear(env);\n");
             out.append("            return JNI_ERR;\n");
             out.append("        }\n");
+            if (keyRoot != null) {
+
+                out.append("#if UMBRA_GATE_ENABLED\n");
+                out.append("        g_key_vm = vm;\n");
+                out.append("        umbra_gate_start_watchdog();\n");
+                out.append("#endif\n");
+                out.append("        umbra_key_bind(env, _loader);\n");
+            }
             out.append("    }\n");
         }
         out.append("    umbra_guard_attach(env);\n");
@@ -715,14 +865,87 @@ public final class CGenerator {
         out.append("}\n");
     }
 
-    /**
-     * Optional integration with the anti-debug guard library. The guard template
-     * publishes its DLL path in the {@code umbra.guard.path} system property before
-     * the native library is loaded; {@code JNI_OnLoad} resolves the exported
-     * {@code umbra_guard_tick} entry point and every translated native method calls
-     * it at entry. Without a guard the pointer stays NULL and the cost is one
-     * predictable branch.
-     */
+    public static String keyBridgeSource(String loaderInternal, byte[] root, long secret,
+                                         boolean forceTaint) {
+        return keyBridgeSource(loaderInternal, root, secret, forceTaint, null, false);
+    }
+
+    public static String keyBridgeSource(String loaderInternal, byte[] root, long secret,
+                                         boolean forceTaint, byte[] gateSecret,
+                                         boolean gateEnabled) {
+        return keyBridgeSource(loaderInternal, root, secret, forceTaint, gateSecret, gateEnabled,
+                null);
+    }
+
+    public static String keyBridgeSource(String loaderInternal, byte[] root, long secret,
+                                         boolean forceTaint, byte[] gateSecret,
+                                         boolean gateEnabled, String moduleWhitelist) {
+        return keyBridgeSource(loaderInternal, root, secret, forceTaint, gateSecret, gateEnabled,
+                moduleWhitelist, 100);
+    }
+
+    public static String keyBridgeSource(String loaderInternal, byte[] root, long secret,
+                                         boolean forceTaint, byte[] gateSecret,
+                                         boolean gateEnabled, String moduleWhitelist,
+                                         int handleScanMs) {
+        return keyBridgeSource(loaderInternal, root, secret, forceTaint, gateSecret, gateEnabled,
+                moduleWhitelist, handleScanMs, null);
+    }
+
+    public static String keyBridgeSource(String loaderInternal, byte[] root, long secret,
+                                         boolean forceTaint, byte[] gateSecret,
+                                         boolean gateEnabled, String moduleWhitelist,
+                                        int handleScanMs, String suspiciousModules) {
+        if (loaderInternal == null || loaderInternal.isEmpty()) {
+            throw new IllegalArgumentException("the key bridge needs a loader class name");
+        }
+        StringBuilder out = new StringBuilder(1 << 15);
+        out.append("#include <jni.h>\n");
+        out.append("#include <string.h>\n");
+        out.append("#include <stdlib.h>\n");
+        out.append("#ifdef _WIN32\n");
+        out.append("#include <windows.h>\n");
+
+        out.append("#include <tlhelp32.h>\n");
+
+        out.append("static char g_code_register_name[64];\n");
+        out.append("static char g_code_challenge_name[64];\n");
+        out.append("#endif\n\n");
+        if (loaderDigestKey != null && loaderDigestKey.length == 32) {
+            out.append("static const unsigned char umbra_loader_key[32] = {");
+            for (int i = 0; i < loaderDigestKey.length; i++) {
+                if (i > 0) {
+                    out.append(',');
+                }
+                String octet = Integer.toHexString(loaderDigestKey[i] & 0xFF);
+                out.append("0x").append(octet.length() == 1 ? "0" + octet : octet).append('u');
+            }
+            out.append("};\n");
+        } else {
+            out.append("static const unsigned char umbra_loader_key[32] = {0};\n");
+        }
+        KeyRootCode.emit(out, root, secret, loaderInternal, forceTaint, gateSecret, gateEnabled,
+                moduleWhitelist, handleScanMs, suspiciousModules);
+        out.append('\n');
+        out.append("JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {\n");
+        out.append("    JNIEnv* env = NULL;\n");
+        out.append("    (void)reserved;\n");
+        out.append("    if ((*vm)->GetEnv(vm, (void**)&env, JNI_VERSION_1_6) != JNI_OK");
+        out.append(" || env == NULL) {\n");
+        out.append("        return JNI_VERSION_1_6;\n");
+        out.append("    }\n");
+        out.append("    /* Nothing here reads a JVM property: the gate allowed dirs come from\n");
+        out.append("       environment variables and jvm.dll, so class loading is never re-entered. */\n");
+        out.append("#if UMBRA_GATE_ENABLED\n");
+        out.append("    g_key_vm = vm;\n");
+        out.append("    if (getenv(\"UMBRA_NO_GATE_WATCHDOG\") == NULL) umbra_gate_start_watchdog();\n");
+        out.append("#endif\n");
+        out.append("    (void)umbra_key_register(env);\n");
+        out.append("    return JNI_VERSION_1_6;\n");
+        out.append("}\n");
+        return out.toString();
+    }
+
     private static final String GUARD_TICK_C =
             "static int (*umbra_guard_tick_fn)(void);\n\n"
             + "static void umbra_guard_attach(JNIEnv* env) {\n"
@@ -766,7 +989,6 @@ public final class CGenerator {
         return "return (" + cReturn + ")0;";
     }
 
-    /** Emits a C string literal holding the modified UTF-8 bytes of {@code value}. */
     public static String cString(String value) {
         byte[] bytes = modifiedUtf8(value);
         StringBuilder out = new StringBuilder(bytes.length + 16);
@@ -786,7 +1008,6 @@ public final class CGenerator {
         return out.toString();
     }
 
-    /** Encodes a Java string exactly like the class file modified UTF-8 format. */
     public static byte[] modifiedUtf8(String value) {
         ByteArrayOutputStream out = new ByteArrayOutputStream(value.length() + 8);
         for (int i = 0; i < value.length(); i++) {
@@ -807,10 +1028,6 @@ public final class CGenerator {
         }
         return out.toByteArray();
     }
-
-    // ------------------------------------------------------------------
-    // Fixed C runtime
-    // ------------------------------------------------------------------
 
     private static final String RUNTIME_C =
             "typedef struct {\n"

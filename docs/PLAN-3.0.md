@@ -1,14 +1,8 @@
 # Umbra 3.0 — overhaul plan
 
 Status: executed in this session. Baseline: Umbra 2.0.0 (build green: 245 classes,
-14 test suites, dist/umbra.jar 0.98 MB). References studied under
-`../混淆器/`: Zelix KlassMaster 27 (`zkm27.jar`,
-`ZelixKlassMaster-27-27.0.1/`), `BytecodeVM-2.2.3/`,
-`JNIC-Virtualization-main/`, `kboxObfuscator-3.0.3/`,
-`native-obfuscator-3.5.5r/`, `OpenPhantomShield-main/`, `OpenYCP-main/`,
-`Zipit/`. Reference material is design input only: no third-party code is
-copied into Umbra, no dependency is added, and no result is claimed without
-running it.
+14 test suites, dist/umbra.jar 0.98 MB). No dependency is added beyond the
+vendored ASM 9.11, and no result is claimed without running it.
 
 ## Product goal
 

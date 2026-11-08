@@ -81,6 +81,15 @@ YAML or a build plugin.
 - Reflection-aware keeps, annotation rules, framework presets and Minecraft
   adaptation; optional public API preservation.
 - Debug metadata erasure, member shuffling, junk members and watermarking.
+- **RSA-blind watermark**: the payload (build time, builder, customer id, seed)
+  is blinded with textbook RSA, encrypted with ChaCha20 and stored as an
+  `LDC`/`POP` pair behind four decoy `LineNumberTable` rows in three random
+  classes. Nothing readable reaches the artifact; `--trace-watermark` recovers it
+  with the private key only.
+- **Keyword and whitespace dictionaries**: `renamer.dictionary=keywords` names
+  members after Java keywords (`private`, `synchronized`, `goto`, `const`),
+  `spaces` uses `U+2000`..`U+200F`, and any custom character set is expanded with
+  a mixed-radix generator.
 
 ### Data and control flow
 - Per-site string encryption with **XOR / RC4 / ChaCha20 / AES-256-CTR /
@@ -93,6 +102,15 @@ YAML or a build plugin.
   transposition, bogus exception ranges, state-machine flattening with shuffled
   dispatchers, synthetic exception handlers, method splitting and wrapper
   indirection.
+- **Cross-class guard fields**: a guarded class reads its second predicate field
+  from a *different* protected class, so single-class constant propagation cannot
+  fold the pair (`flow.crossClass`, ~1200 sites on the demo).
+- **MBA predicates**: a four-term mixed-boolean-arithmetic identity
+  (`x&~y`, `x|y`, `x^y`, `~x&y` solved against `y*5` by Gaussian elimination)
+  compared through `DCMPL` (`flow.mbaPredicates`, ~500 sites).
+- **Entry shuffle**: every unused local slot is initialised to its default value
+  before a `GOTO` to the real entry, so the method head is a synthetic prologue
+  (`flow.entryShuffle`, opt-in).
 
 ### Virtualization
 - Custom stack-machine interpreter for eligible methods.
@@ -297,10 +315,31 @@ Full parameter tables, CI examples and troubleshooting: [plugins/README.md](plug
 | Gradle Shadow / Maven Shade | ✅ |
 
 Whole-archive class encryption, the startup integrity seal and the native guard
-launcher are flat-JAR constructs; on nested layouts they are skipped with an
-explicit warning instead of producing a broken archive. See
+launcher are flat-JAR constructs; on nested layouts they are refused (or skipped
+with an explicit warning when `classEncryption.allowSkip=true`) instead of
+producing a silently unsealed archive. See
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for the layout model and the
 tested input matrix.
+
+### Sealed libraries (no `main`)
+
+A library jar has no entry point, so the regular mode cannot start the loader.
+Build it with `classEncryption.libraryMode=true` (see
+[docs/LIBRARY-MODE.md](docs/LIBRARY-MODE.md)); the archive then keeps exactly one
+business-facing plaintext class, and the host opens it in one line:
+
+```java
+import io.umbra.bootstrap.UmbraLibrary;
+
+ClassLoader lib = UmbraLibrary.open(new File("lib-sealed.jar"));
+Class<?> util = lib.loadClass("com.example.Library");
+```
+
+The bootstrap holds no key material: the payload key stays derived from the
+native key root inside the sealed loader, so "bootstrap + ciphertext" is not
+enough to decrypt the library offline. (Library mode hands the loader to the
+host on purpose; a compromised host can hook it - see the security boundary in
+[docs/LIBRARY-MODE.md](docs/LIBRARY-MODE.md).)
 
 Protected artifacts have been exercised on JDK 8, 21 and 26; the tool itself
 runs on JDK 8.

@@ -101,7 +101,6 @@ public final class LicenseOnlineValidator {
         return value.replace("\\\"", "\"").replace("\\\\", "\\").replace("\\n", "\n");
     }
 
-    /** Online validation result. */
     public static final class Result {
         private final boolean valid;
         private final String reason;

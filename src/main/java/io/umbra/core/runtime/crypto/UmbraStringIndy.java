@@ -30,19 +30,18 @@ public final class UmbraStringIndy {
     private UmbraStringIndy() {
     }
 
-    /** String literal call site. */
     public static CallSite bootstrapString(MethodHandles.Lookup caller, String name, MethodType type,
                                            String packed, String classKeySpec, long siteSeed,
-                                           int siteId, int engine) throws Throwable {
+                                           int siteId) throws Throwable {
         String classKeyBase64 = null;
         if (classKeySpec != null && classKeySpec.length() > 0) {
-            // The lookup class is the class that contains this indy instruction,
-            // so it may read its own private synthetic key field.
+
             MethodHandle getter = caller.findStaticGetter(caller.lookupClass(), classKeySpec,
                     String.class);
             classKeyBase64 = (String) getter.invoke();
         }
-        String value = UmbraStringCipher.decode(packed, classKeyBase64, siteSeed, siteId, engine);
+
+        String value = UmbraStringCipher.decode(packed, classKeyBase64, siteSeed, siteId);
         MethodHandle constant = MethodHandles.constant(String.class, value);
         return new ConstantCallSite(constant.asType(type));
     }

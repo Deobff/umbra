@@ -16,18 +16,15 @@ public final class NoiseGenerator {
 
     private static final String ALPHABET =
             "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    /** Characters that are valid in a class-file UTF-8 string but invisible in editors. */
+
     private static final char[] INVISIBLE = {
             '\u200B', '\u200C', '\u200D', '\u2060', '\uFEFF', '\u00AD' };
-    /**
-     * Attribute names of other JVM tooling (Scala, Kotlin, GraalVM...). The JVM
-     * ignores them; analysts and decompilers waste time on them.
-     */
+
     private static final String[] TOOL_ATTRIBUTE_NAMES = {
             "ScalaSig", "TastyHeader", "Kotlin.Metadata", "ai-index", "SYMTAB",
             "Metalava", "jvm-metadata", "CompilerNotes", "Lambdas", "SourceInfo"
     };
-    /** Single-slot field descriptors: safe for any valid local-variable slot. */
+
     private static final String[] SINGLE_SLOT_DESCRIPTORS = {
             "I", "Z", "B", "C", "S", "F",
             "Ljava/lang/Object;", "Ljava/lang/String;", "Ljava/lang/Integer;",
@@ -55,7 +52,6 @@ public final class NoiseGenerator {
         return random.nextInt(100) < percent;
     }
 
-    /** Random alphanumeric tag. */
     public String tag(int minLength, int maxLength) {
         int length = minLength + nextInt(Math.max(1, maxLength - minLength + 1));
         StringBuilder out = new StringBuilder(length);
@@ -65,7 +61,6 @@ public final class NoiseGenerator {
         return out.toString();
     }
 
-    /** Attribute name: random garbage, a foreign-tool name or a plausible pseudo-name. */
     public String attributeName() {
         int pick = nextInt(10);
         if (pick < 5) {
@@ -77,12 +72,10 @@ public final class NoiseGenerator {
         return (chance(50) ? "ai." : "meta.") + tag(2, 6);
     }
 
-    /** Random payload whose length is at most {@code maxLength}. */
     public byte[] payload(int maxLength) {
         return bytes(maxLength <= 0 ? 0 : nextInt(maxLength + 1));
     }
 
-    /** Random payload of exactly {@code length} bytes. */
     public byte[] bytes(int length) {
         byte[] bytes = new byte[Math.max(0, length)];
         if (chance(50)) {
@@ -95,7 +88,6 @@ public final class NoiseGenerator {
         return bytes;
     }
 
-    /** A local-variable/parameter name with invisible suffix characters. */
     public String junkName() {
         StringBuilder out = new StringBuilder();
         out.append(chance(50) ? "l" : "var").append(tag(1, 4));
@@ -106,7 +98,6 @@ public final class NoiseGenerator {
         return out.toString();
     }
 
-    /** A parameter name that is not a legal Java identifier (legal in a class file). */
     public String weirdParameterName() {
         int pick = nextInt(4);
         if (pick == 0) {
@@ -122,15 +113,10 @@ public final class NoiseGenerator {
         return "\u200B" + tag(1, 3);
     }
 
-    /** A plausible but fictitious source file name. */
     public String sourceFile() {
         return tag(3, 10) + (chance(50) ? ".java" : ".kt");
     }
 
-    /**
-     * An oversized, deliberately truncated JSR-45 SMAP blob. The JVM stores it
-     * verbatim and only debuggers read it.
-     */
     public String sourceDebugExtension(int size) {
         int target = Math.max(96, size);
         StringBuilder out = new StringBuilder(target + 16);
@@ -141,12 +127,10 @@ public final class NoiseGenerator {
             out.append("+ ").append(line).append(' ').append(sourceFile()).append('\n');
             line += 1 + nextInt(7);
         }
-        // Truncate in the middle of a record and append non-printable bytes so
-        // naive SMAP parsers see an invalid, unfinished table.
+
         return out.substring(0, target - 13) + "\u0000\u0001trunc";
     }
 
-    /** Random line number including duplicates and extreme values. */
     public int lineNumber() {
         int pick = nextInt(10);
         if (pick == 0) {
@@ -158,37 +142,30 @@ public final class NoiseGenerator {
         return nextInt(65536);
     }
 
-    /** A valid single-slot descriptor for a local-variable row. */
     public String localDescriptor() {
         return SINGLE_SLOT_DESCRIPTORS[random.nextInt(SINGLE_SLOT_DESCRIPTORS.length)];
     }
 
-    /** Grammar-valid class signature with a type parameter referencing a missing class. */
     public String classSignature() {
         return "<T:L" + phantomClass() + ";>L" + phantomClass() + ";";
     }
 
-    /** Grammar-valid method signature; reflection fails to resolve the type variable/class. */
     public String methodSignature() {
         return "<T:L" + phantomClass() + ";>(TT;)TT;";
     }
 
-    /** Grammar-valid field signature referencing an undeclared type variable. */
     public String fieldSignature() {
         return "TT;";
     }
 
-    /** Internal name of a class that does not exist in the archive. */
     public String phantomClass() {
         return "noise/" + tag(2, 5) + "/" + tag(3, 7);
     }
 
-    /** Simple name of a class that does not exist in the archive. */
     public String phantomSimpleName() {
         return "N" + tag(3, 8);
     }
 
-    /** One of the always-resolvable JDK exception classes. */
     public String existingException() {
         return EXISTING_EXCEPTIONS[random.nextInt(EXISTING_EXCEPTIONS.length)];
     }

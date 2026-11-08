@@ -30,7 +30,6 @@ final class GuardDynamicCode {
     private GuardDynamicCode() {
     }
 
-    /** Emits feature defines, globals and the final quick/deep aggregators. */
     static void emitCommon(StringBuilder out, GuardFeatures features) {
         out.append("/* ---- Umbra 3.1 dynamic protection ---- */\n");
         define(out, "UMBRA_F_FRIDA", features.frida);
@@ -43,6 +42,8 @@ final class GuardDynamicCode {
         define(out, "UMBRA_F_HANDLE_DUMP", features.handleDump);
         define(out, "UMBRA_F_CODE_CRC", features.codeCrc);
         define(out, "UMBRA_F_PAGE_GUARD", features.pageGuard);
+        define(out, "UMBRA_F_TEXT_GUARD", features.textGuard);
+        define(out, "UMBRA_F_GUARD_PROBE", features.guardProbe);
         define(out, "UMBRA_F_LINUX", features.linuxChecks);
         define(out, "UMBRA_F_TEST_HOOKS", features.testHooks);
         out.append("#define UMBRA_WATCHDOG_MS ").append(Math.max(0L, features.watchdogMs))
@@ -57,16 +58,6 @@ final class GuardDynamicCode {
         out.append("#define ").append(name).append(' ').append(value ? 1 : 0).append('\n');
     }
 
-    /**
-     * Emits the randomized code-section sample table.
-     *
-     * <p>The table is an <b>exported data symbol</b>
-     * ({@code umbra_sample_table}) so the protection pass can fill in the
-     * random RVAs/bytes after the single guard compilation by patching the
-     * library file ({@link PeImage#withCodeSamples}). The compiled placeholder has
-     * {@code count = 0}; until the table is patched the runtime check is a no-op,
-     * so a failed patch can never produce a false positive.</p>
-     */
     static void emitCodeSamples(StringBuilder out, int count, int window, long magic) {
         int size = Math.max(1, Math.min(64, window));
         int slots = Math.max(1, Math.min(64, count));
@@ -86,9 +77,6 @@ final class GuardDynamicCode {
         out.append("    UMBRA_SAMPLE_MAGIC, 0, UMBRA_SAMPLE_WINDOW, {0}, {0}\n");
         out.append("};\n\n");
     }
-    // ------------------------------------------------------------------
-    // Windows
-    // ------------------------------------------------------------------
 
     static void windows(StringBuilder out, GuardFeatures features, GuardLiterals literals,
                         GuardImports imports) {
@@ -239,8 +227,7 @@ final class GuardDynamicCode {
         out.append("    }\n");
         out.append("    return 1;\n");
         out.append("}\n\n");
-        // PhantomShield CHECK_CODE_INTEGRITY: the guard hashes its own code section
-        // once at startup and re-reads it on every deep (watchdog) pass.
+
         out.append("/* ---- P1-6.1: guard code-section CRC readback (inline-patch detection) ---- */\n");
         out.append("static int umbra_code_pad(int value) __attribute__((used));\n");
         out.append("static int umbra_code_pad(int value) { return value + 1; }\n\n");
@@ -255,6 +242,8 @@ final class GuardDynamicCode {
         out.append("    }\n");
         out.append("    return crc;\n");
         out.append("}\n\n");
+        out.append("static int umbra_code_range_hit(const unsigned char* address, const unsigned char* base,\n");
+        out.append("        unsigned int virtual_address, unsigned int virtual_size);\n");
         out.append("static int umbra_code_range(unsigned char** start, unsigned long* length) {\n");
         out.append("    unsigned char* base = NULL;\n");
         out.append("    unsigned long long size = 0;\n");
@@ -279,15 +268,62 @@ final class GuardDynamicCode {
         out.append("        virtual_size = umbra_read_u32(section + 8);\n");
         out.append("        virtual_address = umbra_read_u32(section + 12);\n");
         out.append("        if (virtual_size == 0 || (unsigned long long)virtual_address + virtual_size > size) return 0;\n");
-        out.append("        *start = base + virtual_address;\n");
-        out.append("        *length = (unsigned long)virtual_size;\n");
-        out.append("        return 1;\n");
+        out.append("        /* Prefer the section that really contains the guard's own entry point:\n");
+        out.append("           with more than one code section (a merged .text/.rdata layout) the\n");
+        out.append("           first CNT_CODE section may be someone else's code. */\n");
+        out.append("        if (umbra_code_range_hit((const unsigned char*)&umbra_self_image, base,\n");
+        out.append("                virtual_address, virtual_size)) {\n");
+        out.append("            *start = base + virtual_address;\n");
+        out.append("            *length = (unsigned long)virtual_size;\n");
+        out.append("            return 1;\n");
+        out.append("        }\n");
+        out.append("        if (*start == NULL) {\n");
+        out.append("            *start = base + virtual_address;\n");
+        out.append("            *length = (unsigned long)virtual_size;\n");
+        out.append("        }\n");
         out.append("    }\n");
-        out.append("    return 0;\n");
+        out.append("    return *start != NULL ? 1 : 0;\n");
+        out.append("}\n\n");
+        out.append("static int umbra_code_range_hit(const unsigned char* address, const unsigned char* base,\n");
+        out.append("        unsigned int virtual_address, unsigned int virtual_size) {\n");
+        out.append("    const unsigned char* start = base + virtual_address;\n");
+        out.append("    return address >= start && address < start + virtual_size ? 1 : 0;\n");
         out.append("}\n\n");
         out.append("static unsigned char* g_code_crc_start;\n");
         out.append("static unsigned long g_code_crc_length;\n");
         out.append("static unsigned int g_code_crc;\n");
+
+        out.append("#define UMBRA_CRC_SEGMENTS 8\n");
+        out.append("static unsigned long g_code_segment_length;\n");
+        out.append("static unsigned int g_code_segment_crc[UMBRA_CRC_SEGMENTS];\n\n");
+        out.append("static void umbra_code_crc_segments(void) {\n");
+        out.append("    unsigned long index;\n");
+        out.append("    if (g_code_crc_start == NULL || g_code_crc_length == 0) return;\n");
+        out.append("    g_code_segment_length = (g_code_crc_length + UMBRA_CRC_SEGMENTS - 1)\n");
+        out.append("            / UMBRA_CRC_SEGMENTS;\n");
+        out.append("    for (index = 0; index < UMBRA_CRC_SEGMENTS; index++) {\n");
+        out.append("        unsigned long offset = index * g_code_segment_length;\n");
+        out.append("        unsigned long length = g_code_segment_length;\n");
+        out.append("        if (offset >= g_code_crc_length) { g_code_segment_crc[index] = 0; continue; }\n");
+        out.append("        if (offset + length > g_code_crc_length) length = g_code_crc_length - offset;\n");
+        out.append("        g_code_segment_crc[index] = umbra_crc32(0xFFFFFFFFU,\n");
+        out.append("                g_code_crc_start + offset, length);\n");
+        out.append("    }\n");
+        out.append("}\n\n");
+        out.append("static int umbra_code_crc_segments_ok(void) {\n");
+        out.append("    unsigned long index;\n");
+        out.append("    if (g_code_crc_start == NULL || g_code_crc_length == 0) return 1;\n");
+        out.append("    if (g_code_segment_length == 0) return 0;\n");
+        out.append("    for (index = 0; index < UMBRA_CRC_SEGMENTS; index++) {\n");
+        out.append("        unsigned long offset = index * g_code_segment_length;\n");
+        out.append("        unsigned long length = g_code_segment_length;\n");
+        out.append("        if (offset >= g_code_crc_length) continue;\n");
+        out.append("        if (offset + length > g_code_crc_length) length = g_code_crc_length - offset;\n");
+        out.append("        if (umbra_crc32(0xFFFFFFFFU, g_code_crc_start + offset, length)\n");
+        out.append("                != g_code_segment_crc[index]) return 0;\n");
+        out.append("    }\n");
+        out.append("    return 1;\n");
+        out.append("}\n\n");
         out.append("static void umbra_code_crc_baseline(void) {\n");
         out.append("    unsigned char* start = NULL;\n");
         out.append("    unsigned long length = 0;\n");
@@ -296,13 +332,14 @@ final class GuardDynamicCode {
         out.append("    g_code_crc_start = start;\n");
         out.append("    g_code_crc_length = length;\n");
         out.append("    g_code_crc = umbra_crc32(0xFFFFFFFFU, start, length);\n");
+        out.append("    umbra_code_crc_segments();\n");
         out.append("}\n");
         out.append("static int umbra_code_crc_ok(void) {\n");
         out.append("    if (!UMBRA_F_CODE_CRC || g_code_crc_start == NULL || g_code_crc_length == 0) return 1;\n");
+        out.append("    if (!umbra_code_crc_segments_ok()) return 0;\n");
         out.append("    return umbra_crc32(0xFFFFFFFFU, g_code_crc_start, g_code_crc_length) == g_code_crc ? 1 : 0;\n");
         out.append("}\n\n");
-        // PhantomShield CHECK_PROTECTION: a guard-owned page is rotated between
-        // readable and non-readable and its protection state is verified.
+
         out.append("/* ---- P1-6.2: guard data-page protection rotation / anti-dump ---- */\n");
         out.append("static unsigned char umbra_sealed_page[4096] __attribute__((aligned(4096)));\n");
         out.append("static volatile long g_page_lock;\n");
@@ -352,6 +389,117 @@ final class GuardDynamicCode {
         out.append("    InterlockedExchange((volatile LONG*)&g_page_lock, 0);\n");
         out.append("    return ok ? 0 : 1;\n");
         out.append("}\n\n");
+
+        out.append("/* ---- P6-1: own code-page protection baseline ---- */\n");
+        out.append("/* An inline patcher has to lift the write protection of .text first, whatever\n");
+        out.append("   API it uses (VirtualProtect, NtProtectVirtualMemory, a kernel helper). The\n");
+        out.append("   steady-state protection of every code section is measured once the image is\n");
+        out.append("   loaded - never assumed, because the loader maps pages WRITECOPY first - and\n");
+        out.append("   compared on every check. A page that became writable or lost its guard flag\n");
+        out.append("   is the trace of that unprotect call. */\n");
+        out.append("#define UMBRA_TEXT_SLOTS 8\n");
+        out.append("static unsigned char* g_text_base;\n");
+        out.append("static unsigned int g_text_va[UMBRA_TEXT_SLOTS];\n");
+        out.append("static unsigned long g_text_protect[UMBRA_TEXT_SLOTS];\n");
+        out.append("static int g_text_count;\n\n");
+        out.append("static int umbra_text_sections(unsigned char* base, unsigned long long size,\n");
+        out.append("        unsigned int* rva, int capacity) {\n");
+        out.append("    unsigned int pe;\n");
+        out.append("    unsigned short sections;\n");
+        out.append("    unsigned short optional_size;\n");
+        out.append("    unsigned char* section;\n");
+        out.append("    int count = 0;\n");
+        out.append("    int i;\n");
+        out.append("    if (base == NULL || size < 0x100) return 0;\n");
+        out.append("    if (base[0] != 'M' || base[1] != 'Z') return 0;\n");
+        out.append("    pe = umbra_read_u32(base + 0x3C);\n");
+        out.append("    if (pe <= 0 || (unsigned long long)pe + 24ULL >= size) return 0;\n");
+        out.append("    if (umbra_read_u32(base + pe) != 0x00004550UL) return 0;\n");
+        out.append("    sections = umbra_read_u16(base + pe + 6);\n");
+        out.append("    optional_size = umbra_read_u16(base + pe + 20);\n");
+        out.append("    section = base + pe + 24 + optional_size;\n");
+        out.append("    for (i = 0; i < (int)sections && count < capacity; i++, section += 40) {\n");
+        out.append("        unsigned int characteristics = umbra_read_u32(section + 36);\n");
+        out.append("        unsigned int virtual_size = umbra_read_u32(section + 8);\n");
+        out.append("        unsigned int virtual_address = umbra_read_u32(section + 12);\n");
+        out.append("        if ((characteristics & 0x20UL /*IMAGE_SCN_CNT_CODE*/) == 0) continue;\n");
+        out.append("        if (virtual_size == 0) continue;\n");
+        out.append("        if ((unsigned long long)virtual_address + virtual_size > size) continue;\n");
+        out.append("        rva[count++] = virtual_address;\n");
+        out.append("    }\n");
+        out.append("    return count;\n");
+        out.append("}\n\n");
+        out.append("static void umbra_text_baseline(void) {\n");
+        out.append("    unsigned char* base = NULL;\n");
+        out.append("    unsigned long long size = 0;\n");
+        out.append("    MEMORY_BASIC_INFORMATION info;\n");
+        out.append("    int i;\n");
+        out.append("    g_text_count = 0;\n");
+        out.append("    if (!UMBRA_F_TEXT_GUARD) return;\n");
+        out.append("    if (!umbra_self_image(&base, &size) || base == NULL) return;\n");
+        out.append("    g_text_count = umbra_text_sections(base, size, g_text_va, UMBRA_TEXT_SLOTS);\n");
+        out.append("    g_text_base = base;\n");
+        out.append("    for (i = 0; i < g_text_count; i++) {\n");
+        out.append("        if (VirtualQuery(base + g_text_va[i], &info, sizeof(info)) == 0\n");
+        out.append("                || info.State != MEM_COMMIT) {\n");
+        out.append("            g_text_count = 0;\n");
+        out.append("            return;\n");
+        out.append("        }\n");
+        out.append("        g_text_protect[i] = (unsigned long)info.Protect;\n");
+        out.append("    }\n");
+        out.append("}\n\n");
+        out.append("static int umbra_text_protection_ok(void) {\n");
+        out.append("    MEMORY_BASIC_INFORMATION info;\n");
+        out.append("    int i;\n");
+        out.append("    if (!UMBRA_F_TEXT_GUARD || g_text_base == NULL || g_text_count <= 0) return 1;\n");
+        out.append("    for (i = 0; i < g_text_count; i++) {\n");
+        out.append("        if (VirtualQuery(g_text_base + g_text_va[i], &info, sizeof(info)) == 0) return 0;\n");
+        out.append("        if (info.State != MEM_COMMIT) return 0;\n");
+        out.append("        if ((unsigned long)info.Protect != g_text_protect[i]) return 0;\n");
+        out.append("    }\n");
+        out.append("    return 1;\n");
+        out.append("}\n\n");
+
+        out.append("/* ---- P6-2: PAGE_GUARD probe page ---- */\n");
+        out.append("/* A guard-owned page is sealed with PAGE_GUARD once. Reading it clears the\n");
+        out.append("   guard bit, and an unpacker that walks the image to make it readable does\n");
+        out.append("   exactly that; the check only queries the state, it never touches the page. */\n");
+        out.append("/* The probe page is a private allocation, never a page of our own image:\n");
+        out.append("   a guard flag inside the image would trip the image-protection scan. */\n");
+        out.append("static unsigned char* g_guard_probe_page;\n");
+        out.append("static unsigned long g_guard_probe_size;\n");
+        out.append("static unsigned long g_guard_protect;\n\n");
+        out.append("static void umbra_guard_probe_baseline(void) {\n");
+        out.append("    unsigned long old = 0;\n");
+        out.append("    MEMORY_BASIC_INFORMATION info;\n");
+        out.append("    if (!UMBRA_F_GUARD_PROBE) return;\n");
+        out.append("    if (g_guard_probe_page == NULL) {\n");
+        out.append("        g_guard_probe_page = (unsigned char*)VirtualAlloc(NULL, 4096,\n");
+        out.append("                MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);\n");
+        out.append("        if (g_guard_probe_page == NULL) return;\n");
+        out.append("        g_guard_probe_size = 4096;\n");
+        out.append("        g_guard_probe_page[0] = 0x5A;\n");
+        out.append("    }\n");
+        out.append("    if (!VirtualProtect(g_guard_probe_page, g_guard_probe_size,\n");
+        out.append("            PAGE_READWRITE, &old)) return;\n");
+        out.append("    if (!VirtualProtect(g_guard_probe_page, g_guard_probe_size,\n");
+        out.append("            PAGE_READWRITE | PAGE_GUARD, &old)) return;\n");
+        out.append("    if (VirtualQuery(g_guard_probe_page, &info, sizeof(info)) == 0) return;\n");
+        out.append("    if ((info.Protect & PAGE_GUARD) == 0) return;\n");
+        out.append("    g_guard_protect = (unsigned long)info.Protect;\n");
+        out.append("}\n\n");
+        out.append("static int umbra_guard_probe_intact(void) {\n");
+        out.append("    MEMORY_BASIC_INFORMATION info;\n");
+        out.append("    if (!UMBRA_F_GUARD_PROBE || g_guard_protect == 0 || g_guard_probe_page == NULL) {\n");
+        out.append("        return 1;\n");
+        out.append("    }\n");
+        out.append("    if (VirtualQuery(g_guard_probe_page, &info, sizeof(info)) == 0) return 0;\n");
+        out.append("    if (info.State != MEM_COMMIT) return 0;\n");
+        out.append("    if ((info.Protect & PAGE_GUARD) == 0) return 0;\n");
+        out.append("    if ((unsigned long)info.Protect != g_guard_protect) return 0;\n");
+        out.append("    return 1;\n");
+        out.append("}\n\n");
+
         out.append("typedef long (__stdcall *umbra_nt_query_thread)(void*, int, void*, unsigned long, unsigned long*);\n");
         out.append("static umbra_nt_query_thread umbra_nt_query_thread_get(void) {\n");
         out.append("    static umbra_nt_query_thread query;\n");
@@ -669,6 +817,7 @@ final class GuardDynamicCode {
         out.append("    if (UMBRA_F_HANDLE_DUMP && umbra_handle_dump()) mask |= UMBRA_DETECT_HANDLE_DUMP;\n");
         out.append("    if (!umbra_code_crc_ok()) mask |= UMBRA_DETECT_CODE_CRC;\n");
         out.append("    if (umbra_page_rotation()) mask |= UMBRA_DETECT_PAGE_GUARD;\n");
+        out.append("    if (!umbra_guard_probe_intact()) mask |= UMBRA_DETECT_GUARD_PROBE;\n");
         out.append("    return mask;\n");
         out.append("}\n\n");
         out.append("static int umbra_detect_quick(void) {\n");
@@ -676,6 +825,7 @@ final class GuardDynamicCode {
         out.append("    if (UMBRA_F_TIMING && umbra_timing_drift()) mask |= UMBRA_DETECT_TIMING;\n");
         out.append("    if (!umbra_code_samples_ok()) mask |= UMBRA_DETECT_CODE_SAMPLE;\n");
         out.append("    if (!umbra_image_protection_ok()) mask |= UMBRA_DETECT_IMAGE_BP;\n");
+        out.append("    if (!umbra_text_protection_ok()) mask |= UMBRA_DETECT_TEXT_RWX;\n");
         out.append("    return mask;\n");
         out.append("}\n\n");
         out.append("static int umbra_detect_all(void) {\n");
@@ -687,6 +837,8 @@ final class GuardDynamicCode {
         out.append("    umbra_capture_exec_baseline();\n");
         out.append("    umbra_code_crc_baseline();\n");
         out.append("    umbra_page_baseline();\n");
+        out.append("    umbra_text_baseline();\n");
+        out.append("    umbra_guard_probe_baseline();\n");
         out.append("}\n\n");
         if (features.testHooks && features.testHookClass != null) {
             appendWindowsTestHooks(out, features);
@@ -809,12 +961,37 @@ final class GuardDynamicCode {
         out.append("    (void)env; (void)cls;\n");
         out.append("    return (jint)((((unsigned long long)(void*)umbra_sealed_page) & 0xFFFULL) == 0ULL ? 1 : 0);\n");
         out.append("}\n\n");
+
+        out.append("static jint JNICALL umbra_hook_testTextGuard").append("(JNIEnv* env, jclass cls) {\n");
+        out.append("    (void)env; (void)cls;\n");
+        out.append("    return (jint)(umbra_text_protection_ok() ? 0 : 1);\n");
+        out.append("}\n\n");
+        out.append("static jint JNICALL umbra_hook_testTamperText").append("(JNIEnv* env, jclass cls) {\n");
+        out.append("    unsigned long old = 0;\n");
+        out.append("    (void)env; (void)cls;\n");
+        out.append("    /* Simulates an inline patcher that has to unprotect .text first. */\n");
+        out.append("    if (g_text_base == NULL || g_text_count <= 0) return 0;\n");
+        out.append("    return (jint)(VirtualProtect(g_text_base + g_text_va[0], 4096,\n");
+        out.append("            PAGE_EXECUTE_READWRITE, &old) ? 1 : 0);\n");
+        out.append("}\n\n");
+        out.append("static jint JNICALL umbra_hook_testGuardProbe").append("(JNIEnv* env, jclass cls) {\n");
+        out.append("    (void)env; (void)cls;\n");
+        out.append("    return (jint)(umbra_guard_probe_intact() ? 0 : 1);\n");
+        out.append("}\n\n");
+        out.append("static jint JNICALL umbra_hook_testTamperProbe").append("(JNIEnv* env, jclass cls) {\n");
+        out.append("    unsigned long old = 0;\n");
+        out.append("    (void)env; (void)cls;\n");
+        out.append("    /* Simulates a memory walker that makes our probe page readable. */\n");
+        out.append("    if (g_guard_probe_page == NULL || g_guard_probe_size == 0) return 0;\n");
+        out.append("    return (jint)(VirtualProtect(g_guard_probe_page, g_guard_probe_size,\n");
+        out.append("            PAGE_READWRITE, &old) ? 1 : 0);\n");
+        out.append("}\n\n");
+        out.append("static jint JNICALL umbra_hook_testCodeSegments").append("(JNIEnv* env, jclass cls) {\n");
+        out.append("    (void)env; (void)cls;\n");
+        out.append("    return (jint)UMBRA_CRC_SEGMENTS;\n");
+        out.append("}\n\n");
         out.append("/* test hook prefix: ").append(prefix).append(" */\n");
     }
-
-    // ------------------------------------------------------------------
-    // Linux (best effort; never compiled on Windows)
-    // ------------------------------------------------------------------
 
     static void linux(StringBuilder out, GuardFeatures features, GuardLiterals literals) {
         out.append("static int umbra_read_text_file(const char* path, char* buffer, int capacity) {\n");
@@ -911,10 +1088,6 @@ final class GuardDynamicCode {
             out.append("/* Linux test hooks are not emitted: dynamic simulations require Windows. */\n");
         }
     }
-
-    // ------------------------------------------------------------------
-    // Other platforms: keep the library loadable, no dynamic checks
-    // ------------------------------------------------------------------
 
     static void portable(StringBuilder out) {
         out.append("static int umbra_classic_marker(void) { return 0; }\n");

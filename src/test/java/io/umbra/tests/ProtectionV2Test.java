@@ -83,7 +83,6 @@ public final class ProtectionV2Test {
 
     private static final long SEED = 424242L;
 
-    /** String literals of the demo program that must never survive encryption. */
     private static final String[] DEMO_LITERALS = {
             "Hello, Umbra!", "logic broken", "self-check failed: ",
             "reflective static method invoke", "sum=", "caught: "
@@ -137,10 +136,6 @@ public final class ProtectionV2Test {
         System.out.println("ProtectionV2Test: " + checks + " checks passed");
     }
 
-    // ------------------------------------------------------------------
-    // String engine v2
-    // ------------------------------------------------------------------
-
     private static void testStringEngines() throws Exception {
         Path demo = demoJar();
         if (demo == null) {
@@ -166,7 +161,6 @@ public final class ProtectionV2Test {
                     findPlaintext(result, DEMO_LITERALS).isEmpty());
         }
 
-        // Determinism: same seed -> byte identical classes, different seed -> not.
         Protected first = protect(demo, SEED, options("string.strength", "3"), new StringEncryptionPass());
         Protected repeat = protect(demo, SEED, options("string.strength", "3"), new StringEncryptionPass());
         Protected other = protect(demo, SEED + 1, options("string.strength", "3"),
@@ -202,7 +196,6 @@ public final class ProtectionV2Test {
         check("auto: demo prints OK", runsOk(auto.jar));
         check("auto: no plaintext literals left", findPlaintext(auto, DEMO_LITERALS).isEmpty());
 
-        // encryptAll must cover literals that the default minimum length skips.
         Protected shortOnly = protect(demo, SEED, options("string.strength", "1"),
                 new StringEncryptionPass());
         Protected all = protect(demo, SEED,
@@ -212,7 +205,6 @@ public final class ProtectionV2Test {
                 stat(all, "strings.encrypted") > stat(shortOnly, "strings.encrypted"));
         check("encryptAll: output still runs", runsOk(all.jar));
 
-        // Explicit engine order including the xor engine must mix all five.
         Protected order = protect(demo, SEED,
                 options("string.strength", "2", "string.engine", "auto",
                         "string.engineOrder", "xor,rc4,chacha20,aes-ctr,speck"),
@@ -223,10 +215,6 @@ public final class ProtectionV2Test {
         verify(order, "string engineOrder");
         check("engineOrder: demo prints OK", runsOk(order.jar));
     }
-
-    // ------------------------------------------------------------------
-    // Type confusion
-    // ------------------------------------------------------------------
 
     private static void testTypeConfusion() throws Exception {
         Path demo = demoJar();
@@ -251,7 +239,6 @@ public final class ProtectionV2Test {
             check("type-confusion: same seed deterministic",
                     level2.fingerprint().equals(repeat.fingerprint()));
 
-            // Constructors and <clinit> are never replaced by carriers.
             ClassNode checks = level2.classNode("demo/Checks");
             check("type-confusion: Checks still has its original constructor",
                     hasMethod(checks, "<init>", "()V"));
@@ -301,10 +288,6 @@ public final class ProtectionV2Test {
                 syn2.fingerprint().equals(syn2repeat.fingerprint()));
     }
 
-    // ------------------------------------------------------------------
-    // Flow v2
-    // ------------------------------------------------------------------
-
     private static void testFlowV2() throws Exception {
         Path demo = demoJar();
         if (demo == null) {
@@ -335,7 +318,6 @@ public final class ProtectionV2Test {
         check("flow-v2: different seed changes output",
                 !flow.fingerprint().equals(other.fingerprint()));
 
-        // Levels 1..3 behaviour must be untouched: normal level still works.
         Protected normal = protect(demo, SEED, options("flow.level", "normal"),
                 new FlowObfuscationPass());
         check("flow-v2: normal level still injects junk", stat(normal, "flow.junkBlocks") > 0);
@@ -343,10 +325,6 @@ public final class ProtectionV2Test {
                 stat(normal, "flow.transposed") == 0 && stat(normal, "flow.bogusRanges") == 0);
         check("flow-v2: normal level demo prints OK", runsOk(normal.jar));
     }
-
-    // ------------------------------------------------------------------
-    // Reflection gate
-    // ------------------------------------------------------------------
 
     private static void testReflectionGate() throws Exception {
         Path gate = syntheticProgram("rg",
@@ -398,7 +376,6 @@ public final class ProtectionV2Test {
         check(allowed.contains("OK:41"), "reflection-gate(allow): allow-listed caller succeeds",
                 allowed);
 
-        // Default (pass disabled) must not run the gate at all.
         Protected off = protect(gate, SEED, options("reflectionGate.enabled", "false"),
                 new ReflectionGatePass());
         check("reflection-gate: disabled pass rewrites nothing",
@@ -415,10 +392,6 @@ public final class ProtectionV2Test {
             verify(demoGate, "reflection-gate demo");
         }
     }
-
-    // ------------------------------------------------------------------
-    // Decompiler noise level 4
-    // ------------------------------------------------------------------
 
     private static void testDecompilerNoiseLevel4() throws Exception {
         Path demo = demoJar();
@@ -447,14 +420,15 @@ public final class ProtectionV2Test {
                 "C:\\Program Files\\Java\\jdk-26.0.1\\bin\\java.exe",
                 "C:\\Program Files\\Zulu\\zulu-21\\bin\\java.exe"
         }) {
-            if (!Files.exists(Paths.get(candidate))) {
+            // A truncated install leaves a zero-byte java.exe behind: it exists but
+            // cannot be executed, so launching it fails with Win32 error 193.
+            if (!Files.exists(Paths.get(candidate)) || Files.size(Paths.get(candidate)) == 0L) {
                 continue;
             }
             String output = runWith(candidate, level4.jar);
             check("noise-level4: demo prints OK on " + candidate, output.contains("OK"));
         }
 
-        // CFR evidence: level 4 must degrade decompilation at least as much as 3.
         Path cfr = projectRoot() == null ? null
                 : projectRoot().resolve("qa").resolve("tools").resolve("cfr-0.152.jar");
         if (cfr != null && Files.exists(cfr)) {
@@ -471,10 +445,6 @@ public final class ProtectionV2Test {
                     + "skipping decompiler evidence");
         }
     }
-
-    // ------------------------------------------------------------------
-    // Combined pipeline
-    // ------------------------------------------------------------------
 
     private static void testCombinedPipeline() throws Exception {
         Path demo = demoJar();
@@ -510,7 +480,6 @@ public final class ProtectionV2Test {
         check("combined: same seed deterministic",
                 first.fingerprint().equals(second.fingerprint()));
 
-        // Read back: the protected archive must contain the injected helpers.
         List<String> names = entryNames(first.jar);
         boolean hasRuntimeHelper = false;
         for (String name : names) {
@@ -521,17 +490,6 @@ public final class ProtectionV2Test {
         check("combined: injected runtime helpers present", hasRuntimeHelper);
     }
 
-    // ------------------------------------------------------------------
-    // Regression: method code-size stays under the 64KB JVM limit
-    // ------------------------------------------------------------------
-
-    /**
-     * A method whose 3000 string literals would push its code size far beyond
-     * the 65535-byte JVM limit if every site were encrypted. The pass must bound
-     * the rewrite, leave the remaining literals alone and still produce a valid,
-     * runnable class instead of failing the whole run with
-     * {@code MethodTooLargeException}.
-     */
     private static void testNearLimitStringMethod() throws Exception {
         ClassNode main = new ClassNode();
         main.version = Opcodes.V1_8;
@@ -583,7 +541,7 @@ public final class ProtectionV2Test {
         Path jar = directory.resolve("limit.jar");
         writeAsmJar(jar, Arrays.asList(main, nearLimit), "limit/Main");
         Protected result = protect(jar, SEED,
-                options("string.strength", "3", "string.engine", "chacha20"), 
+                options("string.strength", "3", "string.engine", "chacha20"),
                 new StringEncryptionPass());
         long encrypted = stat(result, "strings.encrypted");
         check("near-limit: encrypted some literals", encrypted > 0);
@@ -599,16 +557,6 @@ public final class ProtectionV2Test {
         deleteRecursively(directory);
     }
 
-    // ------------------------------------------------------------------
-    // Regression: modern class-file shapes (records/sealed/condy) survive
-    // ------------------------------------------------------------------
-
-    /**
-     * Java 17 record/sealed metadata and {@code CONSTANT_Dynamic} operands must
-     * survive the body passes untouched (the JDK 8 test JVM cannot load version
-     * 61 classes, so this is a byte-shape regression: the attributes and the
-     * condy operand are asserted on the serialized class files).
-     */
     private static void testModernClassShapes() throws Exception {
         ClassNode condy = new ClassNode();
         condy.version = Opcodes.V11;
@@ -774,11 +722,6 @@ public final class ProtectionV2Test {
                         && sealedBack.permittedSubclasses.contains("modern/Rec"));
     }
 
-    // ------------------------------------------------------------------
-    // Protection harness
-    // ------------------------------------------------------------------
-
-    /** One protected output: real JAR, statistics, class bytes for inspection. */
     private static final class Protected {
         private Path jar;
         private Path directory;
@@ -806,7 +749,6 @@ public final class ProtectionV2Test {
         }
     }
 
-    /** Writes ASM-built classes into a runnable JAR (used by shape regressions). */
     private static void writeAsmJar(Path jar, List<ClassNode> classes, String mainClass)
             throws Exception {
         Manifest manifest = new Manifest();
@@ -825,7 +767,6 @@ public final class ProtectionV2Test {
         }
     }
 
-    /** Hand-built PassContext for direct pass-level shape regressions. */
     private static PassContext passContext(UmbraConfig config, Stats stats, String salt,
                                            ClassNode... nodes) {
         ClassPool pool = new ClassPool();
@@ -868,7 +809,7 @@ public final class ProtectionV2Test {
         Log log = new Log(new Log.Sink() {
             @Override
             public void line(String level, String message) {
-                // Quiet unless a check fails; diagnostics are printed explicitly.
+
             }
         }, false);
         PassContext context = new PassContext(builder.build(), program.pool, program.hierarchy,
@@ -900,7 +841,6 @@ public final class ProtectionV2Test {
         return result;
     }
 
-    /** Loaded program: pool + hierarchy + manifest/resources, independent per run. */
     private static final class Program {
         private ClassPool pool = new ClassPool();
         private Hierarchy hierarchy = new Hierarchy();
@@ -968,10 +908,6 @@ public final class ProtectionV2Test {
             }
         }
     }
-
-    // ------------------------------------------------------------------
-    // Checks and tools
-    // ------------------------------------------------------------------
 
     private static void verify(Protected result, String phase) throws Exception {
         List<String> problems = UmbraVerifier.verify(result.jar);
@@ -1042,7 +978,6 @@ public final class ProtectionV2Test {
         }
     }
 
-    /** Finds plaintext demo literals that survived in string constants. */
     private static List<String> findPlaintext(Protected result, String[] needles) {
         List<String> found = new ArrayList<String>();
         for (Map.Entry<String, byte[]> entry : result.classBytes.entrySet()) {
@@ -1127,7 +1062,6 @@ public final class ProtectionV2Test {
         }
     }
 
-    /** SHA-256 over sorted class entries: ignores archive timestamps/compression. */
     private static String classFingerprint(Path jar) throws Exception {
         Map<String, byte[]> classes = new LinkedHashMap<String, byte[]>();
         readClasses(jar, classes);
@@ -1164,15 +1098,6 @@ public final class ProtectionV2Test {
         return pairs;
     }
 
-    // ------------------------------------------------------------------
-    // Synthetic programs
-    // ------------------------------------------------------------------
-
-    /**
-     * Compiles the given Java sources and packs the produced classes into a JAR.
-     * The {@code Main-Class} manifest attribute is the class whose source
-     * declares {@code public static void main}.
-     */
     private static Path syntheticProgram(String packageName, String... sources) throws Exception {
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         if (compiler == null) {
@@ -1237,7 +1162,6 @@ public final class ProtectionV2Test {
         return jar;
     }
 
-    /** Extracts the name of the public top-level type declared by a source text. */
     private static String declaredClassName(String source) {
         String[] markers = { "public final class ", "public class ", "public final enum ",
                 "public enum ", "public interface " };
@@ -1257,10 +1181,6 @@ public final class ProtectionV2Test {
         }
         throw new IllegalArgumentException("cannot find the declared type name in source");
     }
-
-    // ------------------------------------------------------------------
-    // Environment
-    // ------------------------------------------------------------------
 
     private static Path projectRoot() {
         Path candidate = Paths.get(System.getProperty("user.dir")).toAbsolutePath();
@@ -1313,7 +1233,6 @@ public final class ProtectionV2Test {
         }
     }
 
-    /** Convenience overload for the message-first call style used in this suite. */
     private static void check(String message, boolean condition) {
         check(condition, message);
     }
@@ -1325,7 +1244,6 @@ public final class ProtectionV2Test {
         }
     }
 
-    /** Fails loudly instead of hanging forever if transformed code loops. */
     private static void startWatchdog() {
         final long timeout = Long.parseLong(
                 System.getProperty("umbra.protection2.watchdog", "420000"));

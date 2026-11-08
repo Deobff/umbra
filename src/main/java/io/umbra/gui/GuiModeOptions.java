@@ -22,7 +22,6 @@ import java.util.Set;
  */
 public final class GuiModeOptions {
 
-    /** Control kind rendered by the dialog. */
     public enum Kind {
         BOOL,
         INT,
@@ -30,7 +29,6 @@ public final class GuiModeOptions {
         TEXT
     }
 
-    /** One selectable row of the mode-options dialog. */
     public static final class Spec {
         public final String id;
         public final String label;
@@ -57,13 +55,11 @@ public final class GuiModeOptions {
             this.hint = hint == null ? "" : hint;
         }
 
-        /** True when the value is stored only in the GUI (no engine option key). */
         public boolean uiOnly() {
             return key == null;
         }
     }
 
-    /** A titled group of specs. */
     public static final class Group {
         public final String title;
         public final List<Spec> specs;
@@ -86,6 +82,7 @@ public final class GuiModeOptions {
                 bool("renamer.renameClasses", "Rename classes", "renamer.renameClasses", true),
                 bool("renamer.renameMethods", "Rename methods", "renamer.renameMethods", true),
                 bool("renamer.renameFields", "Rename fields", "renamer.renameFields", true),
+        bool("renamer.records", "Rename record components", "renamer.records", false),
                 bool("renamer.repackage", "Repackage classes", "renamer.repackage", true),
                 text("renamer.prefix", "Name prefix", "renamer.prefix", ""),
                 text("renamer.dictionary", "Identifier dictionary", "renamer.dictionary",
@@ -112,6 +109,8 @@ public final class GuiModeOptions {
                 bool("string.stackTraceHide", "Hide stack traces",
                         "string.stackTraceHide", true),
                 bool("string.encryptAll", "Encrypt all strings", "string.encryptAll", false),
+                bool("string.allowKeylessFallback", "Allow keyless tier",
+                        "string.allowKeylessFallback", false),
                 text("string.engineOrder", "Engine order (auto)", "string.engineOrder",
                         "chacha20,aes-ctr,rc4,speck")));
 
@@ -137,7 +136,16 @@ public final class GuiModeOptions {
                 bool("flow.aggressive", "Aggressive flow", "flow.aggressive", false),
                 bool("flow.transpose", "Transpose blocks", "flow.transpose", false),
                 bool("flow.bogusRanges", "Bogus exception ranges", "flow.bogusRanges", false),
-                integer("flow.maxBlocks", "Max blocks", "flow.maxBlocks", 512, 32, 4096, 32)));
+                integer("flow.maxBlocks", "Max blocks", "flow.maxBlocks", 512, 32, 4096, 32),
+                bool("flow.crossClass", "Cross-class guard fields", "flow.crossClass", true),
+                bool("flow.mbaPredicates", "MBA opaque predicates", "flow.mbaPredicates", true),
+                bool("flow.entryShuffle", "Entry shuffle", "flow.entryShuffle", false),
+                bool("flow.bogusPops", "Bogus stack pops (experimental)",
+                        "flow.bogusPops", false),
+                bool("flow.irreducible", "Irreducible edges", "flow.irreducible", true),
+                bool("flow.reorder", "Reorder blocks", "flow.reorder", false),
+                integer("flow.tablePairs", "Runtime table pairs", "flow.tablePairs",
+                        256, 16, 1024, 16)));
 
         groups.add(group("Exceptions",
                 bool("exceptionObfuscation.enabled", "Exception obfuscation",
@@ -161,6 +169,10 @@ public final class GuiModeOptions {
                 integer("vm2.holders", "Payload holders", "vm2.holders", 2, 1, 8, 1),
                 bool("vm2.constructors", "Constructor bodies", "vm2.constructors", false),
                 bool("vm2.indy", "Indy bridges", "vm2.indy", true),
+                bool("vm2.semanticCodes", "Per-payload opcodes", "vm2.semanticCodes", true),
+                bool("vm2.localCallIds", "Local call ids", "vm2.localCallIds", true),
+                bool("vm2.perPayloadOpcodes", "Per-payload dispatch",
+                        "vm2.perPayloadOpcodes", true),
                 bool("nocturne.enabled", "Nocturne engine", "nocturne.enabled", false),
                 bool("nocturne.compatible", "Nocturne compatible mode",
                         "nocturne.compatible", false),
@@ -174,6 +186,10 @@ public final class GuiModeOptions {
                 bool("native.antiDump", "Native anti-dump", "native.antiDump", true),
                 bool("native.antiBackfill", "Anti-backfill table",
                         "native.antiBackfill", true),
+                bool("classEncryption.nativeKey", "Bind master to native root",
+                        "classEncryption.nativeKey", false),
+                bool("classEncryption.nativeKey.fallback", "Allow seed fallback",
+                        "classEncryption.nativeKey.fallback", true),
                 bool("native.constructors", "Native constructors",
                         "native.constructors", true),
                 bool("native.indy", "Native indy bridges", "native.indy", true),
@@ -215,7 +231,13 @@ public final class GuiModeOptions {
                 enumeration("integrity.action", "Integrity action", "integrity.action",
                         new String[]{"throw", "exit", "corrupt"}, "throw"),
                 bool("integrity.antiDump", "Integrity anti-dump",
-                        "integrity.antiDump", true)));
+                        "integrity.antiDump", true),
+                bool("classEncryption.constantPool", "Encrypt constant pool",
+                        "classEncryption.constantPool", true),
+                bool("classEncryption.libraryMode", "Sealed library",
+                        "classEncryption.libraryMode", false),
+                bool("classEncryption.allowSkip", "Allow unsealed archive",
+                        "classEncryption.allowSkip", false)));
 
         groups.add(group("Anti-debug",
                 integer("antiDebug.level", "Anti-debug level", "antiDebug.level", 0, 0, 3, 1),
@@ -271,6 +293,9 @@ public final class GuiModeOptions {
         groups.add(group("Output",
                 bool("gui.verify", "Verify output", null, true),
                 bool("watermark.enabled", "Watermark", "watermark.enabled", true),
+                bool("watermark.blind", "RSA-blind watermark", "watermark.blind", true),
+                text("watermark.id", "Watermark id", "watermark.id", ""),
+                bool("watermark.manifest", "Manifest marker", "watermark.manifest", false),
                 text("gui.seed", "Seed", null, "23303"),
                 text("gui.mapping", "Mapping file", null, "")));
 
@@ -287,8 +312,6 @@ public final class GuiModeOptions {
 
     private GuiModeOptions() {
     }
-
-    /* -------------------------------------------------------------- catalog */
 
     private static Group group(String title, Spec... specs) {
         return new Group(title, Arrays.asList(specs));
@@ -339,9 +362,6 @@ public final class GuiModeOptions {
         return new LinkedHashSet<String>(BY_KEY.keySet());
     }
 
-    /* ------------------------------------------------------------- defaults */
-
-    /** Base (documented) defaults before any mode is applied. */
     public static Map<String, String> baseDefaults() {
         Map<String, String> values = new LinkedHashMap<String, String>();
         for (Spec spec : allSpecs()) {
@@ -350,7 +370,6 @@ public final class GuiModeOptions {
         return values;
     }
 
-    /** Detailed values for one GUI mode (Light/Balanced/.../Custom). */
     public static Map<String, String> defaults(String mode) {
         Map<String, String> values = baseDefaults();
         String preset = mode == null ? "custom" : mode.trim().toLowerCase(Locale.ROOT);
@@ -442,9 +461,40 @@ public final class GuiModeOptions {
             setValues(values, "antiLlm.enabled", "false", "typeConfusion.enabled", "false",
                     "reflectionGate.enabled", "false");
         }
-        // Balanced is the default/base mode: every listed value above already
-        // matches it, and Custom starts from the same conservative profile.
+        syncFromPreset(values, mode);
         return values;
+    }
+
+    private static final java.util.Set<String> PRESET_SYNCED = new java.util.HashSet<String>(
+            java.util.Arrays.asList("semanticCodes", "localCallIds", "perPayloadOpcodes",
+                    "keylessFallback", "nativeKey", "nativeKeyFallback", "constantPool",
+                    "libraryMode", "allowSkip"));
+
+    private static void syncFromPreset(Map<String, String> values, String mode) {
+        Map<String, Boolean> states = io.umbra.gui.GuiPresets.states(mode);
+        for (Spec spec : allSpecs()) {
+            String toggleId = toggleForSpec(spec.id);
+            if (toggleId == null || spec.key == null || !PRESET_SYNCED.contains(toggleId)) {
+                continue;
+            }
+            Boolean on = states.get(toggleId);
+            if (on == null) {
+                continue;
+            }
+            if ("layout.multiRelease".equals(spec.key)) {
+                values.put(spec.id, on.booleanValue() ? "preserve" : "flatten");
+            } else if ("layout.moduleInfo".equals(spec.key)) {
+                values.put(spec.id, on.booleanValue() ? "auto" : "drop");
+            } else if ("antiDebug.level".equals(spec.key)) {
+                if (on.booleanValue()) {
+                    values.put(spec.id, "2");
+                } else {
+                    values.put(spec.id, "0");
+                }
+            } else if (spec.kind == Kind.BOOL) {
+                values.put(spec.id, String.valueOf(on.booleanValue()));
+            }
+        }
     }
 
     private static void setValues(Map<String, String> values, String... pairs) {
@@ -455,14 +505,10 @@ public final class GuiModeOptions {
         }
     }
 
-    /** Mode names offered by the dialog (same list as the sidebar selector). */
     public static List<String> modeNames() {
         return GuiPresets.NAMES;
     }
 
-    /* --------------------------------------------------------- conversions */
-
-    /** Values read from a configuration's effective option map. */
     public static Map<String, String> fromEffective(Map<String, String> effective) {
         Map<String, String> values = baseDefaults();
         if (effective == null) {
@@ -481,7 +527,6 @@ public final class GuiModeOptions {
         return values;
     }
 
-    /** Normalises one raw value for its spec (clamps ints, validates enums). */
     public static String normalize(Spec spec, String raw) {
         String value = raw == null ? "" : raw.trim();
         switch (spec.kind) {
@@ -509,7 +554,6 @@ public final class GuiModeOptions {
         }
     }
 
-    /** Advanced option map contributed by the detailed values. */
     public static Map<String, String> toOptionMap(Map<String, String> values) {
         Map<String, String> options = new LinkedHashMap<String, String>();
         for (Spec spec : allSpecs()) {
@@ -525,9 +569,6 @@ public final class GuiModeOptions {
         return options;
     }
 
-    /* ---------------------------------------------------------- left switch */
-
-    /** Toggle id that owns / is fed by a spec, or null when none. */
     public static String toggleForSpec(String specId) {
         Spec spec = spec(specId);
         if (spec == null) {
@@ -600,13 +641,19 @@ public final class GuiModeOptions {
         } else if ("minecraft.enabled".equals(spec.key)) {
             return "minecraft";
         }
-        return null;
+        return togglesByKey().get(spec.key);
     }
 
-    /**
-     * Switch states implied by the detailed values (the left column must stay
-     * in sync with the dialog).
-     */
+    private static Map<String, String> togglesByKey() {
+        Map<String, String> byKey = new LinkedHashMap<String, String>();
+        for (io.umbra.gui.GuiSwitches.Toggle toggle : io.umbra.gui.GuiSwitches.allToggles()) {
+            if (toggle.key != null && !byKey.containsKey(toggle.key)) {
+                byKey.put(toggle.key, toggle.id);
+            }
+        }
+        return byKey;
+    }
+
     public static Map<String, Boolean> syncToggles(Map<String, String> values) {
         Map<String, Boolean> states = new LinkedHashMap<String, Boolean>();
         for (Spec spec : allSpecs()) {
@@ -632,10 +679,6 @@ public final class GuiModeOptions {
         return states;
     }
 
-    /**
-     * Applies one left-column switch change to the detailed values (bool specs
-     * only; enum quirks mirror the switches in the sidebar).
-     */
     public static void applyToggle(Map<String, String> values, String toggleId,
                                    boolean on) {
         for (Spec spec : allSpecs()) {
@@ -654,7 +697,6 @@ public final class GuiModeOptions {
         }
     }
 
-    /** True when the detailed values diverge from the mode's defaults. */
     public static boolean overridesModeDefaults(String mode, Map<String, String> values) {
         Map<String, String> defaults = defaults(mode);
         for (Spec spec : allSpecs()) {
@@ -673,7 +715,6 @@ public final class GuiModeOptions {
         return false;
     }
 
-    /** Keys/ids of the GUI-only controls. */
     public static Set<String> uiOnlyIds() {
         Set<String> ids = new LinkedHashSet<String>();
         for (Spec spec : allSpecs()) {

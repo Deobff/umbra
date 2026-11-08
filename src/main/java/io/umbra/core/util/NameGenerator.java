@@ -1,5 +1,8 @@
 package io.umbra.core.util;
 
+import io.umbra.core.util.dict.Dictionary;
+import io.umbra.core.util.dict.DictionaryFactory;
+
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Random;
@@ -28,18 +31,29 @@ public final class NameGenerator {
     private final int minimumLength;
     private final long offset;
     private long counter;
+    private final Dictionary keywords;
 
     public NameGenerator(Random random, String prefix) {
         this(random, prefix, ALPHABET, 1);
     }
 
-    /**
-     * @param random        deterministic random source
-     * @param prefix        prefix added to every generated name
-     * @param dictionary    allowed characters (at least two unique characters)
-     * @param minimumLength minimum identifier length
-     */
     public NameGenerator(Random random, String prefix, String dictionary, int minimumLength) {
+        this(random, prefix, dictionary, minimumLength, resolveDictionary(dictionary));
+    }
+
+    private static Dictionary resolveDictionary(String dictionary) {
+        if (dictionary == null || dictionary.trim().isEmpty()) {
+            return null;
+        }
+        if ("keywords".equalsIgnoreCase(dictionary) || "spaces".equalsIgnoreCase(dictionary)) {
+            return DictionaryFactory.get(dictionary.toLowerCase(java.util.Locale.ROOT));
+        }
+        return null;
+    }
+
+    public NameGenerator(Random random, String prefix, String dictionary, int minimumLength,
+                         Dictionary keywords) {
+        this.keywords = keywords;
         this.random = random;
         this.prefix = prefix == null ? "" : prefix;
         String sanitized = sanitize(dictionary);
@@ -69,8 +83,10 @@ public final class NameGenerator {
         this.offset = start;
     }
 
-    /** Deterministic sequence: a, b, ..., z, A, ..., Z, aa, ab, ... */
     public synchronized String next() {
+        if (keywords != null) {
+            return prefix + keywords.next();
+        }
         long value = offset + counter++;
         StringBuilder out = new StringBuilder();
         do {
@@ -88,8 +104,10 @@ public final class NameGenerator {
         return prefix + name;
     }
 
-    /** Random identifier of at least {@code minLength} characters. */
     public String random(int minLength) {
+        if (keywords != null) {
+            return prefix + keywords.next();
+        }
         int length = Math.max(Math.max(minLength, 1), minimumLength);
         StringBuilder out = new StringBuilder(length);
         out.append(alphabetStart.charAt(random.nextInt(alphabetStart.length())));
@@ -129,7 +147,6 @@ public final class NameGenerator {
         return KEYWORDS.contains(name);
     }
 
-    /** Ensures a package name is usable as an internal package path. */
     public static String normalizePackage(String value) {
         if (value == null) {
             return "";

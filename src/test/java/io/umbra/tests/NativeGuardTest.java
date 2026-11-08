@@ -78,17 +78,6 @@ public final class NativeGuardTest {
         System.out.println("NativeGuardTest: " + checks + " checks passed");
     }
 
-    // ------------------------------------------------------------------
-    // Policy helpers
-    // ------------------------------------------------------------------
-
-    /**
-     * Removes guard lib directories left behind by earlier runs.
-     *
-     * <p>On Windows a {@code System.load}ed DLL stays mapped for the life of the
-     * process, so the in-process guard test cannot delete its own library before
-     * the JVM exits; the directory is removed on the next run instead.</p>
-     */
     private static void cleanupStaleGuardDirectories() {
         try {
             java.io.File directory = new java.io.File(System.getProperty("java.io.tmpdir", "."));
@@ -115,7 +104,7 @@ public final class NativeGuardTest {
                         + " stale guard temp directories");
             }
         } catch (Throwable ignored) {
-            // best effort
+
         }
     }
     private static void testPolicyHelpers() {
@@ -251,7 +240,6 @@ public final class NativeGuardTest {
             check(PeImage.timestamp(resources.library) == 0,
                     "default guard build is reproducible (timestamp 0)");
 
-            // native.timestamp=true must produce a normal (non-zero) PE timestamp.
             Path timestamped = resources.directory.resolve("guard-timestamp.dll");
             NativeCompiler.Result stamped = NativeCompiler.compile(
                     NativeCompiler.resolve("", new Log(null, false)),
@@ -262,10 +250,7 @@ public final class NativeGuardTest {
                     "native.timestamp=false stamps a normal PE build time");
         }
     }
-    /**
-     * Loads the compiled guard library in-process and verifies integrity, token
-     * challenge and tamper rejection through its JNI methods.
-     */
+
     private static void testNativeGuardLibrary(BuildResources resources) throws Exception {
         {
             resources.libraryPath.toFile().deleteOnExit();
@@ -316,10 +301,6 @@ public final class NativeGuardTest {
         }
     }
 
-    // ------------------------------------------------------------------
-    // End-to-end: synthetic program, native guard and Java fallback
-    // ------------------------------------------------------------------
-
     private static void testEndToEndNative() throws Exception {
         String compiler = NativeCompiler.resolve("", new Log(null, false));
         if (compiler == null || !NativeCompiler.hasJniHeaders() || !isWindows()) {
@@ -330,10 +311,12 @@ public final class NativeGuardTest {
         try {
             Path jar = buildGuardedProgram(directory, compiler);
             check(Files.isRegularFile(jar), "guarded jar written");
-            java.util.Set<String> before = tempEntries();
-            String cleanOutput = runJar(jar, null);
+
+            Path childTemp = directory.resolve("childtmp");
+            Files.createDirectories(childTemp);
+            String cleanOutput = runJar(jar, null, null, childTemp);
             check(cleanOutput.contains("OK"), "clean run passes the native guard");
-            checkNoFixedTempNames(before);
+            checkGuardTempNames(childTemp);
             String jdwpOutput = runJar(jar,
                     "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=0");
             check(jdwpOutput.contains("Umbra guard"), "JDWP-attached run is rejected");
@@ -346,33 +329,13 @@ public final class NativeGuardTest {
         }
     }
 
-    private static java.util.Set<String> tempEntries() {
-        java.util.Set<String> names = new java.util.HashSet<String>();
-        File[] entries = new File(System.getProperty("java.io.tmpdir", ".")).listFiles();
-        if (entries != null) {
-            for (File entry : entries) {
-                names.add(entry.getName());
-            }
-        }
-        return names;
-    }
-
-    /**
-     * The guard must not create a fixed-prefix temp file/dir: every new top-level
-     * entry is checked for {@code umbra}/{@code guard} in its name, and new
-     * directories containing a library must use a fully random alphanumeric name.
-     */
-    private static void checkNoFixedTempNames(java.util.Set<String> before) {
-        File tmp = new File(System.getProperty("java.io.tmpdir", "."));
-        File[] entries = tmp.listFiles();
+    private static void checkGuardTempNames(Path tmp) {
+        File[] entries = tmp.toFile().listFiles();
         if (entries == null) {
             return;
         }
         java.util.List<File> candidateDirs = new java.util.ArrayList<File>();
         for (File entry : entries) {
-            if (before.contains(entry.getName())) {
-                continue;
-            }
             String lower = entry.getName().toLowerCase(java.util.Locale.ROOT);
             check(!lower.contains("umbra") && !lower.contains("guard"),
                     "new temp entry has no fixed umbra/guard name: " + entry.getName());
@@ -427,7 +390,6 @@ public final class NativeGuardTest {
         }
     }
 
-    /** Obfuscates a minimal synthetic Hello-World program with the guard pass. */
     private static Path buildGuardedProgram(Path directory, String compiler) throws Exception {
         ClassNode mainClass = syntheticMain();
         ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
@@ -473,9 +435,7 @@ public final class NativeGuardTest {
                 while (first != null && first.getOpcode() < 0) {
                     first = first.getNext();
                 }
-                // The guard is reached through an invokedynamic whose bootstrap argument
-                // carries the guard name, so no invokestatic in the program class points
-                // at the injected runtime.
+
                 hooked = first instanceof org.objectweb.asm.tree.InvokeDynamicInsnNode
                         && "check".equals(((org.objectweb.asm.tree.InvokeDynamicInsnNode) first).name)
                         && "()V".equals(((org.objectweb.asm.tree.InvokeDynamicInsnNode) first).desc);
@@ -531,10 +491,6 @@ public final class NativeGuardTest {
         return node;
     }
 
-    // ------------------------------------------------------------------
-    // Guard DLL build helper
-    // ------------------------------------------------------------------
-
     private static final class BuildResources {
         Path directory;
         Path libraryPath;
@@ -578,20 +534,24 @@ public final class NativeGuardTest {
         return resources;
     }
 
-    // ------------------------------------------------------------------
-    // Process helpers
-    // ------------------------------------------------------------------
-
     private static String runJar(Path jar, String extraArgument) throws Exception {
         return runJar(jar, extraArgument, null);
     }
 
     private static String runJar(Path jar, String extraArgument, Map<String, String> environment)
             throws Exception {
+        return runJar(jar, extraArgument, environment, null);
+    }
+
+    private static String runJar(Path jar, String extraArgument, Map<String, String> environment,
+                                 Path privateTemp) throws Exception {
         String java = System.getProperty("java.home") + File.separator + "bin" + File.separator
                 + (isWindows() ? "java.exe" : "java");
         List<String> command = new ArrayList<String>();
         command.add(java);
+        if (privateTemp != null) {
+            command.add("-Djava.io.tmpdir=" + privateTemp.toAbsolutePath());
+        }
         if (extraArgument != null) {
             command.add(extraArgument);
         }
@@ -626,10 +586,6 @@ public final class NativeGuardTest {
         return text;
     }
 
-    // ------------------------------------------------------------------
-    // Utilities
-    // ------------------------------------------------------------------
-
     private static boolean isWindows() {
         return System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).indexOf("win") >= 0;
     }
@@ -654,11 +610,11 @@ public final class NativeGuardTest {
                         try {
                             Files.deleteIfExists(p);
                         } catch (IOException ignored) {
-                            // best effort
+
                         }
                     });
         } catch (IOException ignored) {
-            // best effort
+
         }
     }
 

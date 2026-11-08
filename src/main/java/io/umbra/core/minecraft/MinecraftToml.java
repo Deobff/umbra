@@ -20,7 +20,6 @@ final class MinecraftToml {
     private MinecraftToml() {
     }
 
-    /** Parses a TOML document into nested maps/lists/scalars. */
     static Map<String, Object> parse(String text) {
         Map<String, Object> root = new LinkedHashMap<String, Object>();
         if (text == null || text.isEmpty()) {
@@ -135,7 +134,7 @@ final class MinecraftToml {
                                                  String line) {
         int equals = indexOfAssignment(line);
         if (equals < 0) {
-            // Be forgiving: unknown TOML constructs are skipped, not fatal.
+
             return current;
         }
         String key = line.substring(0, equals).trim();
@@ -231,7 +230,7 @@ final class MinecraftToml {
         if (quote != '"' && quote != '\'') {
             return null;
         }
-        // Find the closing quote, respecting escapes in basic strings.
+
         for (int i = 1; i < raw.length(); i++) {
             char c = raw.charAt(i);
             if (quote == '"' && c == '\\') {
@@ -281,7 +280,6 @@ final class MinecraftToml {
         return out.toString();
     }
 
-    /** Removes a {@code #} comment that is outside quoted strings. */
     private static String stripComment(String line) {
         char quote = 0;
         boolean triple = false;
@@ -322,7 +320,6 @@ final class MinecraftToml {
         return line;
     }
 
-    /** True when all strings/brackets on the accumulated text are closed. */
     private static boolean isComplete(String text) {
         char quote = 0;
         boolean triple = false;
@@ -485,7 +482,6 @@ final class MinecraftToml {
         return trimmed;
     }
 
-    /** Normalizes a table-or-array-of-tables value into a list of tables. */
     static List<Map<String, Object>> tables(Object value) {
         List<Map<String, Object>> out = new ArrayList<Map<String, Object>>();
         if (value instanceof Map) {

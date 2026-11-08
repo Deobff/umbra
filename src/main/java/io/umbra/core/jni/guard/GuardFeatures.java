@@ -12,37 +12,40 @@ package io.umbra.core.jni.guard;
  */
 public final class GuardFeatures {
 
-    /** {@code antiDebug.level} the features were derived from. */
     public final int level;
     public final boolean frida;
     public final boolean hash;
-    /** Deep: threads whose start address is outside every known module. */
+
     public final boolean remoteThread;
-    /** Deep: MEM_PRIVATE + executable memory outside the guard image. */
+
     public final boolean execMemoryScan;
-    /** Quick: guard pages / unexpected protection inside the guard image. */
+
     public final boolean imageBreakpoints;
-    /** Quick: randomized code-section byte sampling (built at protection time). */
+
     public final boolean codeSampling;
-    /** Deep: unbacked / manually mapped module detection. */
+
     public final boolean moduleIntegrity;
-    /** Quick: native check-call timing drift (debugger/suspend pauses). */
+
     public final boolean timing;
-    /** Deep, level 3 opt-in: external process handle with VM_READ access. */
+
     public final boolean handleDump;
-    /** Deep: CRC readback of the guard's own code section (inline-patch detection). */
+
     public final boolean codeCrc;
-    /** Deep: PAGE_NOACCESS/PAGE_GUARD rotation of a guard-owned data page. */
+
     public final boolean pageGuard;
-    /** Module name/path fragments excluded from the module and exec-memory scans. */
+
+    public final boolean textGuard;
+
+    public final boolean guardProbe;
+
     public final String execWhitelist;
-    /** Linux-only: native /proc/self checks, ptrace self-check. */
+
     public final boolean linuxChecks;
-    /** Watchdog interval used for the timing-drift threshold (milliseconds). */
+
     public final long watchdogMs;
-    /** Test-only JNI hooks (never enabled in production output). */
+
     public final boolean testHooks;
-    /** Internal name of the synthetic class declaring the test hooks. */
+
     public final String testHookClass;
 
     private GuardFeatures(Builder builder) {
@@ -58,6 +61,8 @@ public final class GuardFeatures {
         this.handleDump = builder.handleDump;
         this.codeCrc = builder.codeCrc;
         this.pageGuard = builder.pageGuard;
+        this.textGuard = builder.textGuard;
+        this.guardProbe = builder.guardProbe;
         this.execWhitelist = builder.execWhitelist;
         this.linuxChecks = builder.linuxChecks;
         this.watchdogMs = builder.watchdogMs;
@@ -65,21 +70,16 @@ public final class GuardFeatures {
         this.testHookClass = builder.testHookClass;
     }
 
-    /** Classic 3.0 feature set (used by the legacy {@code generate} overload). */
     public static GuardFeatures legacy(boolean frida, boolean hash) {
         return builder(1).frida(frida).hash(hash).build();
     }
 
-    /** Level profile: 1 = cheap classic checks, 2 = dynamic set, 3 = + handle scan. */
     public static Builder forLevel(int level) {
         int normalized = Math.max(1, Math.min(3, level));
         Builder builder = builder(normalized);
         if (normalized >= 2) {
             builder.remoteThread(true)
-                    // The executable-memory scan is kept out of level 2: GUI
-                    // toolkits (AWT/Swing) map JIT and native code in anonymous
-                    // executable regions and trip it as a false positive, which
-                    // kills a healthy application. Level 3 opts back in.
+
                     .execMemoryScan(false)
                     .imageBreakpoints(true)
                     .codeSampling(true)
@@ -87,6 +87,8 @@ public final class GuardFeatures {
                     .timing(true)
                     .codeCrc(true)
                     .pageGuard(true)
+                    .textGuard(true)
+                    .guardProbe(true)
                     .linuxChecks(true);
         }
         if (normalized >= 3) {
@@ -101,7 +103,6 @@ public final class GuardFeatures {
         return builder;
     }
 
-    /** Number of independently enabled signal groups (for stats/logging). */
     public int enabledChecks() {
         int count = 0;
         if (frida) {
@@ -137,13 +138,18 @@ public final class GuardFeatures {
         if (pageGuard) {
             count++;
         }
+        if (textGuard) {
+            count++;
+        }
+        if (guardProbe) {
+            count++;
+        }
         if (linuxChecks) {
             count++;
         }
         return count;
     }
 
-    /** Short {@code key=value} list for logs and stats. */
     public String describe() {
         return "level=" + level
                 + ", frida=" + frida
@@ -157,12 +163,13 @@ public final class GuardFeatures {
                 + ", handleDump=" + handleDump
                 + ", codeCrc=" + codeCrc
                 + ", pageGuard=" + pageGuard
+                + ", textGuard=" + textGuard
+                + ", guardProbe=" + guardProbe
                 + ", execWhitelist=" + execWhitelist
                 + ", linuxChecks=" + linuxChecks
                 + ", watchdogMs=" + watchdogMs;
     }
 
-    /** Mutable builder (keeps the generated C call sites readable). */
     public static final class Builder {
         private int level = 1;
         private boolean frida = true;
@@ -176,6 +183,8 @@ public final class GuardFeatures {
         private boolean handleDump;
         private boolean codeCrc;
         private boolean pageGuard;
+        private boolean textGuard;
+        private boolean guardProbe;
         private String execWhitelist = GuardOptions.DEFAULT_EXEC_WHITELIST;
         private boolean linuxChecks;
         private long watchdogMs = 4000L;
@@ -239,6 +248,16 @@ public final class GuardFeatures {
 
         public Builder pageGuard(boolean value) {
             this.pageGuard = value;
+            return this;
+        }
+
+        public Builder textGuard(boolean value) {
+            this.textGuard = value;
+            return this;
+        }
+
+        public Builder guardProbe(boolean value) {
+            this.guardProbe = value;
             return this;
         }
 

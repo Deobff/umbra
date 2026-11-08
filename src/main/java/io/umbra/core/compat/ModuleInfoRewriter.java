@@ -22,17 +22,15 @@ import java.util.List;
  */
 public final class ModuleInfoRewriter {
 
-    /** What happened to one module descriptor. */
     public enum Action {
-        /** Written unchanged. */
+
         KEPT,
-        /** Written after remapping. */
+
         REWRITTEN,
-        /** Not written. */
+
         DROPPED
     }
 
-    /** Result of rewriting one descriptor. */
     public static final class Result {
         private final Action action;
         private final byte[] bytes;
@@ -52,7 +50,6 @@ public final class ModuleInfoRewriter {
             return bytes;
         }
 
-        /** Human readable reason for the action, used in warnings and stats. */
         public String detail() {
             return detail;
         }
@@ -61,7 +58,6 @@ public final class ModuleInfoRewriter {
     private ModuleInfoRewriter() {
     }
 
-    /** Rewrites one module descriptor according to {@code mode}. */
     public static Result rewrite(byte[] moduleInfo, ClassRenameMap rename,
                                  LayoutOptions.ModuleInfoMode mode, String entryName) {
         if (mode == null) {
@@ -91,8 +87,7 @@ public final class ModuleInfoRewriter {
             return new Result(Action.KEPT, moduleInfo, "not a module descriptor; kept original");
         }
         if (noRenames) {
-            // AUTO still validates: a structurally broken descriptor must not be
-            // emitted even when no class was renamed.
+
             return new Result(Action.KEPT, moduleInfo, "no renames");
         }
 

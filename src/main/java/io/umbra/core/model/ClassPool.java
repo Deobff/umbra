@@ -29,7 +29,6 @@ public final class ClassPool {
 
     private String mainClass;
 
-    /** Freezes a class so that no pass renames or rewrites it. */
     public void freeze(String name) {
         frozen.add(name);
     }
@@ -58,18 +57,9 @@ public final class ClassPool {
         classes.put(node.name, node);
         generated.add(node.name);
         entryPrefixes.put(node.name, "");
-        classTimes.put(node.name, Long.valueOf(315532800000L)); // 1980-01-01
+        classTimes.put(node.name, Long.valueOf(315532800000L));
     }
 
-    /**
-     * Atomically applies a batch of class renames.
-     *
-     * <p>Batch application avoids transient name collisions when class A is
-     * renamed to the old name of class B.</p>
-     *
-     * @param oldToNew     original name to new name
-     * @param remapped     remapped node for every original name
-     */
     public void applyRenames(Map<String, String> oldToNew, Map<String, ClassNode> remapped) {
         Map<String, ClassNode> newClasses = new LinkedHashMap<String, ClassNode>();
         Map<String, String> newPrefixes = new LinkedHashMap<String, String>();
@@ -106,7 +96,6 @@ public final class ClassPool {
         generated.addAll(newGenerated);
     }
 
-    /** Replaces a class node under a new internal name, preserving entry metadata. */
     public void replaceClass(String oldName, String newName, ClassNode node) {
         String prefix = entryPrefixes.remove(oldName);
         Long time = classTimes.remove(oldName);
@@ -158,13 +147,26 @@ public final class ClassPool {
         return originalBytes.get(name);
     }
 
-    /** Marks a class to be written from pre-existing bytes (incremental reuse). */
     public void putRawOutput(String name, byte[] bytes) {
         rawOutput.put(name, bytes);
     }
 
     public byte[] rawOutput(String name) {
         return rawOutput.get(name);
+    }
+
+    private final Map<String, String> meta = new LinkedHashMap<String, String>();
+
+    public void putMeta(String key, String value) {
+        if (value == null) {
+            meta.remove(key);
+        } else {
+            meta.put(key, value);
+        }
+    }
+
+    public String getMeta(String key) {
+        return meta.get(key);
     }
 
     public void putResource(String name, byte[] bytes, long time, int method) {
@@ -191,7 +193,6 @@ public final class ClassPool {
         this.mainClass = mainClass;
     }
 
-    /** A non-class zip entry. */
     public static final class Resource {
         private final String name;
         private final byte[] bytes;

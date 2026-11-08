@@ -2,6 +2,8 @@ package io.umbra.core.pass.impl;
 
 import io.umbra.core.api.Pass;
 import io.umbra.core.api.PassContext;
+import io.umbra.core.pass.impl.flow.KeyRootMask;
+import io.umbra.core.pass.impl.flow.RuntimeTable;
 import io.umbra.core.util.AsmUtil;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
@@ -11,7 +13,6 @@ import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.IntInsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
-import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
@@ -39,14 +40,19 @@ import java.util.Map;
  *
  * <p>The int forms use only stack shuffles; the long forms use two scratch
  * locals because the JVM has no instruction that duplicates two category-2
- * values at once. Constants become
- * {@code ((c ^ K) ^ k) ^ (K ^ k)} with {@code K} a compile time nonce and
- * {@code k} a runtime key derived from {@code System.nanoTime()}, so neither
- * the original constant nor a fixed mask is apparent.</p>
+ * values at once.</p>
+ *
+ * <p>Constants are not re-materialised through a cancelling runtime key (the old
+ * {@code ((c ^ K) ^ k) ^ (K ^ k)} shape collapsed to {@code c} with one
+ * algebraic rewrite, W3/W4). They are read as the xor of two entries of the
+ * per-class runtime table ({@link RuntimeTable}): both entries come out of an
+ * xorshift chain seeded in {@code <clinit>}, so folding the constant requires
+ * array scalarisation plus cross-{@code <clinit>} data flow. When the class
+ * pair budget is exhausted the literal is left untouched instead of falling back
+ * to a foldable shape.</p>
  */
 public final class MbaPass implements Pass {
 
-    /** Binary ops rewritten by the identity table. */
     private static final int[] INT_OPS = {
             Opcodes.IADD, Opcodes.ISUB, Opcodes.IXOR, Opcodes.IAND, Opcodes.IOR
     };
@@ -81,7 +87,13 @@ public final class MbaPass implements Pass {
         int methods = 0;
         int expressions = 0;
         int constants = 0;
+        int runtimeConstants = 0;
+        int runtimeTables = 0;
+        int fallbackConstants = 0;
         int skipped = 0;
+        int pairBudget = Math.max(2, context.config().optionInt("mba.tablePairs", 256));
+        KeyRootMask tableMask = KeyRootMask.create(context, true);
+        String tableMode = tableMask == null ? "static" : "native";
         for (ClassNode node : context.classes().classes().values()) {
             if (context.classes().isGenerated(node.name) || context.classes().isFrozen(node.name)) {
                 continue;
@@ -95,15 +107,19 @@ public final class MbaPass implements Pass {
             if ((node.access & (Opcodes.ACC_INTERFACE | Opcodes.ACC_ANNOTATION)) != 0) {
                 continue;
             }
+
+            RuntimeTable table = RuntimeTable.create(context, node, pairBudget, tableMask);
             int classExpressions = 0;
             int classConstants = 0;
+            int classRuntime = 0;
+            int classFallback = 0;
             for (MethodNode method : node.methods) {
                 if (!eligible(method)) {
                     continue;
                 }
                 int[] result;
                 try {
-                    result = rewriteMethod(context, method, depth, ints, maxPerMethod);
+                    result = rewriteMethod(context, method, depth, ints, maxPerMethod, table);
                 } catch (RuntimeException e) {
                     skipped++;
                     context.log().debug("mba: skipped %s.%s: %s", node.name, method.name, e.toString());
@@ -113,17 +129,36 @@ public final class MbaPass implements Pass {
                     methods++;
                     classExpressions += result[0];
                     classConstants += result[1];
+                    classRuntime += result[2];
+                    classFallback += result[3];
+                }
+            }
+            if (!table.isEmpty()) {
+                try {
+                    table.materialize(node);
+                    runtimeTables += table.chunkCount();
+                } catch (RuntimeException e) {
+                    context.log().debug("mba: cannot bootstrap the runtime table of %s: %s",
+                            node.name, e.toString());
                 }
             }
             expressions += classExpressions;
             constants += classConstants;
+            runtimeConstants += classRuntime;
+            fallbackConstants += classFallback;
         }
         context.stats().add("mba.methods", methods);
         context.stats().add("mba.expressions", expressions);
         context.stats().add("mba.constants", constants);
+        context.stats().add("mba.runtimeConstants", runtimeConstants);
+        context.stats().add("mba.runtimeTables", runtimeTables);
+        context.stats().add("mba.fallbackConstants", fallbackConstants);
         context.stats().add("mba.skipped", skipped);
-        context.log().info("mba[depth=%d]: rewrote %d arithmetic expressions and %d constants in %d methods",
-                depth, expressions, constants, methods);
+        context.stats().text("mba.tableMode", tableMode);
+        context.log().info("mba[depth=%d]: rewrote %d arithmetic expressions and %d constants "
+                        + "(%d via runtime tables, %d table fallbacks, table=%s) in %d methods",
+                depth, expressions, constants, runtimeConstants, fallbackConstants, tableMode,
+                methods);
     }
 
     private static boolean eligible(MethodNode method) {
@@ -133,44 +168,32 @@ public final class MbaPass implements Pass {
         if (method.instructions == null || method.instructions.size() == 0) {
             return false;
         }
-        // Old jsr/ret subroutines confuse frame computation; leave them alone.
+
         if (AsmUtil.containsJsrOrRet(method)) {
             return false;
         }
-        // Hard ceiling: the per-method rewrite budget already bounds growth, but
-        // never touch absurdly large methods (other passes time out on them too).
+
         return method.instructions.size() <= 60000;
     }
 
-    /**
-     * Rewrites one method.
-     *
-     * @return {@code [arithmeticExpressions, constants]} rewritten
-     */
     private static int[] rewriteMethod(PassContext context, MethodNode method, int depth,
-                                       boolean ints, int maxPerMethod) {
+                                       boolean ints, int maxPerMethod, RuntimeTable table) {
         MethodPlan plan = plan(method, ints);
         if (plan.intOps == 0 && plan.longOps == 0 && plan.constants == 0) {
-            return new int[2];
+            return new int[4];
         }
         int budget = maxPerMethod;
-        // Reserve part of the budget for constants so a method full of literals
-        // still gets its arithmetic rewritten and vice versa.
+
         int constantReserve = Math.min(plan.constants, Math.max(1, maxPerMethod / 2));
         int opBudget = Math.max(0, budget - constantReserve);
         int constBudget = budget;
 
         int nextLocal = nextFreeLocal(method);
         int longTemp = -1;
-        int keyLocal = -1;
         int neededLongTemps = plan.longOps > 0 ? 1 : 0;
         if (neededLongTemps > 0) {
             longTemp = nextLocal;
-            nextLocal += 4; // two long scratch locals
-        }
-        if (plan.constants > 0) {
-            keyLocal = nextLocal;
-            nextLocal += 1;
+            nextLocal += 4;
         }
         if (nextLocal > method.maxLocals) {
             method.maxLocals = nextLocal;
@@ -180,19 +203,14 @@ public final class MbaPass implements Pass {
         if (ints && opBudget > 0) {
             expressions = rewriteArithmetic(method, ints, depth, opBudget, longTemp);
         }
-        int rewrittenConstants = 0;
+        int[] rewritten = new int[3];
         int remaining = Math.max(0, constBudget - expressions);
         if (remaining > 0 && plan.constants > 0) {
-            rewrittenConstants = rewriteConstants(context, method, ints,
-                    remaining, keyLocal, plan.constants);
+            rewritten = rewriteConstants(context, method, ints, remaining, table, plan.constants);
         }
-        if (rewrittenConstants > 0) {
-            insertRuntimeKey(context, method, keyLocal);
-        }
-        return new int[] { expressions, rewrittenConstants };
+        return new int[] { expressions, rewritten[0], rewritten[1], rewritten[2] };
     }
 
-    /** First pass: count candidates and validate the method is analysable enough. */
     private static MethodPlan plan(MethodNode method, boolean ints) {
         MethodPlan plan = new MethodPlan();
         boolean needsTemps = false;
@@ -210,8 +228,6 @@ public final class MbaPass implements Pass {
         plan.needsLongTemps = needsTemps;
         return plan;
     }
-
-    // ---------------------------------------------------------------- arithmetic
 
     private static int rewriteArithmetic(MethodNode method, boolean ints, int depth,
                                          int opBudget, int longTemp) {
@@ -238,10 +254,7 @@ public final class MbaPass implements Pass {
                     continue;
                 }
                 boolean isLong = isLongOp(insn.getOpcode());
-                // Long rewrites use two shared scratch locals; rewriting a long
-                // operation that a previous pass already emitted would clobber
-                // those locals while the enclosing replacement still reads them.
-                // Int rewrites are pure stack shuffles, so they can be nested.
+
                 if (isLong && createdIn != 0) {
                     continue;
                 }
@@ -252,9 +265,7 @@ public final class MbaPass implements Pass {
                 if (replacement == null) {
                     continue;
                 }
-                // Tag the fresh nodes before inserting: inserting an InsnList
-                // links its tail to the following instructions, so walking it
-                // afterwards would visit (and tag) the rest of the method.
+
                 for (AbstractInsnNode added = replacement.getFirst(); added != null; added = added.getNext()) {
                     if (added.getOpcode() >= 0) {
                         generation.put(added, Integer.valueOf(pass));
@@ -339,7 +350,7 @@ public final class MbaPass implements Pass {
                 out.add(new InsnNode(Opcodes.LADD));
                 return out;
             case Opcodes.LSUB:
-                // a - b = (a & ~b) - (~a & b)
+
                 out.add(new VarInsnNode(Opcodes.LLOAD, longTemp));
                 out.add(new VarInsnNode(Opcodes.LLOAD, t2));
                 out.add(new LdcInsnNode(Long.valueOf(-1L)));
@@ -384,12 +395,12 @@ public final class MbaPass implements Pass {
         }
     }
 
-    // ----------------------------------------------------------------- constants
-
-    private static int rewriteConstants(PassContext context, MethodNode method, boolean ints,
-                                        int budget, int keyLocal, int candidateCount) {
+    private static int[] rewriteConstants(PassContext context, MethodNode method, boolean ints,
+                                          int budget, RuntimeTable table, int candidateCount) {
         int limit = Math.min(budget, candidateCount);
         int count = 0;
+        int masked = 0;
+        int fallbacks = 0;
         AbstractInsnNode[] snapshot = method.instructions.toArray();
         for (AbstractInsnNode insn : snapshot) {
             if (count >= limit) {
@@ -406,62 +417,33 @@ public final class MbaPass implements Pass {
                 continue;
             }
             InsnList replacement = new InsnList();
+            boolean tableBacked;
             if (constant instanceof Integer) {
                 int value = ((Integer) constant).intValue();
-                int compileKey = nonZero(context.random().nextInt());
-                int first = value ^ compileKey;
-                AsmUtil.pushInt(replacement, first);
-                replacement.add(new VarInsnNode(Opcodes.ILOAD, keyLocal));
-                replacement.add(new InsnNode(Opcodes.IXOR));
-                AsmUtil.pushInt(replacement, compileKey);
-                replacement.add(new VarInsnNode(Opcodes.ILOAD, keyLocal));
-                replacement.add(new InsnNode(Opcodes.IXOR));
-                replacement.add(new InsnNode(Opcodes.IXOR));
+                RuntimeTable.Pair pair = table.pair(value);
+                tableBacked = pair != null;
+                if (tableBacked) {
+                    table.emitInt(replacement, pair);
+                }
             } else {
                 long value = ((Long) constant).longValue();
-                long compileKey = context.random().nextLong();
-                if (compileKey == 0L) {
-                    compileKey = 0x5A17_9E37_79B9L;
-                }
-                long first = value ^ compileKey;
-                replacement.add(new LdcInsnNode(Long.valueOf(first)));
-                replacement.add(new VarInsnNode(Opcodes.ILOAD, keyLocal));
-                replacement.add(new InsnNode(Opcodes.I2L));
-                replacement.add(new InsnNode(Opcodes.LXOR));
-                replacement.add(new LdcInsnNode(Long.valueOf(compileKey)));
-                replacement.add(new VarInsnNode(Opcodes.ILOAD, keyLocal));
-                replacement.add(new InsnNode(Opcodes.I2L));
-                replacement.add(new InsnNode(Opcodes.LXOR));
-                replacement.add(new InsnNode(Opcodes.LXOR));
+                tableBacked = table.emitLong(replacement, value);
+            }
+            if (!tableBacked) {
+
+                fallbacks++;
+                continue;
             }
             method.instructions.insertBefore(insn, replacement);
             method.instructions.remove(insn);
             count++;
+            masked++;
         }
         if (count > 0) {
             method.maxStack = Math.max(method.maxStack, 6);
         }
-        return count;
+        return new int[] { count, masked, fallbacks };
     }
-
-    /**
-     * Inserts the per-method runtime key prologue:
-     * {@code int k = (int) (System.nanoTime() ^ seed)}.
-     */
-    private static void insertRuntimeKey(PassContext context, MethodNode method, int keyLocal) {
-        int seed = nonZero(context.random().nextInt());
-        InsnList prologue = new InsnList();
-        prologue.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/System",
-                "nanoTime", "()J", false));
-        prologue.add(new InsnNode(Opcodes.L2I));
-        AsmUtil.pushInt(prologue, seed);
-        prologue.add(new InsnNode(Opcodes.IXOR));
-        prologue.add(new VarInsnNode(Opcodes.ISTORE, keyLocal));
-        method.instructions.insert(prologue);
-        method.maxStack = Math.max(method.maxStack, 2);
-    }
-
-    // ------------------------------------------------------------------- helpers
 
     private static boolean isRewritableConstant(AbstractInsnNode insn, boolean ints) {
         int opcode = insn.getOpcode();
@@ -498,14 +480,6 @@ public final class MbaPass implements Pass {
         return null;
     }
 
-    /**
-     * The spec forbids rewriting constants used as array sizes, array indexes,
-     * switch selectors or invokedynamic bootstrap arguments. Producing the
-     * identical value would already be observable-equivalent, but keeping those
-     * sites literal also keeps the constant-pool shape predictable for other
-     * tools. Multi-dimensional array dimensions are detected by looking through
-     * the run of constant pushes that precede a {@code MULTIANEWARRAY}.
-     */
     private static boolean forbiddenConstant(MethodNode method, AbstractInsnNode insn) {
         AbstractInsnNode next = realNext(insn);
         if (next == null) {
@@ -518,8 +492,7 @@ public final class MbaPass implements Pass {
                 || isArrayAccess(opcode)) {
             return true;
         }
-        // A constant that only feeds another constant push may be one component
-        // of a multi-dimensional array allocation; look a few nodes ahead.
+
         int pushes = 0;
         AbstractInsnNode cursor = next;
         while (cursor != null && pushes < 8) {
@@ -601,10 +574,6 @@ public final class MbaPass implements Pass {
             }
         }
         return used;
-    }
-
-    private static int nonZero(int value) {
-        return value == 0 ? 0x5A17 : value;
     }
 
     private static final class MethodPlan {

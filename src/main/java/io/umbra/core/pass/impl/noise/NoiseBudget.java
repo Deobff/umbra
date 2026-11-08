@@ -37,10 +37,6 @@ public final class NoiseBudget {
         return used;
     }
 
-    /**
-     * Reserves {@code bytes}; returns false when either the global limit would
-     * be exceeded.
-     */
     public boolean charge(int bytes) {
         if (bytes < 0) {
             return false;

@@ -34,20 +34,10 @@ public interface RuleSet {
 
     boolean allowFieldRename(String owner, FieldNode field);
 
-    /**
-     * True when method bodies of {@code owner} must not be rewritten.
-     *
-     * <p>Used by mod-container adaptation (Minecraft Mixin target classes and
-     * other classes whose exact bytecode shape is referenced from outside):
-     * renaming, metadata cleanup and constant encryption may still run, but
-     * control-flow, virtualization, native conversion, reference hiding and
-     * other body-shape transforms are skipped.</p>
-     */
     default boolean skipBodyTransform(String owner) {
         return false;
     }
 
-    /** True when the class or member carries {@code io.umbra.annotations.Keep}. */
     boolean hasKeepAnnotation(ClassNode node);
 
     boolean hasKeepAnnotation(MethodNode method);

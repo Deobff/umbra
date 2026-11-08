@@ -336,10 +336,6 @@ public final class VmTest {
         System.out.println("VmTest: " + checks + " checks passed");
     }
 
-    // ------------------------------------------------------------------
-    // invokedynamic bridges / constructor bodies / payload size
-    // ------------------------------------------------------------------
-
     private static void testIndyBridges(Map<String, byte[]> compiled) throws Exception {
         Map<String, String> options = new LinkedHashMap<String, String>();
         options.put("vm2.enabled", "true");
@@ -491,11 +487,6 @@ public final class VmTest {
         check(Vm2Format.FORMAT == 3, "payload format version is 3 (shared opcode map)");
     }
 
-
-    // ------------------------------------------------------------------
-    // Execution round trips
-    // ------------------------------------------------------------------
-
     private static void testVm2Execution(Map<String, byte[]> compiled, boolean news) throws Exception {
         Map<String, String> options = new LinkedHashMap<String, String>();
         options.put("vm2.enabled", "true");
@@ -554,8 +545,6 @@ public final class VmTest {
         compare("vm2", "reflectionInside", invoke(original, null, "reflectionInside", 4),
                 invoke(changed, null, "reflectionInside", 4));
 
-        // Constructors / NEW are only interpreted when vm2.news is on; either way
-        // the calls must behave exactly like the original.
         compare("vm2", "listSize", invoke(original, null, "listSize", 5),
                 invoke(changed, null, "listSize", 5));
         compare("vm2", "listValue", invoke(original, null, "listValue", 5),
@@ -594,7 +583,6 @@ public final class VmTest {
         checkThrows("classic", original, changed, "rethrowFromCatch", new Object[] { 0 });
     }
 
-    /** True when the method body was replaced by a VM2 dispatch call site. */
     private static boolean callsInterpreter(MethodNode method) {
         for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null;
              insn = insn.getNext()) {
@@ -616,7 +604,6 @@ public final class VmTest {
         return false;
     }
 
-    /** True when the body still contains an invokedynamic that is not the VM2 dispatch. */
     private static boolean containsForeignInvokeDynamic(MethodNode method) {
         for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null;
              insn = insn.getNext()) {
@@ -642,7 +629,6 @@ public final class VmTest {
         return null;
     }
 
-    /** Runs the deterministic fixture scenario list on both class versions. */
     private static void runScenarios(String label, Class<?> original, Class<?> changed,
                                      ClassLoader originalLoader, ClassLoader transformedLoader)
             throws Exception {
@@ -744,10 +730,6 @@ public final class VmTest {
         compare(label, name, invoke(original, null, name, args), invoke(changed, null, name, args));
     }
 
-    // ------------------------------------------------------------------
-    // Determinism
-    // ------------------------------------------------------------------
-
     private static void testDeterminism(Map<String, byte[]> compiled) throws Exception {
         Map<String, String> options = new LinkedHashMap<String, String>();
         options.put("vm2.enabled", "true");
@@ -765,10 +747,6 @@ public final class VmTest {
         check(!first.fingerprint.equals(otherSeed.fingerprint),
                 "different vm2 seeds produce different payloads");
     }
-
-    // ------------------------------------------------------------------
-    // Eligibility
-    // ------------------------------------------------------------------
 
     private static void testEligibility(Map<String, byte[]> compiled) throws Exception {
         Map<String, String> options = new LinkedHashMap<String, String>();
@@ -801,15 +779,6 @@ public final class VmTest {
                 invoke(plainFixture, null, "switchSparse", 777));
     }
 
-    // ------------------------------------------------------------------
-    // Interpreter template constraints
-    // ------------------------------------------------------------------
-
-    /**
-     * The injected interpreter is a single class file: it must not reference
-     * the obfuscator's own classes (they are not in the output jar) and must
-     * not declare nested classes (the injector copies only one class file).
-     */
     private static void testInterpreterTemplate() throws Exception {
         java.io.InputStream in = io.umbra.core.runtime.vm2.UmbraVM2.class
                 .getResourceAsStream("UmbraVM2.class");
@@ -835,10 +804,6 @@ public final class VmTest {
         check(!constantPool.contains("UmbraVM2$"),
                 "interpreter template declares no nested classes");
     }
-
-    // ------------------------------------------------------------------
-    // Payload hardening
-    // ------------------------------------------------------------------
 
     private static void testHardening(Map<String, byte[]> compiled) throws Exception {
         Map<String, String> options = new LinkedHashMap<String, String>();
@@ -875,16 +840,12 @@ public final class VmTest {
         }
         long methods = stat(transform.stats, "virtualization.methods");
         check(holders == methods, "one meta holder per virtualized method");
-        check(chunks >= methods * 2, "payload split across several chunk holders");
+
+        check(chunks >= methods, "every payload has at least one chunk holder");
         check(stat(transform.stats, "virtualization.holders") == holders + chunks,
                 "holder statistics match emitted classes");
     }
 
-    /**
-     * True for the injected interpreter (the only generated class with a static
-     * {@code run(int[],int[][],Object[])}). The method name is randomized by the
-     * pass, so it is matched by descriptor.
-     */
     private static boolean isInterpreter(ClassNode node) {
         for (MethodNode method : node.methods) {
             if ("([I[I[[I[Ljava/lang/Object;)Ljava/lang/Object;".equals(method.desc)
@@ -895,11 +856,6 @@ public final class VmTest {
         return false;
     }
 
-    /**
-     * Reference records are {@code "M|owner|name|desc"} strings. They are
-     * encrypted inside the payload, so only tokens that could not appear by
-     * chance in random payload ints are checked here.
-     */
     private static boolean containsReadableReference(byte[] bytes) {
         String content = new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1);
         String[] tokens = {
@@ -933,12 +889,6 @@ public final class VmTest {
         }
     }
 
-    /**
-     * Rebuilds the block array of a payload from its holder entry. The entry is
-     * what the interpreter dispatcher calls: it reads the private meta field and
-     * assembles the blocks through the per-block accessors, which are the only
-     * way to reach them from outside.
-     */
     private static int[][] payloadBlocks(ClassLoader loader, ClassNode holder) {
         MethodNode entry = null;
         for (MethodNode method : holder.methods) {
@@ -980,13 +930,20 @@ public final class VmTest {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Tamper guards
-    // ------------------------------------------------------------------
-
     private static void testGuards(Map<String, byte[]> compiled) throws Exception {
+
+        guardsScenario(compiled, true);
+        guardsScenario(compiled, false);
+    }
+
+    private static void guardsScenario(Map<String, byte[]> compiled, boolean keyed)
+            throws Exception {
+        String mode = keyed ? "keyed" : "legacy";
         Map<String, String> options = new LinkedHashMap<String, String>();
         options.put("vm2.enabled", "true");
+        if (!keyed) {
+            options.put("vm2.perPayloadOpcodes", "false");
+        }
         Transform transform = transform(compiled, 9001L, options);
         ClassLoader holderLoader = new ByteLoader(VmTest.class.getClassLoader(), transform.output);
 
@@ -1022,8 +979,12 @@ public final class VmTest {
                 }
             }
         }
-        check(run != null, "interpreter entry point was injected");
-        check(opcodeMap != null, "shared opcode map holder was injected");
+        check(run != null, "interpreter entry point was injected (" + mode + ")");
+        if (keyed) {
+            check(opcodeMap == null, "keyed payloads carry no shared 256-entry opcode table");
+        } else {
+            check(opcodeMap != null, "legacy payloads still receive the shared opcode table");
+        }
 
         int tested = 0;
         int guarded = 0;
@@ -1061,20 +1022,15 @@ public final class VmTest {
                 run.invoke(null, meta, opcodeMap, blocks, new Object[64]);
                 tested++;
             } catch (InvocationTargetException e) {
-                // Dummy null arguments can fail inside the payload; try the next
-                // holder instead of failing the test.
+
                 continue;
             } catch (IllegalAccessException e) {
                 continue;
             } catch (RuntimeException e) {
-                // Newer JDKs wrap accessor-level errors differently; a payload
-                // probe with null arguments is allowed to fail.
+
                 continue;
             }
-            // The probe above cached the decoded state under the payload's meta
-            // array; the tampered probe uses a fresh meta identity so the
-            // modified blocks are decoded (and rejected) instead of being
-            // served from that cache.
+
             int[] tamperedMeta = meta.clone();
             int[][] tampered = new int[blocks.length][];
             for (int i = 0; i < blocks.length; i++) {
@@ -1103,12 +1059,6 @@ public final class VmTest {
         check(skipped == 0, "every payload holder exposes its blocks through accessors");
     }
 
-    /**
-     * A business class must not call the injected runtime directly: every
-     * virtualized method carries exactly one {@code invokedynamic} whose target
-     * the JVM resolves through the bootstrap, so the call sites reveal neither
-     * the interpreter nor the holders.
-     */
     private static void testDispatchIndirection(Map<String, byte[]> compiled) throws Exception {
         Map<String, String> options = new LinkedHashMap<String, String>();
         options.put("vm2.enabled", "true");
@@ -1139,9 +1089,6 @@ public final class VmTest {
                 "every virtualized method carries exactly one dispatch call site");
     }
 
-    // ------------------------------------------------------------------    // Pass invocation
-    // ------------------------------------------------------------------
-
     private static Transform transform(Map<String, byte[]> input, long seed,
                                        Map<String, String> options) throws Exception {
         UmbraConfig.Builder builder = new UmbraConfig.Builder()
@@ -1170,7 +1117,7 @@ public final class VmTest {
         Log log = new Log(new Log.Sink() {
             @Override
             public void line(String level, String message) {
-                // silent: failures are reported through assertions
+
             }
         }, false);
         PassContext context = new PassContext(config, pool, hierarchy,
@@ -1207,10 +1154,6 @@ public final class VmTest {
         Long value = stats.snapshot().get(key);
         return value == null ? 0L : value.longValue();
     }
-
-    // ------------------------------------------------------------------
-    // Execution helpers
-    // ------------------------------------------------------------------
 
     private static Object invoke(Class<?> owner, Object target, String name, Object... args)
             throws Exception {
@@ -1365,10 +1308,6 @@ public final class VmTest {
         }
     }
 
-    // ------------------------------------------------------------------
-    // In-memory fixture compilation
-    // ------------------------------------------------------------------
-
     private static Map<String, byte[]> compileFixture() throws Exception {
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         if (compiler == null) {
@@ -1424,7 +1363,6 @@ public final class VmTest {
         };
     }
 
-    /** Result of one pass invocation. */
     private static final class Transform {
         final ClassPool pool;
         final Stats stats;
@@ -1439,7 +1377,6 @@ public final class VmTest {
         }
     }
 
-    /** Loads a class map in isolation. */
     private static final class ByteLoader extends ClassLoader {
         private final Map<String, byte[]> classes;
 

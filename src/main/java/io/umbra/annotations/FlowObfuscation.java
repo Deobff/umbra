@@ -16,9 +16,8 @@ import java.lang.annotation.Target;
 @Retention(RetentionPolicy.CLASS)
 @Target({ElementType.TYPE, ElementType.METHOD})
 public @interface FlowObfuscation {
-    /** Whether control-flow obfuscation should run on the annotated element. */
+
     boolean enabled() default true;
 
-    /** Requested strength: {@code light}, {@code normal}, or {@code aggressive}. */
     String level() default "light";
 }

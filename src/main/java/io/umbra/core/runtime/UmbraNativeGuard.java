@@ -35,7 +35,14 @@ import java.util.zip.ZipFile;
  */
 public final class UmbraNativeGuard {
 
-    /** JAR entry of the compiled guard library (empty when no toolchain). */
+    private static final boolean DEBUG = Boolean.getBoolean("umbra.debug");
+
+    private static void say(String line) {
+        if (DEBUG) {
+            System.err.println(line);
+        }
+    }
+
     private static final String RESOURCE = "@@RESOURCE@@";
     private static final String NATIVE_FLAG = "@@NATIVE@@";
     private static final String FRIDA_FLAG = "@@FRIDA@@";
@@ -46,6 +53,8 @@ public final class UmbraNativeGuard {
     private static final String PROLOGUE_TOKEN_HEX = "@@PTOKEN@@";
     private static final String WATCHDOG_MS = "@@WATCHDOG@@";
     private static final String METHODS = "@@METHODS@@";
+
+    private static final String KEY_BRIDGE = "@@KEYBRIDGE@@";
 
     private static final int DETECT_JDWP = 1 << 11;
     private static final int DETECT_HASH = 1 << 12;
@@ -63,6 +72,8 @@ public final class UmbraNativeGuard {
     private static final int DETECT_LINUX = 1 << 24;
     private static final int DETECT_FRIDA_ENV = 1 << 10;
 
+    private static final int DETECT_PAIR = 1 << 29;
+
     private static final int ACTION = parseAction(ACTION_NAME);
     private static final boolean NATIVE = Boolean.parseBoolean(NATIVE_FLAG);
     private static final boolean FRIDA = Boolean.parseBoolean(FRIDA_FLAG);
@@ -71,18 +82,15 @@ public final class UmbraNativeGuard {
     private static final long INTERVAL_MS = parseLong(WATCHDOG_MS, 4000L);
 
     private static final Object LOCK = new Object();
+
+    private static final Object PAIR_LOCK = new Object();
+    private static volatile int pairState;
     private static volatile int state;
     private static volatile boolean corrupted;
     private static volatile boolean watchdogStarted;
     private static volatile boolean nativeLoaded;
     private static volatile long challengeCounter;
 
-    /**
-     * Neutral content marker written next to every extracted guard library. The
-     * random directory/file names carry no fixed prefix; stale directories from
-     * earlier runs are recognized only by this marker (and only when they are old
-     * enough that no live process can still be mapping their library).
-     */
     private static final String MARKER = "9f2c7a4e1b8d6350a5c9e2f7b4d1863e";
     private static final String MARKER_FILE = "m";
     private static final String NAME_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -102,13 +110,18 @@ public final class UmbraNativeGuard {
 
     private static native long nativeToken(int challenge);
 
-    /** Entry point inserted into program entry points and native-owner classes. */
     public static void check() {
         ensureGuard();
         if (corrupted) {
             return;
         }
         int mask = javaChecks();
+        synchronized (PAIR_LOCK) {
+            pairState = 0;
+            if (pairA() != pairSeedA()) {
+                mask |= DETECT_PAIR;
+            }
+        }
         if (nativeLoaded) {
             mask |= nativeCheck();
             mask |= nativeSelfTest();
@@ -122,7 +135,63 @@ public final class UmbraNativeGuard {
         }
     }
 
-    /** Loads the native guard (when built) and performs the startup checks once. */
+    public static int attest() {
+        int mask = 0;
+        try {
+            synchronized (PAIR_LOCK) {
+                pairState = 0;
+                if (pairA() != pairSeedA()) {
+                    mask |= DETECT_PAIR;
+                }
+            }
+            if (corrupted) {
+
+                return 0;
+            }
+            if (nativeLoaded) {
+                if (nativeSelfTest() != 0) {
+                    mask |= DETECT_HOOK;
+                }
+                if (tokenMismatch()) {
+                    mask |= DETECT_TOKEN;
+                }
+            }
+        } catch (Throwable ignored) {
+            mask |= DETECT_TOKEN;
+        }
+        return mask;
+    }
+
+    private static int pairA() {
+        int seed = pairSeedA();
+        pairState = 1;
+        int value = pairB();
+        if (pairState != 2) {
+            return 0;
+        }
+        return value == pairMix(seed) ? seed : 0;
+    }
+
+    private static int pairB() {
+        if (pairState != 1) {
+            return 0;
+        }
+        pairState = 2;
+        return pairMix(pairSeedA());
+    }
+
+    private static int pairSeedA() {
+        return (int) (SECRET >>> 32) ^ 0x5F35649A ^ (int) SECRET;
+    }
+
+    private static int pairMix(int value) {
+        int mixed = value * 0x9E3779B9 + 0x7F4A7C15;
+        mixed ^= mixed >>> 15;
+        mixed *= 0x85EBCA6B;
+        mixed ^= mixed >>> 13;
+        return mixed;
+    }
+
     public static void ensureGuard() {
         int current = state;
         if (current == 1) {
@@ -144,10 +213,12 @@ public final class UmbraNativeGuard {
                 if (NATIVE) {
                     mask |= loadNative();
                 }
+
+                loadKeyBridge();
                 state = 1;
             } catch (Throwable failure) {
                 state = 2;
-                System.err.println("[Umbra] guard initialization failure: " + failure);
+                say("[Umbra] guard initialization failure: " + failure);
                 mask = DETECT_TOKEN;
             }
         }
@@ -171,19 +242,6 @@ public final class UmbraNativeGuard {
         }
     }
 
-    /**
-     * Last-chance anti-backfill check. An agent can retransform a native method
-     * after startup and the process may exit before the periodic watchdog fires
-     * (short-lived applications). The shutdown hook re-verifies that every
-     * Umbra-created native method is still native and still present; a mismatch
-     * forces a non-zero exit code even though the JVM is already terminating.
-     *
-     * <p>The hook body is a lambda on purpose: {@code TemplateInjector} copies
-     * this class into the protected program on its own, so an anonymous
-     * {@code Runnable} would compile to a separate {@code UmbraNativeGuard$1}
-     * class file that never gets injected, silently turning the hook into dead
-     * code. A lambda only adds an {@code invokedynamic} to this class.</p>
-     */
     private static void installShutdownGuard() {
         try {
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -192,40 +250,52 @@ public final class UmbraNativeGuard {
                     if (mask == 0) {
                         return;
                     }
-                    System.err.println("[Umbra] native method backfill detected at shutdown (0x"
+                    say("[Umbra] native method backfill detected at shutdown (0x"
                             + Integer.toHexString(mask) + ")");
                     if (ACTION == 1 || ACTION == 2) {
                         Runtime.getRuntime().halt(101);
                     }
                 } catch (Throwable ignored) {
-                    // Never make a clean shutdown fail because of the guard.
+
                 }
             }, "umbra-shutdown-guard"));
         } catch (Throwable ignored) {
-            // Shutdown hooks can be unavailable during JVM teardown.
+
         }
     }
 
-    /** Called by the watchdog thread when a check threw. */
     public static void onWatchdogFailure(Throwable failure) {
         if (ACTION == 1 || ACTION == 2) {
-            System.err.println("[Umbra] guard watchdog failure: " + failure);
+            say("[Umbra] guard watchdog failure: " + failure);
             Runtime.getRuntime().halt(87);
         } else if (ACTION == 4) {
-            System.err.println("[Umbra] guard watchdog detection: " + failure);
+            say("[Umbra] guard watchdog detection: " + failure);
         } else {
             corrupted = true;
         }
     }
 
-    /**
-     * Central detection handler. Called from Java checks and from the native
-     * guard through JNI.
-     */
+    public static void poison(byte[] payload) {
+        if (!corrupted || payload == null || payload.length == 0) {
+            return;
+        }
+        long state = SECRET ^ 0x9E3779B97F4A7C15L ^ ((long) payload.length * 0x100000001B3L);
+        for (int i = 0; i < payload.length; i++) {
+            state ^= state << 13;
+            state ^= state >>> 7;
+            state ^= state << 17;
+            payload[i] = (byte) (payload[i] ^ (int) (state >>> 24));
+        }
+    }
+
+    public static boolean poisoned() {
+        return corrupted;
+    }
+
     public static void onDetection(int mask) {
         String description = "0x" + Integer.toHexString(mask);
         if (ACTION == 4) {
-            System.err.println("[Umbra] dynamic analysis detected (" + description + ")");
+            say("[Umbra] dynamic analysis detected (" + description + ")");
             return;
         }
         if (ACTION == 3) {
@@ -233,22 +303,17 @@ public final class UmbraNativeGuard {
             return;
         }
         if (ACTION == 2) {
-            System.err.println("[Umbra] dynamic analysis detected (" + description + "); exiting");
+            say("[Umbra] dynamic analysis detected (" + description + "); exiting");
             Runtime.getRuntime().halt(101);
             return;
         }
         throw new SecurityException("Umbra guard: dynamic analysis detected (" + description + ")");
     }
 
-    // ------------------------------------------------------------------
-    // Native guard loading and verification
-    // ------------------------------------------------------------------
-
     private static int loadNative() {
         int mask = 0;
         if (nativeLoaded) {
-            // Concurrent guard entry points can reach this before the state
-            // flag flips; loading the same library twice would fail.
+
             return 0;
         }
         File library = extractLibrary();
@@ -278,7 +343,7 @@ public final class UmbraNativeGuard {
                 mask |= DETECT_TOKEN;
             }
         } catch (Throwable failure) {
-            // JNI binding/extraction failure must fail closed, not crash the app.
+
             return mask | DETECT_HASH;
         }
         mask |= verifyNativeMethods();
@@ -305,17 +370,16 @@ public final class UmbraNativeGuard {
         return nativeToken(challenge) != expected;
     }
 
-    /**
-     * Writes the guard library into a random directory with a random
-     * alphanumeric file name (no fixed prefix), plus a marker file used for
-     * stale-directory cleanup.
-     */
     private static File extractLibrary() {
         cleanupStaleLibraries();
-        byte[] data = readResource();
+        byte[] data = readResource(RESOURCE);
         if (data == null || data.length == 0) {
             return null;
         }
+        return extract(data);
+    }
+
+    private static File extract(byte[] data) {
         File root = new File(System.getProperty("java.io.tmpdir", "."));
         File directory = new File(root, randomName(16));
         File file = null;
@@ -334,8 +398,7 @@ public final class UmbraNativeGuard {
             extractedDirectory = directory;
             extractedLibrary = file;
             file.deleteOnExit();
-            // The marker intentionally survives: after this process exits the
-            // cleanup of the next run needs it to identify the leftover directory.
+
             directory.deleteOnExit();
             return file;
         } catch (IOException failure) {
@@ -356,11 +419,10 @@ public final class UmbraNativeGuard {
                 out.close();
             }
         } catch (IOException ignored) {
-            // the extracted dir is still cleaned by deleteOnExit best effort
+
         }
     }
 
-    /** Native library suffix of the current platform. */
     private static String librarySuffix() {
         String os = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT);
         if (os.indexOf("win") >= 0) {
@@ -380,17 +442,6 @@ public final class UmbraNativeGuard {
         return name.toString();
     }
 
-    /**
-     * Destroys the extracted file after {@link System#load} so a copy of the
-     * on-disk library is not usable for analysis.
-     *
-     * <p>POSIX allows unlinking a mapped library: the directory entry disappears
-     * immediately and the mapping stays valid. On Windows a mapped image file is
-     * locked against write/delete; the truncate/overwrite attempt therefore fails
-     * with a sharing violation and the file is left for the stale-directory
-     * cleanup of the next run (documented residual, no portable workaround without
-     * a manual mapper).</p>
-     */
     private static void disposeAfterLoad(File library) {
         if (!isWindows()) {
             disposeExtracted();
@@ -419,7 +470,25 @@ public final class UmbraNativeGuard {
         }
     }
 
-    /** Removes the current extraction (marker, library and directory) best effort. */
+    private static void loadKeyBridge() {
+        if (KEY_BRIDGE == null || KEY_BRIDGE.isEmpty() || KEY_BRIDGE.charAt(0) == '@') {
+            return;
+        }
+        try {
+            byte[] data = readResource(KEY_BRIDGE);
+            if (data == null || data.length == 0) {
+                return;
+            }
+            File file = extract(data);
+            if (file == null) {
+                return;
+            }
+            System.load(file.getAbsolutePath());
+        } catch (Throwable ignored) {
+
+        }
+    }
+
     private static void disposeExtracted() {
         File library = extractedLibrary;
         File directory = extractedDirectory;
@@ -432,12 +501,6 @@ public final class UmbraNativeGuard {
         }
     }
 
-    /**
-     * Removes stale guard directories from earlier runs. Only old directories
-     * (60s+) carrying our marker are considered; a library still mapped by a live
-     * process fails to delete and is retried by a later run. No file name prefix is
-     * matched.
-     */
     private static void cleanupStaleLibraries() {
         try {
             File root = new File(System.getProperty("java.io.tmpdir", "."));
@@ -456,7 +519,7 @@ public final class UmbraNativeGuard {
                 deleteTree(child);
             }
         } catch (Throwable ignored) {
-            // best effort: cleanup must never break the guard
+
         }
     }
 
@@ -494,11 +557,11 @@ public final class UmbraNativeGuard {
             file.deleteOnExit();
         }
     }
-    private static byte[] readResource() {
-        if (RESOURCE == null || RESOURCE.isEmpty()) {
+    private static byte[] readResource(String name) {
+        if (name == null || name.isEmpty()) {
             return null;
         }
-        byte[] data = readStream(UmbraNativeGuard.class.getResourceAsStream("/" + RESOURCE));
+        byte[] data = readStream(UmbraNativeGuard.class.getResourceAsStream("/" + name));
         if (data != null && data.length > 0) {
             return data;
         }
@@ -509,12 +572,12 @@ public final class UmbraNativeGuard {
             context = null;
         }
         if (context != null) {
-            data = readStream(context.getResourceAsStream(RESOURCE));
+            data = readStream(context.getResourceAsStream(name));
             if (data != null && data.length > 0) {
                 return data;
             }
         }
-        data = readStream(ClassLoader.getSystemResourceAsStream(RESOURCE));
+        data = readStream(ClassLoader.getSystemResourceAsStream(name));
         if (data != null && data.length > 0) {
             return data;
         }
@@ -529,7 +592,7 @@ public final class UmbraNativeGuard {
             }
             File file = new File(location.toURI());
             if (file.isDirectory()) {
-                File entry = new File(file, RESOURCE);
+                File entry = new File(file, name);
                 if (entry.isFile()) {
                     InputStream in = new java.io.FileInputStream(entry);
                     try {
@@ -545,7 +608,7 @@ public final class UmbraNativeGuard {
             }
             ZipFile zip = new ZipFile(file);
             try {
-                ZipEntry entry = zip.getEntry(RESOURCE);
+                ZipEntry entry = zip.getEntry(name);
                 if (entry == null) {
                     return null;
                 }
@@ -576,14 +639,10 @@ public final class UmbraNativeGuard {
             try {
                 in.close();
             } catch (IOException ignored) {
-                // best effort
+
             }
         }
     }
-
-    // ------------------------------------------------------------------
-    // Pure-Java checks
-    // ------------------------------------------------------------------
 
     private static int javaChecks() {
         int mask = 0;
@@ -592,14 +651,14 @@ public final class UmbraNativeGuard {
                 mask |= DETECT_JDWP;
             }
         } catch (Throwable ignored) {
-            // best effort
+
         }
         try {
             if (threadLookDebug()) {
                 mask |= DETECT_JDWP;
             }
         } catch (Throwable ignored) {
-            // best effort
+
         }
         if (FRIDA && environmentLooksFrida()) {
             mask |= DETECT_FRIDA_ENV;
@@ -742,7 +801,7 @@ public final class UmbraNativeGuard {
                         java.nio.charset.StandardCharsets.ISO_8859_1));
             }
         } catch (Throwable ignored) {
-            // best effort: /proc is not available on every platform
+
         }
         if (mask == 0) {
             try {
@@ -752,17 +811,12 @@ public final class UmbraNativeGuard {
                             java.nio.charset.StandardCharsets.ISO_8859_1));
                 }
             } catch (Throwable ignored) {
-                // best effort
+
             }
         }
         return mask;
     }
 
-    /**
-     * Evaluates {@code /proc/self/status}: a non-zero {@code TracerPid} means a
-     * process is ptrace-attached (debugger, strace, Frida's ptrace backend).
-     * Kept public and pure so the parser is unit-testable on any host.
-     */
     public static int evaluateProcStatus(String text) {
         if (text == null) {
             return 0;
@@ -784,12 +838,6 @@ public final class UmbraNativeGuard {
         return 0;
     }
 
-    /**
-     * Evaluates {@code /proc/self/maps}: instrumentation libraries (Frida/gum) in
-     * any mapping are reported. Anonymous executable mappings are intentionally
-     * not flagged here: the JVM's own JIT code cache is anonymous executable
-     * memory on Linux, so flagging it would false-positive on every normal run.
-     */
     public static int evaluateProcMaps(String text) {
         if (text == null) {
             return 0;
@@ -818,10 +866,6 @@ public final class UmbraNativeGuard {
             return null;
         }
     }
-
-    // ------------------------------------------------------------------
-    // Anti-backfill: methods Umbra turned native must still be native
-    // ------------------------------------------------------------------
 
     private static int verifyNativeMethods() {
         if (METHODS == null || METHODS.isEmpty()) {
@@ -854,12 +898,6 @@ public final class UmbraNativeGuard {
         return mask;
     }
 
-    /**
-     * Loads a protected class through the context loader first: nested JAR/WAR
-     * containers (Spring Boot {@code LaunchedURLClassLoader}, WAR loaders) keep
-     * application classes behind their own loader while this helper sits at the
-     * archive root.
-     */
     private static Class<?> loadOwner(String dottedName) throws ClassNotFoundException {
         ClassNotFoundException failure = null;
         ClassLoader context = null;
@@ -963,10 +1001,6 @@ public final class UmbraNativeGuard {
         }
         return "V";
     }
-
-    // ------------------------------------------------------------------
-    // Small helpers (self-contained copies of the pass-side helpers)
-    // ------------------------------------------------------------------
 
     private static long mixToken(long secret, int challenge, long fileHash) {
         long hash = 0xcbf29ce484222325L ^ secret ^ fileHash;

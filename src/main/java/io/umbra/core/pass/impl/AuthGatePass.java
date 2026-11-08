@@ -72,8 +72,7 @@ public final class AuthGatePass implements Pass {
             if (pool.isGenerated(node.name) || pool.isFrozen(node.name) || "module-info".equals(node.name)) {
                 continue;
             }
-            // Deliberately no keep-class filter: the main class is often kept
-            // (--keep / @Keep) and must still receive the gate.
+
             boolean touched = false;
             for (MethodNode method : node.methods) {
                 if (method.name.startsWith("<") || method.instructions == null) {
@@ -122,10 +121,6 @@ public final class AuthGatePass implements Pass {
         context.log().info("auth-gate: %s guards %d method(s) (%d main, %d configured) across %d class(es)",
                 helper, methods, mainMethods, entryCalls, classes);
     }
-
-    // ------------------------------------------------------------------
-    // entry-point parsing and mapping-aware matching
-    // ------------------------------------------------------------------
 
     private static List<EntryPoint> parseEntryPoints(List<String> configured) {
         List<EntryPoint> result = new ArrayList<EntryPoint>();
@@ -191,11 +186,10 @@ public final class AuthGatePass implements Pass {
         if (mapped != null && node.name.equals(mapped)) {
             return true;
         }
-        // The configured entry may already spell the current (renamed) owner.
+
         return false;
     }
 
-    /** Resolves the renamed method name for an original {@code owner#name[#desc]} entry. */
     private static String mappedName(EntryPoint entry, Map<String, String> methodMap) {
         for (Map.Entry<String, String> candidate : methodMap.entrySet()) {
             String[] parts = candidate.getKey().split("#");
@@ -213,7 +207,6 @@ public final class AuthGatePass implements Pass {
         return "";
     }
 
-    /** One configured verification entry point. */
     private static final class EntryPoint {
         final String owner;
         final String name;

@@ -16,7 +16,6 @@ public final class PresetValues {
     private PresetValues() {
     }
 
-    /** Resolves {@code preset} against {@code base} and returns every value it sets. */
     public static Map<String, String> describe(String preset, UmbraConfig base) throws ConfigException {
         Map<String, String> values = new LinkedHashMap<String, String>();
         UmbraConfig config = Presets.apply(base, preset, false);
@@ -66,7 +65,6 @@ public final class PresetValues {
         return values;
     }
 
-    /** Renders the map as tab separated {@code key<TAB>value} lines. */
     public static String dump(String preset, UmbraConfig base) throws ConfigException {
         StringBuilder out = new StringBuilder(4096);
         for (Map.Entry<String, String> entry : describe(preset, base).entrySet()) {

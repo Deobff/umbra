@@ -4,6 +4,8 @@ import io.umbra.core.api.Pass;
 import io.umbra.core.api.PassContext;
 import io.umbra.core.model.ClassPool;
 import io.umbra.core.runtime.crypto.CryptoSupport;
+import io.umbra.core.runtime.crypto.NativeKeySupport;
+import io.umbra.core.runtime.crypto.UmbraCrypto;
 import io.umbra.core.runtime.crypto.UmbraStringCipher;
 import io.umbra.core.runtime.crypto.UmbraStringIndy;
 import io.umbra.core.util.AsmUtil;
@@ -36,6 +38,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import io.umbra.core.pass.impl.shape.ShapeSelector;
 import io.umbra.core.util.RuntimeNames;
 
 /**
@@ -89,65 +92,47 @@ public final class StringEncryptionPass implements Pass {
 
     private static final String ANNOTATION = "Lio/umbra/annotations/StringEncryption;";
 
-    /** Descriptor of the injected string bootstrap (payload, key spec, seed, site, engine). */
     private static final String STRING_BOOTSTRAP_DESC =
             "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;"
-                    + "Ljava/lang/String;Ljava/lang/String;JII)Ljava/lang/invoke/CallSite;";
+                    + "Ljava/lang/String;Ljava/lang/String;JI)Ljava/lang/invoke/CallSite;";
 
     private static final String CLASS_KEY_FIELD_DESC = "Ljava/lang/String;";
 
-    /** Default rotation used by {@code string.engine=auto}. */
     private static final String DEFAULT_ENGINE_ORDER = "chacha20,aes-ctr,rc4,speck";
 
-    /**
-     * Conservative per-method code budget: encryption replaces a 2-byte
-     * {@code ldc} with an array construction plus a call (or a 5-byte
-     * {@code invokedynamic}), so a method close to the 65535-byte JVM limit
-     * would otherwise become unwritable ({@code MethodTooLargeException}).
-     */
     private static final int MAX_METHOD_CODE_BYTES = 60000;
-    /** Conservative growth charged per helper-call site while budgeting. */
+
     private static final int HELPER_SITE_GROWTH = 48;
-    /** Conservative growth charged per invokedynamic site while budgeting. */
+
     private static final int INDY_SITE_GROWTH = 6;
-    /**
-     * Constant-pool budget guard: every encrypted site adds a handful of pool
-     * entries, and a class file may not exceed 65535 entries.
-     */
+
     private static final int CLASS_SITE_LIMIT = 4000;
 
-    /** Template placeholder: bit 0 = wipe, bit 1 = stack-trace hiding, bit 2 = cache. */
     private static final String FLAGS_SPEC = "@@FLAGS@@";
 
-    /** Template placeholder for the per-build artifact salt. */
     private static final String SALT_SPEC = "@@SALT@@";
 
-    /** Payload/key-schedule version produced by this pass (see UmbraStringCipher). */
-    static final int PAYLOAD_VERSION = 3;
+    static final int PAYLOAD_VERSION = 4;
 
-    /** Descriptor of the dual-engine decryptor entry point (per-site convention). */
     public static final String DUAL_PER_SITE_DESC = "([Ljava/lang/String;JIIII)Ljava/lang/String;";
 
-    /** Descriptor of the dual-engine decryptor entry point (per-class key convention). */
     public static final String DUAL_PER_CLASS_DESC =
             "([Ljava/lang/String;Ljava/lang/String;IIII)Ljava/lang/String;";
 
-    /** Default per-class cap of dual-ciphertext sites ({@code string.otpMaxSites}). */
     static final int DEFAULT_OTP_MAX_SITES = 16;
 
-    /**
-     * Dual payloads below this length would double more bytes than they hide, so
-     * short literals keep a single ciphertext even when the option is on.
-     */
     private static final int MIN_DUAL_LENGTH = 8;
 
-    /** Extra code charged per dual site while budgeting a method. */
     private static final int DUAL_SITE_GROWTH = 24;
 
-    /**
-     * Strong engines tried for the second half when the configuration pins a
-     * single engine: a dual payload needs two different ciphers by definition.
-     */
+    static final int POOL_CHUNK_BYTES = 32768;
+
+    static final int POOL_MAX_FRAME_BYTES = 65535;
+
+    private static final int POOL_SITE_GROWTH = 48;
+
+    private static final String POOL_ACCESSOR_DESC = "(Ljava/lang/String;II)Ljava/lang/String;";
+
     private static final int[] STRONG_ENGINES = {
             UmbraStringCipher.CHACHA20, UmbraStringCipher.AES_CTR,
             UmbraStringCipher.RC4, UmbraStringCipher.SPECK
@@ -165,12 +150,26 @@ public final class StringEncryptionPass implements Pass {
 
     @Override
     public boolean enabled(PassContext context) {
+
+        String libraryKey = context.config().option("classEncryption.libraryKey", "").trim();
+        if (!libraryKey.isEmpty() && !context.hasSecret(PassContext.NATIVE_KEY_ROOT)) {
+            try {
+                byte[] raw = java.util.Base64.getDecoder().decode(libraryKey);
+                if (raw.length == 32) {
+                    context.putSecret(PassContext.NATIVE_KEY_ROOT, raw);
+                }
+                java.util.Arrays.fill(raw, (byte) 0);
+            } catch (IllegalArgumentException malformed) {
+
+            }
+        }
         return context.config().stringEncryption().enabled();
     }
 
     @Override
     public void run(PassContext context) {
         Options options = Options.resolve(context);
+        ShapeSelector selector = ShapeSelector.create(context);
         Run run = new Run(context, options);
         for (ClassNode node : new ArrayList<ClassNode>(context.classes().classes().values())) {
             ClassPool pool = context.classes();
@@ -183,11 +182,7 @@ public final class StringEncryptionPass implements Pass {
             if ("module-info".equals(node.name) || node.name.endsWith("/module-info")) {
                 continue;
             }
-            // Note: keep rules that protect reflection-visible classes from
-            // *renaming* do not protect their string constants; encrypting a
-            // literal never changes observable behaviour, so kept classes are
-            // processed too (an explicit @StringEncryption(enabled=false)
-            // annotation still opts out below).
+
             if (Boolean.FALSE.equals(annotationFlag(node.invisibleAnnotations, node.visibleAnnotations))) {
                 continue;
             }
@@ -195,12 +190,34 @@ public final class StringEncryptionPass implements Pass {
                     && (node.access & (Opcodes.ACC_INTERFACE | Opcodes.ACC_ANNOTATION | Opcodes.ACC_MODULE)) == 0;
             String classKeyField = perClass ? allocateFieldName(node, context) : null;
             byte[] classKey = perClass
-                    ? UmbraStringCipher.classKeyV2(run.artifactSalt, context.config().seed(), node.name)
+                    ? UmbraStringCipher.classKeyV4(run.keyRoot(), run.artifactSalt,
+                            context.config().seed(), node.name)
                     : null;
-            boolean indyAllowed = indyAllowed(node, options);
+
+            ShapeSelector.Shape stringShape = null;
+            boolean indyAllowed;
+            if (selector != null) {
+                stringShape = selector.pick(node, supportedStringShapes(node, options));
+                indyAllowed = stringShape == ShapeSelector.Shape.INDY_ENTRY_AND_INDEX
+                        && indyAllowed(node, options, true);
+            } else {
+                indyAllowed = indyAllowed(node, options);
+            }
             int sitesInClass = 0;
             run.beginClass(node.name);
             try {
+                if (options.pooling) {
+                    sitesInClass += transformClassPooled(run, node, classKey, classKeyField);
+                    if (selector != null) {
+                        selector.count(stringShape, sitesInClass);
+                    }
+                    if (perClass && sitesInClass > 0 && classKeyField != null) {
+                        addClassKeyField(node, classKeyField, UmbraStringCipher.classKeyV4(
+                                run.keyRoot(), run.artifactSalt, context.config().seed(), node.name));
+                        run.perClassClasses++;
+                    }
+                    continue;
+                }
                 for (MethodNode method : node.methods) {
                     if (method.instructions == null || method.instructions.size() == 0) {
                         continue;
@@ -224,9 +241,12 @@ public final class StringEncryptionPass implements Pass {
             } finally {
                 Cipher.wipe(classKey);
             }
+            if (selector != null) {
+                selector.count(stringShape, sitesInClass);
+            }
             if (perClass && sitesInClass > 0 && classKeyField != null) {
-                addClassKeyField(node, classKeyField, UmbraStringCipher.classKeyV2(
-                        run.artifactSalt, context.config().seed(), node.name));
+                addClassKeyField(node, classKeyField, UmbraStringCipher.classKeyV4(
+                        run.keyRoot(), run.artifactSalt, context.config().seed(), node.name));
                 run.perClassClasses++;
             }
 
@@ -264,8 +284,21 @@ public final class StringEncryptionPass implements Pass {
         context.stats().add("strings.cache", options.cache ? 1 : 0);
         context.stats().add("strings.encryptAll", options.encryptAll ? 1 : 0);
         context.stats().add("strings.payloadVersion", PAYLOAD_VERSION);
-        // Dual-ciphertext slots (P0-2-c): sites carrying two engines and the number
-        // of distinct engine pairs those sites use.
+        context.stats().add("strings.pooling", options.pooling ? 1 : 0);
+        if (options.pooling) {
+            context.stats().add("strings.pool.chunks", run.poolChunks);
+            context.stats().add("strings.pool.sites", run.poolSites);
+            context.stats().add("strings.pool.fallbacks", run.poolFallbacks);
+            context.stats().add("strings.pool.maxBytes", POOL_CHUNK_BYTES);
+        }
+        if (selector != null) {
+            selector.report(context.stats());
+            context.log().info("string-encryption: shape pool [%s] over %d site(s), %d fallback(s)",
+                    selector.describe(), selector.sites(), selector.fallbacks());
+        }
+
+        context.stats().add("strings.nativeKey", run.keyRoot() != null ? 1 : 0);
+
         context.stats().add("string.otp.sites", run.otpSites);
         context.stats().add("string.otp.engines", run.otpPairs.size());
         if (options.unsupportedOptions > 0) {
@@ -279,7 +312,8 @@ public final class StringEncryptionPass implements Pass {
         }
         context.log().info("string-encryption: encrypted %d string constants (%s, split=%s, cache=%s, "
                         + "perClassKey=%d classes, indy=%d sites, minLength=%d, wipe=%s, "
-                        + "stackTraceHide=%s, payload=v%d, size-skips=%d/%d, otp-slots=%d/%d)",
+                        + "stackTraceHide=%s, payload=v%d, size-skips=%d/%d, otp-sites=%d total, "
+                        + "cap=%d/class)",
                 run.encrypted, run.describeEngines(), Boolean.valueOf(options.split),
                 Boolean.valueOf(options.cache), run.perClassClasses, run.indySites, options.minLength,
                 Boolean.valueOf(options.wipe), Boolean.valueOf(options.stackTraceHide),
@@ -315,9 +349,7 @@ public final class StringEncryptionPass implements Pass {
                             run.classLimitSkips++;
                             break;
                         }
-                        // invokedynamic sites keep the packed single-engine
-                        // payload: the bootstrap descriptor is fixed, so the
-                        // selector overload is only emitted for helper calls.
+
                         boolean dual = !indyAllowed && run.dualEligible(value);
                         int growth = dual ? perSiteGrowth + DUAL_SITE_GROWTH : perSiteGrowth;
                         if (projectedBytes + growth > MAX_METHOD_CODE_BYTES) {
@@ -339,8 +371,7 @@ public final class StringEncryptionPass implements Pass {
                             InvokeDynamicInsnNode call = new InvokeDynamicInsnNode("s" + siteId,
                                     "()Ljava/lang/String;", handle,
                                     site.packedPayload, site.perClass ? classKeyField : "",
-                                    Long.valueOf(site.siteSeed), Integer.valueOf(site.siteId),
-                                    Integer.valueOf(site.engine));
+                                    Long.valueOf(site.siteSeed), Integer.valueOf(site.siteId));
                             method.instructions.set(insn, call);
                             run.indySites++;
                         } else {
@@ -371,7 +402,6 @@ public final class StringEncryptionPass implements Pass {
         return value.length() >= options.minLength && value.length() > 0;
     }
 
-    /** Code-attribute byte estimate used to keep rewritten methods under 64KB. */
     static int estimateCodeBytes(MethodNode method) {
         int total = 0;
         for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null;
@@ -381,7 +411,6 @@ public final class StringEncryptionPass implements Pass {
         return total;
     }
 
-    /** Approximate encoded size of one instruction (conservative where variable). */
     private static int instructionBytes(AbstractInsnNode insn) {
         int opcode = insn.getOpcode();
         if (opcode < 0) {
@@ -394,7 +423,7 @@ public final class StringEncryptionPass implements Pass {
             return 1 + 3 + 8 + 8 * ((LookupSwitchInsnNode) insn).labels.size();
         }
         if (insn instanceof LdcInsnNode) {
-            // Could be ldc (2) or ldc_w/ldc2_w (3); charging 3 is conservative.
+
             return 3;
         }
         if (opcode == Opcodes.BIPUSH || opcode == Opcodes.SIPUSH || opcode == Opcodes.NEWARRAY
@@ -422,17 +451,18 @@ public final class StringEncryptionPass implements Pass {
         return 1;
     }
 
-    /** Emits a call to the injected decryptor that reassembles and decrypts one site. */
     private static void emitHelperCall(Run run, InsnList out, ClassNode node, Site site,
                                        String classKeyField) {
         emitParts(out, site.parts);
+        emitDecryptCall(run, out, node, site, classKeyField);
+    }
+
+    private static void emitDecryptCall(Run run, InsnList out, ClassNode node, Site site,
+                                        String classKeyField) {
         String decryptor = run.decryptor();
         String entry = run.options.cache ? "e" : "d";
         if (site.dual) {
-            // Dual payload: the selector is the one-time state's carrier, whose
-            // low bit strictly alternates, so the next call at this very site
-            // takes the other engine. The template never references the state
-            // class itself; the call site supplies the value.
+
             if (site.perClass) {
                 out.add(new FieldInsnNode(Opcodes.GETSTATIC, node.name, classKeyField,
                         CLASS_KEY_FIELD_DESC));
@@ -462,17 +492,6 @@ public final class StringEncryptionPass implements Pass {
         }
     }
 
-    /**
-     * Encrypts {@code static final String} field constants.
-     *
-     * <p>A field still carrying a {@code ConstantValue} attribute would leak
-     * its plaintext through the class file even after every {@code LDC} was
-     * rewritten (javac duplicates compile-time constants into both places).
-     * The attribute is removed and the field is initialized at the start of
-     * {@code <clinit>} with a decryptor call; for compile-time constants this
-     * cannot change observable initialisation order (they are prepared before
-     * {@code <clinit>} runs anyway).</p>
-     */
     private int encryptFieldConstants(Run run, ClassNode node, byte[] classKey, String classKeyField) {
         boolean perClass = classKey != null && classKeyField != null;
         int count = 0;
@@ -551,9 +570,12 @@ public final class StringEncryptionPass implements Pass {
         return clinit;
     }
 
-    /** True when this class can host invokedynamic call sites. */
     private static boolean indyAllowed(ClassNode node, Options options) {
-        if (!options.indy) {
+        return indyAllowed(node, options, false);
+    }
+
+    private static boolean indyAllowed(ClassNode node, Options options, boolean forced) {
+        if (!options.indy && !forced) {
             return false;
         }
         if ((node.version & 0xFFFF) >= Opcodes.V1_7) {
@@ -566,23 +588,18 @@ public final class StringEncryptionPass implements Pass {
         return true;
     }
 
-    /**
-     * Encrypts one call site and prepares its constant-pool payload.
-     *
-     * <p>With {@code dualRequested} the value is encrypted twice under two
-     * different engines and the two part lists are concatenated (first half
-     * {@code engine}, second half {@code engineB}). Both halves are keyed with
-     * their own domain-separated site index ({@link UmbraStringCipher#dualSiteId}),
-     * so the two ciphertexts never share a keystream.</p>
-     */
     private static Site encryptSite(Run run, String value, ClassNode node, int siteId,
                                     boolean perClass, byte[] classKey, boolean dualRequested) {
+        return encryptSite(run, value, node, siteId, perClass, classKey, dualRequested, -1);
+    }
+
+    private static Site encryptSite(Run run, String value, ClassNode node, int siteId,
+                                    boolean perClass, byte[] classKey, boolean dualRequested,
+                                    int forcedParts) {
         int engine = run.engineFor(node.name, siteId);
         int second = -1;
         if (dualRequested) {
-            // The xor engine takes its keystream from the per-site seed alone and
-            // cannot share the per-class calling convention, so a dual payload
-            // always pairs two strong engines.
+
             if (engine == UmbraStringCipher.XOR) {
                 engine = run.strongEngine(UmbraStringCipher.XOR);
             }
@@ -597,32 +614,42 @@ public final class StringEncryptionPass implements Pass {
         byte[] secondCiphertext = null;
         byte[] key = null;
         boolean temporaryKey = false;
-        // The xor engine's keystream is seeded from the per-site seed, which a
-        // per-class call site does not carry; those sites always use the
-        // per-site calling convention even when per-class keys are enabled.
+
+        byte[] payloadSalt = new byte[UmbraStringCipher.PAYLOAD_SALT_BYTES];
+        run.context.random().nextBytes(payloadSalt);
+
+        payloadSalt[0] = (byte) ((payloadSalt[0] & 0xF8) | (engine & 7));
+        long streamSeed = UmbraStringCipher.payloadStreamSeed(siteSeed, payloadSalt);
+        byte[] root = run.keyRoot();
+
         boolean usePerClass = perClass && engine != UmbraStringCipher.XOR;
         try {
             if (engine == UmbraStringCipher.XOR) {
-                ciphertext = UmbraStringCipher.transform(engine, plain, null, null, siteSeed);
+                ciphertext = UmbraStringCipher.transform(engine, plain, null, null, streamSeed);
             } else if (usePerClass) {
-                byte[] nonce = UmbraStringCipher.classNonceV2(run.artifactSalt, classKey, siteId);
-                ciphertext = UmbraStringCipher.transform(engine, plain, classKey, nonce, siteSeed);
+                byte[] nonce = UmbraStringCipher.classNonceV4(root, run.artifactSalt, classKey,
+                        siteId, payloadSalt);
+                ciphertext = UmbraStringCipher.transform(engine, plain, classKey, nonce, streamSeed);
                 Cipher.wipe(nonce);
             } else {
-                key = UmbraStringCipher.siteKeyV2(run.artifactSalt, siteSeed, siteId);
+                key = UmbraStringCipher.siteKeyV4(root, run.artifactSalt, siteSeed, siteId,
+                        payloadSalt);
                 temporaryKey = true;
-                byte[] nonce = UmbraStringCipher.siteNonceV2(run.artifactSalt, siteSeed, siteId);
-                ciphertext = UmbraStringCipher.transform(engine, plain, key, nonce, siteSeed);
+                byte[] nonce = UmbraStringCipher.siteNonceV4(root, run.artifactSalt, siteSeed,
+                        siteId, payloadSalt);
+                ciphertext = UmbraStringCipher.transform(engine, plain, key, nonce, streamSeed);
                 Cipher.wipe(nonce);
             }
+            ciphertext = prepend(payloadSalt, ciphertext);
             if (second >= 0) {
                 secondCiphertext = encryptSecondHalf(run, second, plain, usePerClass, classKey,
-                        siteSeed, UmbraStringCipher.dualSiteId(siteId, 1));
+                        siteSeed, siteId);
             }
         } finally {
             Arrays.fill(plain, (byte) 0);
         }
-        int partCount = run.options.split ? run.options.splitParts : 1;
+        int partCount = forcedParts > 0 ? forcedParts
+                : (run.options.split ? run.options.splitParts : 1);
         String[] parts;
         if (secondCiphertext != null) {
             String[] first = splitParts(ciphertext, partCount);
@@ -632,8 +659,7 @@ public final class StringEncryptionPass implements Pass {
             if (first.length == other.length) {
                 parts = concat(first, other);
             } else {
-                // Uneven halves would make the runtime boundary ambiguous; keep
-                // the site single-engine instead of emitting a guessed layout.
+
                 run.dualLayoutFallbacks++;
                 parts = first;
                 second = -1;
@@ -664,24 +690,40 @@ public final class StringEncryptionPass implements Pass {
         return site;
     }
 
-    /** Encrypts the second half of a dual payload with its own site index. */
     private static byte[] encryptSecondHalf(Run run, int engine, byte[] plain, boolean usePerClass,
-                                            byte[] classKey, long siteSeed, int halfSiteId) {
+                                            byte[] classKey, long siteSeed, int siteId) {
+        byte[] payloadSalt = new byte[UmbraStringCipher.PAYLOAD_SALT_BYTES];
+        run.context.random().nextBytes(payloadSalt);
+
+        payloadSalt[0] = (byte) ((payloadSalt[0] & 0xF8) | (engine & 7));
+        long streamSeed = UmbraStringCipher.payloadStreamSeed(siteSeed, payloadSalt);
+        byte[] root = run.keyRoot();
+        byte[] out;
         if (usePerClass) {
-            byte[] nonce = UmbraStringCipher.classNonceV2(run.artifactSalt, classKey, halfSiteId);
-            byte[] out = UmbraStringCipher.transform(engine, plain, classKey, nonce, siteSeed);
+            byte[] nonce = UmbraStringCipher.classNonceV4(root, run.artifactSalt, classKey, siteId,
+                    payloadSalt);
+            out = UmbraStringCipher.transform(engine, plain, classKey, nonce, streamSeed);
             Cipher.wipe(nonce);
-            return out;
+            return prepend(payloadSalt, out);
         }
-        byte[] key = UmbraStringCipher.siteKeyV2(run.artifactSalt, siteSeed, halfSiteId);
-        byte[] nonce = UmbraStringCipher.siteNonceV2(run.artifactSalt, siteSeed, halfSiteId);
-        byte[] out = UmbraStringCipher.transform(engine, plain, key, nonce, siteSeed);
+        byte[] key = UmbraStringCipher.siteKeyV4(root, run.artifactSalt, siteSeed, siteId,
+                payloadSalt);
+        byte[] nonce = UmbraStringCipher.siteNonceV4(root, run.artifactSalt, siteSeed, siteId,
+                payloadSalt);
+        out = UmbraStringCipher.transform(engine, plain, key, nonce, streamSeed);
         Cipher.wipe(nonce);
         Cipher.wipe(key);
+        return prepend(payloadSalt, out);
+    }
+
+    private static byte[] prepend(byte[] salt, byte[] body) {
+        byte[] out = new byte[salt.length + body.length];
+        System.arraycopy(salt, 0, out, 0, salt.length);
+        System.arraycopy(body, 0, out, salt.length, body.length);
+        Arrays.fill(body, (byte) 0);
         return out;
     }
 
-    /** Concatenates two part lists; the dual layout is "all of A, then all of B". */
     private static String[] concat(String[] first, String[] second) {
         String[] all = new String[first.length + second.length];
         System.arraycopy(first, 0, all, 0, first.length);
@@ -689,7 +731,6 @@ public final class StringEncryptionPass implements Pass {
         return all;
     }
 
-    /** Splits ciphertext into {@code count} Base64 parts. */
     static String[] splitParts(byte[] ciphertext, int count) {
         if (count <= 1 || ciphertext.length < count * 2) {
             return new String[] { Cipher.base64(ciphertext) };
@@ -721,10 +762,6 @@ public final class StringEncryptionPass implements Pass {
         return value != null ? value : AsmUtil.annotationBoolean(visible, ANNOTATION, "enabled");
     }
 
-    // ------------------------------------------------------------------
-    // Per-class key field
-    // ------------------------------------------------------------------
-
     private static String allocateFieldName(ClassNode node, PassContext context) {
         Random random = new Random(context.config().seed() ^ node.name.hashCode() * 31L);
         NameGenerator names = new NameGenerator(random, "");
@@ -751,11 +788,6 @@ public final class StringEncryptionPass implements Pass {
         node.fields.add(0, field);
     }
 
-    // ------------------------------------------------------------------
-    // State holders
-    // ------------------------------------------------------------------
-
-    /** Resolved string-protection configuration. */
     static final class Options {
         private boolean autoEngine;
         private int singleEngine = UmbraStringCipher.CHACHA20;
@@ -769,6 +801,7 @@ public final class StringEncryptionPass implements Pass {
         private boolean encryptAll;
         private boolean otpEngines;
         private int otpMaxSites;
+        private boolean pooling;
         private boolean engineFallback;
         private int engineOrderIgnored;
         private int unsupportedOptions;
@@ -825,18 +858,17 @@ public final class StringEncryptionPass implements Pass {
             options.perClassKey = context.config().optionBool("string.perClassKey", options.perClassKey);
             options.split = context.config().optionBool("string.split", options.split);
             options.indy = context.config().optionBool("string.indy", options.indy);
-            // Plaintext memoization is opt-in only (heap-dump hygiene).
+
             options.cache = context.config().optionBool("string.cache", false);
             options.wipe = context.config().optionBool("string.wipe", false);
             options.stackTraceHide = context.config().optionBool("string.stackTraceHide", false);
             options.encryptAll = context.config().optionBool("string.encryptAll", false);
+
+            options.pooling = context.config().optionBool("string.pooling", false);
             if (options.encryptAll) {
                 options.minLength = 1;
             }
-            // Dual-ciphertext slots (P0-2-c). The presets that enable the
-            // one-time state set this option; the pass still needs the OTP class
-            // to supply the selector, so the effective switch also requires
-            // otp.enabled (see Run#dualEnabled).
+
             options.otpEngines = context.config().optionBool("string.otpEngines", false);
             options.otpMaxSites = Math.max(0, Math.min(4096,
                     context.config().optionInt("string.otpMaxSites", DEFAULT_OTP_MAX_SITES)));
@@ -857,8 +889,7 @@ public final class StringEncryptionPass implements Pass {
             } else {
                 Integer explicit = parseEngineName(engineSpec);
                 if (engineSpec != null && !engineSpec.trim().isEmpty() && explicit == null) {
-                    // Never accept an unsupported cipher as a silent
-                    // single-engine build: fall back to the randomized whitelist.
+
                     context.log().warn("string-encryption: unsupported string.engine '%s'; "
                             + "falling back to the auto engine distribution", engineSpec.trim());
                     options.autoEngine = true;
@@ -892,7 +923,6 @@ public final class StringEncryptionPass implements Pass {
         }
     }
 
-    /** Parses one engine name, returning {@code null} for unknown/empty values. */
     static Integer parseEngineName(String raw) {
         if (raw == null) {
             return null;
@@ -919,16 +949,10 @@ public final class StringEncryptionPass implements Pass {
         return null;
     }
 
-    /** Parses a comma/space/semicolon separated engine rotation; never empty. */
     static List<Integer> parseEngineOrder(String raw) {
         return parseEngineOrder(raw, new int[1]);
     }
 
-    /**
-     * Parses an engine rotation and counts unsupported/ignored tokens in
-     * {@code ignored[0]}. The result is never empty: unknown-only lists fall back
-     * to {@link #DEFAULT_ENGINE_ORDER}.
-     */
     static List<Integer> parseEngineOrder(String raw, int[] ignored) {
         List<Integer> rotation = new ArrayList<Integer>();
         Set<Integer> seen = new LinkedHashSet<Integer>();
@@ -962,12 +986,277 @@ public final class StringEncryptionPass implements Pass {
         return rotation;
     }
 
-    /** Encrypted call-site data. */
+    private static ShapeSelector.Shape[] supportedStringShapes(ClassNode node, Options options) {
+        List<ShapeSelector.Shape> supported = new ArrayList<ShapeSelector.Shape>();
+        supported.add(ShapeSelector.Shape.LOOKUP_METHOD_AND_INDEX);
+        boolean indyCapable = (node.version & 0xFFFF) >= Opcodes.V1_7
+                && !AsmUtil.containsJsrOrRet(node);
+
+        if (indyCapable && !options.pooling) {
+            supported.add(ShapeSelector.Shape.INDY_ENTRY_AND_INDEX);
+        }
+        return supported.toArray(new ShapeSelector.Shape[0]);
+    }
+
+    private int transformClassPooled(Run run, ClassNode node, byte[] classKey,
+                                     String classKeyField) {
+        boolean perClass = classKey != null && classKeyField != null;
+        List<Site> sites = new ArrayList<Site>();
+        for (int m = 0; m < node.methods.size(); m++) {
+            MethodNode method = node.methods.get(m);
+            if (method.instructions == null || method.instructions.size() == 0) {
+                continue;
+            }
+            if ((method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) {
+                continue;
+            }
+            if (Boolean.FALSE.equals(annotationFlag(method.invisibleAnnotations,
+                    method.visibleAnnotations))) {
+                continue;
+            }
+            if (run.classSites + sites.size() >= CLASS_SITE_LIMIT) {
+                run.classLimitSkips++;
+                break;
+            }
+            int projectedBytes = estimateCodeBytes(method);
+            for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; ) {
+                AbstractInsnNode next = insn.getNext();
+                if (insn instanceof LdcInsnNode) {
+                    Object constant = ((LdcInsnNode) insn).cst;
+                    if (constant instanceof String
+                            && shouldEncrypt((String) constant, run.options)) {
+                        if (run.classSites + sites.size() >= CLASS_SITE_LIMIT) {
+                            run.classLimitSkips++;
+                            break;
+                        }
+                        if (projectedBytes + POOL_SITE_GROWTH > MAX_METHOD_CODE_BYTES) {
+                            run.methodSizeSkips++;
+                            break;
+                        }
+                        projectedBytes += POOL_SITE_GROWTH;
+                        Site site = new Site();
+                        site.insn = insn;
+                        site.owner = method;
+                        site.value = (String) constant;
+                        sites.add(site);
+                    }
+                }
+                insn = next;
+            }
+        }
+        if ((node.access & Opcodes.ACC_ANNOTATION) == 0
+                && run.classSites + sites.size() < CLASS_SITE_LIMIT) {
+            for (int f = 0; f < node.fields.size(); f++) {
+                FieldNode field = node.fields.get(f);
+                if (!(field.value instanceof String) || !CLASS_KEY_FIELD_DESC.equals(field.desc)) {
+                    continue;
+                }
+                if ((field.access & (Opcodes.ACC_STATIC | Opcodes.ACC_FINAL))
+                        != (Opcodes.ACC_STATIC | Opcodes.ACC_FINAL)) {
+                    continue;
+                }
+                String value = (String) field.value;
+                if (!shouldEncrypt(value, run.options)) {
+                    continue;
+                }
+                if (run.classSites + sites.size() >= CLASS_SITE_LIMIT) {
+                    run.classLimitSkips++;
+                    break;
+                }
+                Site site = new Site();
+                site.field = field;
+                site.value = value;
+                sites.add(site);
+            }
+        }
+        if (sites.isEmpty()) {
+            return 0;
+        }
+        for (int i = 0; i < sites.size(); i++) {
+            Site site = sites.get(i);
+            int siteId = run.nextSiteId();
+            Site encrypted = encryptSite(run, site.value, node, siteId, perClass, classKey,
+                    false, 1);
+            site.copyFrom(encrypted);
+            run.countEngine(encrypted.engine);
+            if (encrypted.temporaryKey) {
+                Cipher.wipe(encrypted.key);
+            }
+        }
+
+        int count = sites.size();
+        int[] chunkOf = new int[count];
+        int[] slotOf = new int[count];
+        int[] firstLenOf = new int[count];
+        for (int i = 0; i < count; i++) {
+            chunkOf[i] = -1;
+            slotOf[i] = -1;
+            firstLenOf[i] = -1;
+        }
+        List<String> chunkTexts = new ArrayList<String>();
+        int cursor = 0;
+        while (cursor < count) {
+            StringBuilder text = new StringBuilder();
+            int firstLen = -1;
+            int bytes = 0;
+            int slot = 0;
+            int chunkIndex = chunkTexts.size();
+            while (cursor < count) {
+                String payload = sites.get(cursor).parts.length == 0
+                        ? "" : sites.get(cursor).parts[0];
+                int length = payload.length();
+                StringBuilder frame = new StringBuilder(length + 1);
+                if (firstLen == -1) {
+                    firstLen = length;
+                } else {
+                    frame.append((char) length);
+                }
+                frame.append(payload);
+                int frameBytes = modifiedUtf8Length(frame);
+                if (frameBytes > POOL_MAX_FRAME_BYTES) {
+
+                    run.poolFallbacks++;
+                    cursor++;
+                    continue;
+                }
+                if (bytes > 0 && bytes + frameBytes > POOL_CHUNK_BYTES) {
+                    break;
+                }
+                bytes += frameBytes;
+                chunkOf[cursor] = chunkIndex;
+                slotOf[cursor] = slot;
+                firstLenOf[cursor] = firstLen;
+                slot++;
+                cursor++;
+                text.append(frame);
+
+                if (chunkTexts.isEmpty() && count > 3 && cursor == count - 2) {
+                    break;
+                }
+            }
+            if (text.length() > 0) {
+                chunkTexts.add(text.toString());
+                run.poolChunks++;
+            }
+        }
+        String accessorName = null;
+        for (int i = 0; i < count; i++) {
+            if (chunkOf[i] >= 0) {
+                accessorName = "z$q" + Integer.toHexString(
+                        run.context.random().nextInt() | 1);
+                break;
+            }
+        }
+        int emitted = 0;
+        int pooledHere = 0;
+        for (int i = 0; i < count; i++) {
+            Site site = sites.get(i);
+            InsnList code = new InsnList();
+            if (chunkOf[i] >= 0) {
+                AsmUtil.pushInt(code, 1);
+                code.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/String"));
+                code.add(new InsnNode(Opcodes.DUP));
+                AsmUtil.pushInt(code, 0);
+                code.add(new LdcInsnNode(chunkTexts.get(chunkOf[i])));
+                AsmUtil.pushInt(code, firstLenOf[i]);
+                AsmUtil.pushInt(code, slotOf[i]);
+                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC, node.name, accessorName,
+                        POOL_ACCESSOR_DESC, false));
+                code.add(new InsnNode(Opcodes.AASTORE));
+                run.poolSites++;
+                pooledHere++;
+            } else {
+                run.poolFallbacks++;
+                emitParts(code, site.parts);
+            }
+            emitDecryptCall(run, code, node, site, classKeyField);
+            if (site.field != null) {
+                MethodNode clinit = ensureClinit(node);
+                code.add(new FieldInsnNode(Opcodes.PUTSTATIC, node.name, site.field.name,
+                        CLASS_KEY_FIELD_DESC));
+                clinit.instructions.insert(code);
+                site.field.value = null;
+                run.fieldConstants++;
+            } else {
+                site.owner.instructions.insertBefore(site.insn, code);
+                site.owner.instructions.remove(site.insn);
+            }
+            run.encrypted++;
+            run.classSites++;
+            emitted++;
+        }
+        if (pooledHere > 0 && accessorName != null) {
+            node.methods.add(poolAccessor(node, accessorName));
+        }
+        return emitted;
+    }
+
+    private static MethodNode poolAccessor(ClassNode node, String name) {
+        MethodNode method = new MethodNode(
+                Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+                name, POOL_ACCESSOR_DESC, null, null);
+        InsnList code = method.instructions;
+        org.objectweb.asm.tree.LabelNode loop = new org.objectweb.asm.tree.LabelNode();
+        org.objectweb.asm.tree.LabelNode end = new org.objectweb.asm.tree.LabelNode();
+
+        code.add(new InsnNode(Opcodes.ICONST_0));
+        code.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ISTORE, 3));
+
+        code.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ILOAD, 1));
+        code.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ISTORE, 4));
+
+        code.add(new InsnNode(Opcodes.ICONST_0));
+        code.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ISTORE, 5));
+        code.add(loop);
+        code.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ILOAD, 5));
+        code.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ILOAD, 2));
+        code.add(new org.objectweb.asm.tree.JumpInsnNode(Opcodes.IF_ICMPGE, end));
+        code.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ILOAD, 3));
+        code.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ILOAD, 4));
+        code.add(new InsnNode(Opcodes.IADD));
+        code.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ISTORE, 3));
+        code.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ALOAD, 0));
+        code.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ILOAD, 3));
+        code.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C",
+                false));
+        code.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ISTORE, 4));
+        code.add(new org.objectweb.asm.tree.IincInsnNode(3, 1));
+        code.add(new org.objectweb.asm.tree.IincInsnNode(5, 1));
+        code.add(new org.objectweb.asm.tree.JumpInsnNode(Opcodes.GOTO, loop));
+        code.add(end);
+        code.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ALOAD, 0));
+        code.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ILOAD, 3));
+        code.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ILOAD, 3));
+        code.add(new org.objectweb.asm.tree.VarInsnNode(Opcodes.ILOAD, 4));
+        code.add(new InsnNode(Opcodes.IADD));
+        code.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/String", "substring",
+                "(II)Ljava/lang/String;", false));
+        code.add(new InsnNode(Opcodes.ARETURN));
+        method.maxLocals = 6;
+        method.maxStack = 3;
+        return method;
+    }
+
+    static int modifiedUtf8Length(CharSequence text) {
+        int bytes = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c >= 0x0001 && c <= 0x007F) {
+                bytes += 1;
+            } else if (c <= 0x07FF) {
+                bytes += 2;
+            } else {
+                bytes += 3;
+            }
+        }
+        return bytes;
+    }
+
     private static final class Site {
         private int siteId;
         private long siteSeed;
         private int engine;
-        /** Second engine of a dual payload, {@code -1} for a single-engine site. */
+
         private int engineB = -1;
         private boolean dual;
         private boolean perClass;
@@ -976,14 +1265,36 @@ public final class StringEncryptionPass implements Pass {
         private String packedPayload;
         private byte[] key;
         private boolean temporaryKey;
+
+        private AbstractInsnNode insn;
+        private MethodNode owner;
+        private FieldNode field;
+        private String value;
+
+        private void copyFrom(Site other) {
+            this.siteId = other.siteId;
+            this.siteSeed = other.siteSeed;
+            this.engine = other.engine;
+            this.engineB = other.engineB;
+            this.dual = other.dual;
+            this.perClass = other.perClass;
+            this.parts = other.parts;
+            this.partCount = other.partCount;
+            this.packedPayload = other.packedPayload;
+            this.key = other.key;
+            this.temporaryKey = other.temporaryKey;
+        }
     }
 
-    /** Per-run mutable state, template cache and statistics. */
     private static final class Run {
         private final PassContext context;
         private final Options options;
         private final int[] engineCounts = new int[5];
         private final long artifactSalt;
+
+        private final byte[] root;
+
+        private final boolean explicitKey;
         private final Set<Integer> classSiteIds = new HashSet<Integer>();
         private Random classRandom;
         private int encrypted;
@@ -1000,6 +1311,9 @@ public final class StringEncryptionPass implements Pass {
         private int otpSites;
         private int classDualSites;
         private int dualLayoutFallbacks;
+        private int poolChunks;
+        private int poolSites;
+        private int poolFallbacks;
         private String otpClass;
         private String crypto;
         private String decryptor;
@@ -1009,8 +1323,10 @@ public final class StringEncryptionPass implements Pass {
             this.context = context;
             this.options = options;
             this.artifactSalt = resolveArtifactSalt(context);
-            // Dual payloads need the one-time state for the selector; without it
-            // the call sites keep the byte-compatible single-engine form.
+            this.root = resolveKeyRoot(context);
+            this.explicitKey = !context.config().option("string.key", "").trim().isEmpty()
+                    && this.root != null;
+
             this.dualEnabled = options.otpEngines
                     && context.config().optionBool("otp.enabled", false);
             if (options.otpEngines && !dualEnabled) {
@@ -1019,12 +1335,6 @@ public final class StringEncryptionPass implements Pass {
             }
         }
 
-        /**
-         * Resolves the per-build artifact salt: explicit {@code string.siteSalt}
-         * (decimal/hex number, or hashed text) or a deterministic 64-bit value
-         * derived from the build seed. It is embedded in the injected decryptor
-         * and mixed into every key/nonce/seed derivation (payload v3).
-         */
         private static long resolveArtifactSalt(PassContext context) {
             String raw = context.config().option("string.siteSalt", "");
             if (raw != null && !raw.trim().isEmpty()) {
@@ -1040,6 +1350,99 @@ public final class StringEncryptionPass implements Pass {
             return UmbraStringCipher.deriveArtifactSalt(context.config().seed());
         }
 
+        private static byte[] resolveKeyRoot(PassContext context) {
+
+            boolean publisher = context.config().optionBool("classEncryption.enabled", false)
+                    || context.config().optionBool("integrity.enabled", false);
+            boolean nativeBoundExpected = context.config().optionBool("classEncryption.nativeKey", true)
+                    && !"sample".equalsIgnoreCase(
+                            context.config().option("classEncryption.masterBinding", ""))
+                    && context.config().optionBool("antiDebug.nativeGuard", true)
+                    && context.config().optionInt("antiDebug.level", 0) > 0;
+            if (publisher && nativeBoundExpected) {
+                byte[] raw = NativeKeySupport.ensureBuildRoot(context);
+                byte[] root = raw == null ? null
+                        : UmbraCrypto.nativeKeyRoot(raw, UmbraCrypto.ROOT_SLOT,
+                                UmbraCrypto.ROOT_SUB);
+                if (root != null) {
+
+                    if (!context.config().option("string.key", "").trim().isEmpty()) {
+                        context.stats().add("strings.keyIgnored", 1);
+                        context.log().info("string-encryption: string.key is ignored because this "
+                                + "build has the native key root (native-root is strictly stronger "
+                                + "than an embedded key); remove the option to silence this");
+                    }
+                    context.stats().text("strings.keyTier", "native-root");
+                    context.stats().add("strings.keyTierCode", 3);
+                    context.log().info("string-encryption: site keys bound to the native key root "
+                            + "(strings.keyTier=native-root)");
+                    return root;
+                }
+            }
+            byte[] explicit = explicitStringKey(context);
+            if (explicit != null) {
+
+                context.stats().text("strings.keyTier", "embedded");
+                context.stats().add("strings.keyTierCode", 1);
+                context.log().warn("string-encryption: string.key tier - the key is embedded in "
+                        + "the artifact (keyTier=embedded); offline decryption is possible for "
+                        + "anyone who extracts it");
+                return explicit;
+            }
+            if (publisher) {
+
+                context.stats().text("strings.keyTier", "publisher");
+                context.stats().add("strings.keyTierCode", 2);
+                return null;
+            }
+            boolean strictSealed = context.config().optionBool("classEncryption.nativeKey", true)
+                    && !context.config().optionBool("classEncryption.nativeKey.fallback", true);
+            if (strictSealed) {
+                throw new IllegalStateException("string-encryption: this build asked to bind the "
+                        + "master key to the native root (classEncryption.nativeKey=true with "
+                        + "fallback disabled) but no root could be established, so every site key "
+                        + "would be derivable from the class file alone. Either make the native "
+                        + "bridge buildable, or accept the documented weaker tier with\n"
+                        + "  -> classEncryption.nativeKey.fallback=true\n"
+                        + "  -> string.key=<base64 32 bytes>  (keyTier=embedded)\n"
+                        + "  -> classEncryption.libraryMode=true + classEncryption.libraryKey=<b64>");
+            }
+            context.stats().text("strings.keyTier", "keyless");
+            context.stats().add("strings.keyTierCode", 0);
+            context.stats().add("strings.keylessFallback", 1);
+            if (!context.config().optionBool("string.allowKeylessFallback", false)) {
+                context.log().warn("string-encryption: KEYLESS tier (no key root, no string.key): "
+                        + "site keys are derived from build constants only - offline decryption "
+                        + "is possible. Bind a native root or set string.key to avoid this tier");
+            }
+            return null;
+        }
+
+        private static byte[] explicitStringKey(PassContext context) {
+            String encoded = context.config().option("string.key", "").trim();
+            if (encoded.isEmpty()) {
+                return null;
+            }
+            byte[] raw;
+            try {
+                raw = java.util.Base64.getDecoder().decode(encoded);
+            } catch (IllegalArgumentException malformed) {
+                throw new IllegalStateException("string-encryption: string.key is not valid Base64");
+            }
+            if (raw.length < 16) {
+                throw new IllegalStateException("string-encryption: string.key must be at least 16 "
+                        + "bytes (Base64)");
+            }
+            byte[] expanded = UmbraCrypto.sha256(UmbraCrypto.concat(
+                    UmbraCrypto.utf8("umbra.string.key.v1"), raw));
+            java.util.Arrays.fill(raw, (byte) 0);
+            return expanded;
+        }
+
+        byte[] keyRoot() {
+            return root;
+        }
+
         void beginClass(String className) {
             classSites = 0;
             classDualSites = 0;
@@ -1051,12 +1454,6 @@ public final class StringEncryptionPass implements Pass {
             classRandom = new Random(mixed);
         }
 
-        /**
-         * Deterministic but non-sequential 31-bit call-site index, unique inside
-         * the class. The index participates in key/nonce derivation, so
-         * uniqueness is required to avoid keystream reuse, and random-looking
-         * values stop "grep the next index" batch extraction.
-         */
         int nextSiteId() {
             if (classRandom == null) {
                 throw new IllegalStateException("site id requested before beginClass");
@@ -1070,11 +1467,6 @@ public final class StringEncryptionPass implements Pass {
             throw new IllegalStateException("Unable to allocate a unique string site id");
         }
 
-        /**
-         * Randomized per-site engine selection for {@code string.engine=auto}.
-         * Only whitelisted engines can appear (the rotation was parsed from
-         * {@link #parseEngineName}); selection is deterministic per seed.
-         */
         int engineFor(String className, int siteId) {
             if (!options.autoEngine) {
                 return options.singleEngine;
@@ -1092,11 +1484,6 @@ public final class StringEncryptionPass implements Pass {
             }
         }
 
-        /**
-         * Whether this site gets the doubled payload: the feature must be on, the
-         * one-time state must be injected, the literal must be long enough for
-         * the doubling to pay off, and the per-class cap must not be exhausted.
-         */
         boolean dualEligible(String value) {
             if (!dualEnabled || value.length() < Math.max(options.minLength, MIN_DUAL_LENGTH)) {
                 return false;
@@ -1104,7 +1491,6 @@ public final class StringEncryptionPass implements Pass {
             return classDualSites < options.otpMaxSites;
         }
 
-        /** Records a site that really carries two ciphertexts. */
         void countDual(Site site) {
             if (!site.dual) {
                 return;
@@ -1114,13 +1500,6 @@ public final class StringEncryptionPass implements Pass {
             otpPairs.add(Long.valueOf((((long) site.engine) << 8) | site.engineB));
         }
 
-        /**
-         * Deterministic second-engine choice for a dual payload. The configured
-         * rotation is preferred; when it pins a single engine (or only engines
-         * already excluded) the default strong order is used, because a dual
-         * payload needs two different ciphers by definition. Never returns
-         * {@link UmbraStringCipher#XOR} and never returns {@code exclude}.
-         */
         int strongEngine(int exclude) {
             List<Integer> candidates = new ArrayList<Integer>();
             for (int i = 0; i < options.rotation.size(); i++) {
@@ -1145,7 +1524,6 @@ public final class StringEncryptionPass implements Pass {
             return candidates.get(classRandom.nextInt(candidates.size())).intValue();
         }
 
-        /** Injected one-time state class, injected on first use and then cached. */
         String otpClass() {
             if (otpClass == null) {
                 otpClass = context.runtime().ensureOtp(context.classes(), context.config().seed());
@@ -1198,6 +1576,13 @@ public final class StringEncryptionPass implements Pass {
                 replacements.put(SALT_SPEC, Long.toString(artifactSalt));
                 CryptoSupport.injectWithCrypto(context.classes(), UmbraStringCipher.class, decryptor,
                         crypto, replacements);
+                if (explicitKey) {
+
+                    Map<String, String> embedded = new LinkedHashMap<String, String>();
+                    embedded.put("__UMBRA_NO_STRING_KEY__",
+                            java.util.Base64.getEncoder().encodeToString(root));
+                    CryptoSupport.replaceConstants(context.classes().getClass(crypto), embedded);
+                }
             }
             return decryptor;
         }

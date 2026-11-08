@@ -14,15 +14,7 @@ import java.nio.file.Path;
  */
 public interface OutputPostProcessor {
 
-    /** Stable identifier used in logs. */
     String name();
 
-    /**
-     * Rewrites {@code output} in place.
-     *
-     * @param output  the archive produced by the writer
-     * @param context the pass context of the running job
-     * @throws Exception when the archive cannot be processed
-     */
     void process(Path output, PassContext context) throws Exception;
 }

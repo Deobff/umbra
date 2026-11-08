@@ -1,6 +1,5 @@
 package io.umbra.core.engine;
 
-
 import io.umbra.core.api.Pass;
 import io.umbra.core.api.PassContext;
 import io.umbra.core.api.OutputPostProcessor;
@@ -20,6 +19,7 @@ import io.umbra.core.model.Hierarchy;
 import io.umbra.core.minecraft.MinecraftAdapter;
 import io.umbra.core.minecraft.MinecraftProfile;
 import io.umbra.core.pass.impl.AntiLlmPass;
+import io.umbra.core.pass.impl.NativeLoaderDigestPass;
 import io.umbra.core.pass.impl.AuthGatePass;
 import io.umbra.core.pass.impl.ClassEncryptionPass;
 import io.umbra.core.pass.impl.ControlFlowFlatteningPass;
@@ -33,6 +33,7 @@ import io.umbra.core.pass.impl.IntegrityPass;
 import io.umbra.core.pass.impl.IntegerEncryptionPass;
 import io.umbra.core.pass.impl.InvokeWrapperPass;
 import io.umbra.core.pass.impl.JunkMemberPass;
+import io.umbra.core.pass.impl.KeyRootPublishPass;
 import io.umbra.core.pass.impl.MbaPass;
 import io.umbra.core.pass.impl.MemberShufflePass;
 import io.umbra.core.pass.impl.MemberTrimPass;
@@ -83,14 +84,6 @@ public final class UmbraEngine {
         this.log = log;
     }
 
-    /**
-     * Runs the complete pipeline.
-     *
-     * @param config   validated configuration
-     * @param progress progress callback, never {@code null}
-     * @return run statistics
-     * @throws Exception when loading, transforming or writing fails
-     */
     public EngineResult run(UmbraConfig config, ProgressListener progress) throws Exception {
         long start = System.currentTimeMillis();
         ProgressListener listener = progress == null ? ProgressListener.NONE : progress;
@@ -103,8 +96,7 @@ public final class UmbraEngine {
                 layout == null ? "flat" : layout.describe());
 
         listener.onProgress(8, "Building hierarchy");
-        // The generated runtime helpers must not carry the vendor name; the
-        // package comes from runtime.package (default: derived from the seed).
+
         RuntimeNames.configure(config, pool);
         if (!RuntimeNames.DEFAULT.equals(RuntimeNames.base())) {
             log.info("runtime helpers live in %s (runtime.package=pinned or seed-derived)",
@@ -133,32 +125,38 @@ public final class UmbraEngine {
             log.debug("minecraft: no mod container metadata detected");
         }
 
-        // Whole-archive class encryption installs a root-level bootstrap loader
-        // and moves every class into encrypted payloads. On nested layouts
-        // (Spring Boot fat JAR/WAR) and preserved multi-release archives that
-        // would destroy the container or the versioned entries, so it is
-        // disabled explicitly instead of producing a broken archive.
         boolean preservedMultiRelease = layout.multiRelease()
                 && !"flatten".equalsIgnoreCase(config.option("layout.multiRelease", "preserve"));
         boolean classEncryptionBlocked = false;
+
+        boolean sealedLibrary = config.optionBool("classEncryption.libraryMode", false);
+        boolean moduleInfoSealable = sealedLibrary && layout.isFlat() && !preservedMultiRelease;
         if (config.optionBool("classEncryption.enabled", false)
                 && !config.optionBool("layout.forceEntryProtection", false)
-                && (!layout.isFlat() || preservedMultiRelease || layout.moduleInfo())) {
+                && (!layout.isFlat() || preservedMultiRelease
+                        || (layout.moduleInfo() && !moduleInfoSealable))) {
+            String layoutReason = preservedMultiRelease ? "preserved multi-release entries"
+                    : (layout.moduleInfo() ? "module-info" : layout.kindId());
+
+            if (!config.optionBool("classEncryption.allowSkip", false)) {
+                throw new IllegalStateException("layout: class encryption cannot seal a "
+                        + layout.kindId() + " layout with " + layoutReason
+                        + "; refusing to produce an archive whose class encryption is silently OFF"
+                        + " (set classEncryption.allowSkip=true to accept an unsealed archive,"
+                        + " or layout.forceEntryProtection=true to attempt sealing anyway;"
+                        + " sealed libraries are planned in docs/LIBRARY-MODE.md)");
+            }
             config = config.toBuilder()
                     .option("classEncryption.enabled", "false")
                     .option("layout.classEncryptionSkipped", "true")
+                    .option("layout.classEncryptionSkipReason", layoutReason)
                     .build();
             classEncryptionBlocked = true;
-            log.warn("layout: class encryption is a flat-JAR archive protection and cannot run on %s layout%s; "
-                            + "it has been disabled for this run (set layout.forceEntryProtection=true to override)",
-                    layout.kindId(), (preservedMultiRelease ? " with preserved multi-release entries"
-                            : (layout.moduleInfo() ? " with module-info" : "")));
+            log.warn("layout: class encryption cannot seal a %s layout with %s; archive left "
+                            + "UNENCRYPTED because classEncryption.allowSkip=true",
+                    layout.kindId(), layoutReason);
         }
 
-        // Nocturne can either be the only body engine (default) or run as the
-        // final body wrapper after the classic passes. Compatible mode is
-        // opt-in: it wraps the output of flow/VM/MBA/... and leaves them
-        // enabled; exclusive mode keeps the original isolated design.
         if (config.optionBool("nocturne.enabled", false)) {
             boolean compatible = config.optionBool("nocturne.compatible", false)
                     || !config.optionBool("nocturne.exclusive", true);
@@ -220,9 +218,7 @@ public final class UmbraEngine {
         for (String rule : minecraft.keepRules()) {
             rules.addKeepRule(rule);
         }
-        // The Eclipse jar-in-jar loader stays completely untouched: its
-        // createURLStreamHandler is reached from javax.crypto's own <clinit>, so
-        // any injected decryption there deadlocks JceSecurity.
+
         if (isEclipseRunnableJar(pool)) {
             rules.addKeepRule("org.eclipse.jdt.internal.jarinjarloader.**");
             rules.addBodySkipGlob("org.eclipse.jdt.internal.jarinjarloader.**");
@@ -234,9 +230,7 @@ public final class UmbraEngine {
         for (String glob : minecraft.bodySkipGlobs()) {
             rules.addBodySkipGlob(glob);
         }
-        // Per-build KDF domain separators: the build side (Cipher and the runtime
-        // templates the passes call directly) must agree with every injected copy, so
-        // this runs once before any pass (see DomainTags).
+
         DomainTags.install(config.seed());
         RuntimeSupport runtime = new DefaultRuntimeSupport();
         MappingSet mappings = new MappingSet();
@@ -267,7 +261,13 @@ public final class UmbraEngine {
             listener.onProgress(percent, "Running " + pass.name());
             long passStart = System.currentTimeMillis();
             log.info("Pass %s started", pass.name());
-            pass.run(context);
+            try {
+                pass.run(context);
+            } catch (RuntimeException | Error failure) {
+
+                discardOutput(config);
+                throw failure;
+            }
             long elapsed = System.currentTimeMillis() - passStart;
             timings.put(pass.name(), Long.valueOf(elapsed));
             stats.add("pass." + pass.name() + ".ms", elapsed);
@@ -277,9 +277,7 @@ public final class UmbraEngine {
         if (incremental != null) {
             incremental.apply(pool, mappings, stats);
         }
-        // Safety net: no class may be written with MethodHandle/MethodType/
-        // InvokeDynamic (major >= 51) or ConstantDynamic (major >= 55) constants
-        // while declaring an older class file version.
+
         int versionBumped = AsmUtil.ensureConstantCompatibleVersions(pool, log);
         if (versionBumped > 0) {
             stats.add("output.version.bumped", versionBumped);
@@ -298,8 +296,7 @@ public final class UmbraEngine {
                 stats.text(entry.getKey(), entry.getValue());
             }
         }
-        // Archive-level transformations (class encryption, integrity manifests)
-        // run on the final byte image produced by the writer.
+
         int postIndex = 0;
         for (OutputPostProcessor processor : new ArrayList<OutputPostProcessor>(context.postProcessors())) {
             postIndex++;
@@ -307,15 +304,21 @@ public final class UmbraEngine {
                     "Post-processing " + processor.name());
             long postStart = System.currentTimeMillis();
             log.info("Post-processor %s started", processor.name());
-            processor.process(config.output(), context);
+            try {
+                processor.process(config.output(), context);
+            } catch (RuntimeException | Error failure) {
+                discardOutput(config);
+                throw failure;
+            } catch (java.io.IOException failure) {
+                discardOutput(config);
+                throw failure;
+            }
             long postElapsed = System.currentTimeMillis() - postStart;
             timings.put("post." + processor.name(), Long.valueOf(postElapsed));
             stats.add("post." + processor.name() + ".ms", postElapsed);
             log.info("Post-processor %s finished in %d ms", processor.name(), postElapsed);
         }
-        // Incremental metadata and audit reports are auxiliary artifacts: a
-        // failure to write them must never turn a successfully written output
-        // into a failed run.
+
         try {
             IncrementalCache.write(config, inputHashes, mappings, log);
         } catch (Exception cacheFailure) {
@@ -340,13 +343,40 @@ public final class UmbraEngine {
                 stats.add("report.writeFailed", 1);
             }
         }
+
+        try (java.util.zip.ZipFile finished = new java.util.zip.ZipFile(config.output().toFile())) {
+            String comment = finished.getComment();
+            String binding = context.stats().text("classEncryption.masterBinding");
+            boolean needsComment = binding != null && binding.indexOf("native(") >= 0;
+            if (needsComment && (comment == null || comment.isEmpty())) {
+                throw new IllegalStateException("archive lost its ZIP comment: a late "
+                        + "post-processor rewrote it without copying. The comment feeds the "
+                        + "master key derivation, so the artifact would not start");
+            }
+        } catch (java.io.IOException unreadable) {
+            throw new IllegalStateException("archive could not be re-read for the ZIP comment "
+                    + "check: " + unreadable.getMessage(), unreadable);
+        }
         log.info("Output written to %s (%d classes, %d resources, %d ms)",
                 config.output(), result.classes(), result.resources(), result.millis());
         return result;
     }
 
+    private static void discardOutput(UmbraConfig config) {
+        try {
+            Path output = config.output();
+            if (output != null && java.nio.file.Files.deleteIfExists(output)) {
+
+            }
+        } catch (Throwable ignored) {
+
+        }
+    }
+
     private static List<Pass> passes() {
         List<Pass> passes = new ArrayList<Pass>();
+
+        passes.add(new KeyRootPublishPass());
         passes.add(new ReflectionAnalysisPass());
         passes.add(new MemberTrimPass());
         passes.add(new FieldInitializationPass());
@@ -373,20 +403,16 @@ public final class UmbraEngine {
         passes.add(new MbaPass());
         passes.add(new NocturnePass());
         passes.add(new DecompilerNoisePass());
-        passes.add(new NativeCodePass());
         passes.add(new NativeGuardPass());
+        passes.add(new NativeCodePass());
+
+        passes.add(new NativeLoaderDigestPass());
         passes.add(new IntegrityPass());
         passes.add(new ClassEncryptionPass());
         passes.add(new ResourceRewritePass());
         return passes;
     }
 
-    /**
-     * Enforces Nocturne's exclusivity: all existing method-body rewrites are
-     * switched off, leaving Nocturne as the only body transformation. Data/name
-     * layers (rename, string/integer encryption, metadata cleanup, watermark)
-     * are not method-body techniques and remain available.
-     */
     private static UmbraConfig nocturneExclusive(UmbraConfig base, Log log) {
         UmbraConfig.Builder b = base.toBuilder();
         b.flow(new UmbraConfig.FlowOptions(false, base.flow().level(),
@@ -536,16 +562,7 @@ public final class UmbraEngine {
             log.info("Loaded library %s", path);
         }
     }
-    /**
-     * Freezes the Eclipse jar-in-jar loader when the archive is an Eclipse
-     * "Runnable JAR".
-     *
-     * <p>That loader's {@code createURLStreamHandler} is invoked from
-     * {@code java.net.URL} construction, which the JDK itself performs while
-     * initializing {@code javax.crypto.JceSecurity}. Instrumenting it re-enters
-     * the injected string decryptor before crypto is ready ("AES-256-CTR
-     * unavailable"), so the loader package is frozen and never transformed.</p>
-     */
+
     private static void freezeEclipseLoader(ClassPool pool, Log log) {
         ClassPool.Resource manifest = pool.resource("META-INF/MANIFEST.MF");
         if (manifest == null) {
@@ -566,7 +583,7 @@ public final class UmbraEngine {
         log.info("layout: Eclipse runnable jar detected, %d loader class(es) frozen", frozen);
         log.info("layout: archive sealing is skipped for this layout (loader needs plain classes)");
     }
-    /** True when the archive is an Eclipse "Runnable JAR" (JarRsrcLoader layout). */
+
     private static boolean isEclipseRunnableJar(ClassPool pool) {
         ClassPool.Resource manifest = pool.resource("META-INF/MANIFEST.MF");
         if (manifest == null) {

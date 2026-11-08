@@ -25,21 +25,19 @@ import java.util.Map;
  */
 public final class LayoutOptions {
 
-    /** How {@code META-INF/versions/N/} entries are handled. */
     public enum MultiReleaseMode {
-        /** Keep the multi-release layout and remap every version consistently. */
+
         PRESERVE,
-        /** Promote versioned classes to base paths and emit a plain JAR. */
+
         FLATTEN
     }
 
-    /** How {@code module-info.class} is handled. */
     public enum ModuleInfoMode {
-        /** Remap the descriptor; drop it with a warning when remapping would be invalid. */
+
         AUTO,
-        /** Always keep the descriptor (remapped on a best-effort basis). */
+
         KEEP,
-        /** Always drop the descriptor. */
+
         DROP
     }
 
@@ -70,12 +68,10 @@ public final class LayoutOptions {
         this.warnings = warnings;
     }
 
-    /** Documented defaults: everything detected and preserved. */
     public static LayoutOptions defaults() {
         return DEFAULTS;
     }
 
-    /** Parses the advanced option map; never returns {@code null}. */
     public static LayoutOptions from(Map<String, String> options) {
         if (options == null || options.isEmpty()) {
             return DEFAULTS;
@@ -98,12 +94,10 @@ public final class LayoutOptions {
         return enabled;
     }
 
-    /** True when Spring Boot fat JAR/WAR layouts are handled. */
     public boolean springBoot() {
         return springBoot;
     }
 
-    /** True when WAR layouts are handled. */
     public boolean war() {
         return war;
     }
@@ -116,7 +110,6 @@ public final class LayoutOptions {
         return moduleInfo;
     }
 
-    /** Option values that were invalid and replaced by their default. */
     public List<String> warnings() {
         return warnings;
     }

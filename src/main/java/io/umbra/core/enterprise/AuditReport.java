@@ -55,6 +55,10 @@ public final class AuditReport {
         out.append("  \"resources\": ").append(result.resources()).append(",\n");
         out.append("  \"stats\": ");
         appendMap(out, stats.snapshot(), 2);
+        // Textual counters (coverage ratios, fallback reasons) live outside the numeric
+        // bag; without them an audit cannot tell why a layer degraded.
+        out.append(",\n  \"statsText\": ");
+        appendTextMap(out, stats.textSnapshot(), 2);
         out.append(",\n  \"passTimes\": ");
         appendMap(out, result.passTimes(), 2);
         out.append(",\n  \"risk\": {\n");
@@ -89,6 +93,19 @@ public final class AuditReport {
             }
             first = false;
             out.append(quote(e.getKey())).append(": ").append(e.getValue());
+        }
+        out.append('}');
+    }
+
+    private static void appendTextMap(StringBuilder out, Map<String, String> map, int indent) {
+        out.append('{');
+        boolean first = true;
+        for (Map.Entry<String, String> e : map.entrySet()) {
+            if (!first) {
+                out.append(", ");
+            }
+            first = false;
+            out.append(quote(e.getKey())).append(": ").append(quote(e.getValue()));
         }
         out.append('}');
     }

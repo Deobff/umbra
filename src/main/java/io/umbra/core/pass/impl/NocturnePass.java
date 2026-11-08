@@ -76,11 +76,7 @@ public final class NocturnePass implements Pass {
 
     @Override
     public int order() {
-        // Runs after the classic Java body passes (VM, reference hiding, string/
-        // integer encryption, MBA, flow, flattening, exception obfuscation) so
-        // that compatible mode can wrap their output instead of being wrapped.
-        // In exclusive mode those passes are disabled, so the position only
-        // affects logging.
+
         return 106;
     }
 
@@ -137,7 +133,7 @@ public final class NocturnePass implements Pass {
                     continue;
                 }
                 if (method.name.startsWith("<")) {
-                    // Constructors / class initialisers keep their exact shape.
+
                     continue;
                 }
                 if (!eligible(context, node, method, maxInstructions)) {
@@ -187,8 +183,6 @@ public final class NocturnePass implements Pass {
                 methods, shadowVariants, instructions, classes, skipped);
     }
 
-    // ------------------------------------------------------------- eligibility
-
     private static boolean hasBody(MethodNode method) {
         if ((method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) {
             return false;
@@ -199,8 +193,7 @@ public final class NocturnePass implements Pass {
     private static boolean eligible(PassContext context, ClassNode owner, MethodNode method,
                                     int maxInstructions) {
         if ((method.access & Opcodes.ACC_SYNCHRONIZED) != 0) {
-            // Moving a synchronized body into a shadow would change the monitor
-            // that is released when an exception leaves the body.
+
             return false;
         }
         if (method.instructions.size() > maxInstructions) {
@@ -214,8 +207,6 @@ public final class NocturnePass implements Pass {
         }
         return !context.rules().hasKeepAnnotation(method);
     }
-
-    // ----------------------------------------------------------------- shadows
 
     private static ShadowPlan plan(PassContext context, ClassNode owner, MethodNode original,
                                    int variants, long classSecret, Set<String> usedNames) {
@@ -241,17 +232,6 @@ public final class NocturnePass implements Pass {
         return plan;
     }
 
-    /**
-     * Argument transcoding used across the dispatcher/shadow boundary.
-     *
-     * <p>The old {@code arg ^ key} scheme was trivially invertible from a single
-     * pair of values. The default encoding is a two-round ARX permutation:
-     * add-key, xor-key, per-method rotation, add-constant, xor-key, rotation,
-     * with the decode emitted as the exact reverse sequence. Every constant is
-     * derived from the per-invocation key and a per-method build salt, so two
-     * methods (or two invocations) never share the same transform. {@code xor}
-     * is retained only as a compatibility option.</p>
-     */
     static final class Encoding {
         final boolean arx;
         final int rot1;
@@ -397,7 +377,6 @@ public final class NocturnePass implements Pass {
         }
     }
 
-    /** Deep copy of the original body with a key decode prefix. */
     private static MethodNode shadow(PassContext context, MethodNode original, String name,
                                      String descriptor, int argumentSlots, Encoding encoding) {
         MethodNode shadow = copyMethod(original);
@@ -420,11 +399,7 @@ public final class NocturnePass implements Pass {
         shadow.invisibleLocalVariableAnnotations = null;
 
         int keySlot = argumentSlots;
-        // Randomized local-slot remap: free local slots (everything from the
-        // first non-argument slot upwards) are shifted by 2..3 slots so the N
-        // shadows do not share one local layout. The key occupies the argument
-        // slots immediately after the real parameters, so a delta >= 2 keeps
-        // the remapped locals clear of it.
+
         int delta = 2 + context.random().nextInt(2);
         remapLocals(shadow.instructions, argumentSlots, delta);
         InsnList decode = new InsnList();
@@ -458,7 +433,6 @@ public final class NocturnePass implements Pass {
         return shadow;
     }
 
-    /** The dispatcher that replaces the original method body. */
     private static MethodNode dispatcher(MethodNode original, ClassNode owner,
                                          List<MethodNode> shadows, int argumentSlots,
                                          long salt, int variants, long classSecret,
@@ -548,8 +522,6 @@ public final class NocturnePass implements Pass {
         return dispatcher;
     }
 
-    // -------------------------------------------------------------- utilities
-
     private static MethodNode copyMethod(MethodNode original) {
         MethodNode copy = new MethodNode(original.access, original.name, original.desc,
                 original.signature, original.exceptions == null
@@ -588,7 +560,6 @@ public final class NocturnePass implements Pass {
         return copy;
     }
 
-    /** Shifts every non-argument local slot by {@code delta}. */
     private static void remapLocals(InsnList instructions, int argumentSlots, int delta) {
         if (delta == 0) {
             return;

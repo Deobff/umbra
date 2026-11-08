@@ -22,10 +22,6 @@ final class AccessDetector {
     private AccessDetector() {
     }
 
-    // ------------------------------------------------------------------
-    // access widener
-    // ------------------------------------------------------------------
-
     static void scanWidener(String resourceName, byte[] bytes, MinecraftScan scan, ClassPool pool) {
         if (resourceName == null || scan.isAccessWidenerConsumed(resourceName)) {
             return;
@@ -104,13 +100,9 @@ final class AccessDetector {
             scan.debug("minecraft: declared access widener %s is not present in the archive", resourcePath);
             return;
         }
-        // scanWidener marks the resource consumed itself when it starts.
+
         scanWidener(resourcePath, resource.bytes(), scan, pool);
     }
-
-    // ------------------------------------------------------------------
-    // access transformer
-    // ------------------------------------------------------------------
 
     static void scanTransformer(String resourceName, byte[] bytes, MinecraftScan scan, ClassPool pool) {
         if (resourceName == null || scan.isAccessTransformerConsumed(resourceName)) {
@@ -172,15 +164,10 @@ final class AccessDetector {
             scan.debug("minecraft: declared access transformer %s is not present in the archive", resourcePath);
             return;
         }
-        // scanTransformer marks the resource consumed itself when it starts.
+
         scanTransformer(resourcePath, resource.bytes(), scan, pool);
     }
 
-    // ------------------------------------------------------------------
-    // helpers
-    // ------------------------------------------------------------------
-
-    /** Keeps in-archive classes referenced from a member descriptor. */
     static void keepDescriptorTypes(String descriptor, MinecraftScan scan, ClassPool pool) {
         if (descriptor == null || pool == null) {
             return;
@@ -194,7 +181,6 @@ final class AccessDetector {
         }
     }
 
-    /** Removes a {@code #} comment outside quotes (neither format quotes paths). */
     private static String stripComment(String line) {
         int hash = line.indexOf('#');
         if (hash < 0) {

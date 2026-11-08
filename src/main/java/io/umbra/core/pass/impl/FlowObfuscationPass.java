@@ -2,8 +2,12 @@ package io.umbra.core.pass.impl;
 
 import io.umbra.core.api.Pass;
 import io.umbra.core.api.PassContext;
+import io.umbra.core.flow.MethodFlowAnalyzer;
+import io.umbra.core.pass.impl.flow.KeyRootMask;
 import io.umbra.core.pass.impl.flow.MethodGate;
+import io.umbra.core.pass.impl.flow.RuntimeTable;
 import io.umbra.core.util.AsmUtil;
+import io.umbra.core.util.mba.AsmMba;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
@@ -13,6 +17,7 @@ import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.IincInsnNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
+import org.objectweb.asm.tree.IntInsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LdcInsnNode;
@@ -29,28 +34,37 @@ import org.objectweb.asm.tree.analysis.BasicValue;
 import org.objectweb.asm.tree.analysis.Frame;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
  * Control-flow obfuscation: opaque predicates, inverted branches with junk
  * payloads, dead blocks and stack-neutral junk arithmetic.
  *
- * <p>Every opaque predicate is mathematically provable and verifier-safe:</p>
+ * <p>Guards and opaque predicates are anchored on runtime values that no
+ * single algebraic rewrite folds (W3/W4/W6):</p>
  * <ul>
- *   <li>{@code (x * (x + 1)) & 1} is always {@code 0} (one of two consecutive
- *       values is even; parity is preserved under two's complement overflow);</li>
- *   <li>{@code (x | 1) != 0} always holds (bit 0 is forced);</li>
- *   <li>{@code x - x == 0} always holds.</li>
+ *   <li>per-class {@code int[]} tables are filled in {@code <clinit>} by an
+ *       xorshift chain seeded from {@code System.nanoTime()}; guard fields and
+ *       predicate operands are read out of the table, so a simplifier has to
+ *       scalarise the table loop and carry {@code <clinit>} data flow into
+ *       every method before the value becomes constant
+ *       ({@link RuntimeTable});</li>
+ *   <li>interval predicates compare a non-negative projection of a runtime value,
+ *       so the branch direction is fixed at run time but never a one-line
+ *       algebraic identity;</li>
+ *   <li>differential branches route two genuinely equivalent junk paths through
+ *       the parity of the one-time-program carrier, so a static tool sees no
+ *       fixed truth value and two identical calls do not execute the same path.</li>
  * </ul>
  *
- * <p>The long forms use the same parity identity, which also holds modulo
- * 2<sup>64</sup>. Predicates are anchored on a runtime carrier local seeded from
- * {@code System.nanoTime()}, so the opaque values cannot be folded statically.
- * Junk payloads never touch existing locals and keep the operand stack balanced,
- * so exception handler ranges and stack maps stay valid.</p>
+ * <p>Junk payloads never touch existing locals and keep the operand stack
+ * balanced, so exception handler ranges and stack maps stay valid.</p>
  */
 public final class FlowObfuscationPass implements Pass {
 
@@ -82,38 +96,87 @@ public final class FlowObfuscationPass implements Pass {
         int transposed = 0;
         int reordered = 0;
         int bogusRanges = 0;
-        int rangePredicates = 0;
-        int hashPredicates = 0;
+        int intervalPredicates = 0;
+        int tablePredicates = 0;
+        int mbaPredicates = 0;
+        int bogusPops = 0;
+        int entryShuffles = 0;
+        int crossClassPredicates = 0;
+        int differentialBranches = 0;
+        int irreducibleEntries = 0;
         int skipped = 0;
+        int ineligible = 0;
         int reducedClasses = 0;
         int reducedMethods = 0;
+        int runtimeTableClasses = 0;
+        int runtimeTables = 0;
+        int maskedConstants = 0;
+        int fallbackConstants = 0;
         int maxInstructions = context.config().flow().maxInstructions();
+        int pairBudget = Math.max(2, context.config().optionInt("flow.tablePairs", 256));
+
+        KeyRootMask tableMask = KeyRootMask.create(context, true);
+        String tableMode = tableMask == null ? "static" : "native";
         String level = context.config().flow().level().toLowerCase(java.util.Locale.ROOT);
         boolean normal = "normal".equals(level) || "aggressive".equals(level);
         boolean aggressive = "aggressive".equals(level)
                 || context.config().optionBool("flow.aggressive", false);
         boolean transpose = context.config().optionBool("flow.transpose", aggressive);
         boolean bogus = context.config().optionBool("flow.bogusRanges", aggressive);
+        boolean crossClass = context.config().optionBool("flow.crossClass", true);
         MethodGate gate = new MethodGate(context);
-        // One-time-program state (K-OTP): when enabled, the entry carrier of a
-        // protected method is the program's OTP value instead of a fresh nanoTime
-        // sample, so two identical calls do not execute the same guard path.
+
         String otpClass = context.config().optionBool("otp.enabled", false)
                 ? context.runtime().ensureOtp(context.classes(), context.config().seed())
                 : null;
         int otpMethods = 0;
+
+        int totalClasses = 0;
+
+        int totalMethods = 0;
+        int skipHelper = 0;
+        int skipRule = 0;
+        int skipShape = 0;
+        int skipAnnotation = 0;
+        int skipNoMethods = 0;
+        int skipRollback = 0;
+
+        Map<String, FlowGroup> groups = selectGroups(context);
+        CrossClassHosts crossClassHosts = new CrossClassHosts(context, crossClass);
+        boolean analyzerAnchors = context.config().optionBool("flow.analyzerAnchors", true);
+        int analyzerMethods = 0;
+        int analyzerLoops = 0;
+        int analyzerSites = 0;
+        for (ClassNode candidate : context.classes().classes().values()) {
+            if (!context.classes().isGenerated(candidate.name) && !context.classes().isFrozen(candidate.name)) {
+                totalClasses++;
+                for (MethodNode candidateMethod : candidate.methods) {
+                    if (candidateMethod.name.startsWith("<")) {
+                        continue;
+                    }
+                    if ((candidateMethod.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) {
+                        continue;
+                    }
+                    totalMethods++;
+                }
+            }
+        }
         for (ClassNode node : context.classes().classes().values()) {
             if (context.classes().isGenerated(node.name) || context.classes().isFrozen(node.name)) {
+                skipHelper++;
                 continue;
             }
                 if (context.rules().skipBodyTransform(node.name)) {
+                    skipRule++;
                     continue;
                 }
             if (!context.rules().transformClass(node)) {
+                skipRule++;
                 continue;
             }
             if ((node.access & (Opcodes.ACC_INTERFACE | Opcodes.ACC_ANNOTATION)) != 0
                     || "module-info".equals(node.name)) {
+                skipShape++;
                 continue;
             }
             Boolean classEnabled = AsmUtil.annotationBoolean(node.invisibleAnnotations, ANNOTATION, "enabled");
@@ -121,13 +184,24 @@ public final class FlowObfuscationPass implements Pass {
                 classEnabled = AsmUtil.annotationBoolean(node.visibleAnnotations, ANNOTATION, "enabled");
             }
             if (Boolean.FALSE.equals(classEnabled)) {
+                skipAnnotation++;
                 continue;
             }
 
             String fieldName = uniqueFieldName(node);
             int expected = nonZero(context.random().nextInt());
-            // Transactional class transform: on any failure (including a class
-            // that no longer serializes) the whole class is restored.
+
+            FlowGroup group = groups.get(groupKey(context, node.name));
+            boolean holder = group != null && group.holder.equals(node.name);
+            if (holder) {
+
+                group.established = true;
+            }
+
+            RuntimeTable table = RuntimeTable.create(context, node, pairBudget, tableMask);
+            GuardPlan plan = new GuardPlan(context, table, node.name, fieldName, expected);
+            attachCrossGuard(plan, crossClassHosts);
+
             List<MethodNode> savedMethods = new ArrayList<MethodNode>();
             for (MethodNode method : node.methods) {
                 savedMethods.add(MethodGate.copy(method));
@@ -141,17 +215,33 @@ public final class FlowObfuscationPass implements Pass {
             int classTransposed = 0;
             int classReordered = 0;
             int classBogus = 0;
-            int classRange = 0;
-            int classHash = 0;
+            int classInterval = 0;
+            int classTable = 0;
+            int classMba = 0;
+            int classBogusPops = 0;
+            int classEntryShuffles = 0;
+            int classCross = 0;
+            int classDifferential = 0;
+            int classIrreducible = 0;
+            int classAnalyzerMethods = 0;
+            int classAnalyzerLoops = 0;
+            int classAnalyzerSites = 0;
             try {
                 for (MethodNode method : node.methods) {
                     if (!eligible(context, method, maxInstructions)) {
+                        ineligible++;
+                        if (!method.name.startsWith("<")) {
+                            context.log().info("flow-obfuscation: skipped %s.%s%s "
+                                    + "(too large or not eligible) - it keeps its plain control flow",
+                                    node.name, method.name, method.desc);
+                        }
                         continue;
                     }
                     try {
                         MethodNode work = MethodGate.copy(method);
-                        Result result = transformMethod(context, node, work, fieldName, expected,
-                                normal, aggressive, maxInstructions, transpose, bogus, true, otpClass);
+                        Result result = transformMethod(context, node, work, plan,
+                                normal, aggressive, maxInstructions, transpose, bogus, true, otpClass,
+                                group, analyzerAnchors);
                         if (!gate.verify(node, work)) {
                             skipped++;
                             context.log().debug("flow-obfuscation: verification rejected %s.%s",
@@ -171,8 +261,19 @@ public final class FlowObfuscationPass implements Pass {
                             classTransposed += result.transposed;
                             classReordered += result.reordered;
                             classBogus += result.bogusRanges;
-                            classRange += result.rangePredicates;
-                            classHash += result.hashPredicates;
+                            classInterval += result.intervalPredicates;
+                            classTable += result.tablePredicates;
+                            classMba += result.mbaPredicates;
+                            classBogusPops += result.bogusPops;
+                            classEntryShuffles += result.entryShuffles;
+                            classCross += result.crossClassPredicates;
+                            classDifferential += result.differentialBranches;
+                            classIrreducible += result.irreducible;
+                            if (result.analyzerSites > 0) {
+                                classAnalyzerMethods++;
+                                classAnalyzerSites += result.analyzerSites;
+                                classAnalyzerLoops += result.analyzerLoops;
+                            }
                         }
                     } catch (RuntimeException e) {
                         skipped++;
@@ -181,17 +282,28 @@ public final class FlowObfuscationPass implements Pass {
                     }
                 }
                 if (classMethods > 0) {
-                    addFieldInit(node, fieldName, expected);
+                    materializeGroup(node, group);
+                    addFieldInit(node, plan);
+                    plan.materialize(node);
                     if (!gate.writes(node)) {
                         explainUnserializable(context, node, gate);
-                        // Salvage the class instead of losing all protection: retry
-                        // with a conservative transform (entry guard only, no junk,
-                        // dead blocks, transposition or bogus ranges) on clean copies.
+
                         node.methods = new ArrayList<MethodNode>(savedMethods);
                         node.fields = new ArrayList<FieldNode>(savedFields);
-                        int reduced = conservativeTransform(context, node, fieldName, expected,
-                                maxInstructions, gate, otpClass);
+                        RuntimeTable retryTable = RuntimeTable.create(context, node, pairBudget,
+                                tableMask);
+                        GuardPlan retryPlan = new GuardPlan(context, retryTable, node.name,
+                                fieldName, expected);
+                        int reduced = conservativeTransform(context, node, retryPlan,
+                                maxInstructions, gate, otpClass, group, analyzerAnchors);
                         if (reduced > 0) {
+                            if (!retryTable.isEmpty()) {
+                                runtimeTableClasses++;
+                                runtimeTables += retryTable.chunkCount();
+                                maskedConstants += retryTable.pairCount();
+                                fallbackConstants += retryPlan.fallbacks;
+                            }
+                            crossClassHosts.prepare(node);
                             reducedClasses++;
                             reducedMethods += reduced;
                             classes++;
@@ -199,31 +311,112 @@ public final class FlowObfuscationPass implements Pass {
                             continue;
                         }
                         skipped += classMethods;
+                        skipRollback++;
+                        if (holder) {
+
+                            group.established = false;
+                        }
                         context.log().debug("flow-obfuscation: rolled back class %s: class does not "
                                 + "serialize", node.name);
                         continue;
                     }
+                    crossClassHosts.prepare(node);
+                    if (!table.isEmpty()) {
+                        runtimeTableClasses++;
+                        runtimeTables += table.chunkCount();
+                        maskedConstants += table.pairCount();
+                        fallbackConstants += plan.fallbacks;
+                    }
                     methods += classMethods;
                     predicates += classPredicates;
+                    mbaPredicates += classMba;
+                    bogusPops += classBogusPops;
+                    entryShuffles += classEntryShuffles;
+                    crossClassPredicates += classCross;
                     branches += classBranches;
                     deadBlocks += classDead;
                     junkBlocks += classJunk;
                     transposed += classTransposed;
                     reordered += classReordered;
                     bogusRanges += classBogus;
-                    rangePredicates += classRange;
-                    hashPredicates += classHash;
+                    intervalPredicates += classInterval;
+                    tablePredicates += classTable;
+                    differentialBranches += classDifferential;
+                    irreducibleEntries += classIrreducible;
+                    analyzerMethods += classAnalyzerMethods;
+                    analyzerLoops += classAnalyzerLoops;
+                    analyzerSites += classAnalyzerSites;
                     classes++;
+                } else {
+
+                    skipNoMethods++;
+                    if (holder) {
+                        group.established = false;
+                    }
                 }
             } catch (RuntimeException e) {
                 node.methods = new ArrayList<MethodNode>(savedMethods);
                 node.fields = new ArrayList<FieldNode>(savedFields);
+                if (holder) {
+                    group.established = false;
+                }
+                skipRollback++;
                 skipped += classMethods;
                 context.log().debug("flow-obfuscation: rolled back class %s: %s", node.name, e.toString());
             }
         }
         context.stats().add("flow.methods", methods);
         context.stats().add("flow.classes", classes);
+
+        context.stats().add("flow.classes.total", totalClasses);
+        context.stats().text("flow.coverage", classes + "/" + totalClasses);
+        context.stats().add("flow.skip.helper", skipHelper);
+        context.stats().add("flow.skip.rule", skipRule);
+        context.stats().add("flow.skip.shape", skipShape);
+        context.stats().add("flow.skip.annotation", skipAnnotation);
+        context.stats().add("flow.skip.noMethods", skipNoMethods);
+        context.stats().add("flow.skip.rollback", skipRollback);
+        context.stats().add("flow.methodsSkipped", skipped + ineligible);
+        context.stats().add("flow.methods.total", totalMethods);
+        context.stats().text("flow.methodCoverage", methods + "/" + totalMethods);
+        if (totalMethods > 0) {
+
+            int methodPercent = (int) Math.round(methods * 100.0 / totalMethods);
+            context.stats().add("flow.methodCoveragePercent", methodPercent);
+
+            context.log().info("flow-obfuscation: method coverage %d%% (%d/%d methods; "
+                    + "%d/%d classes)", Integer.valueOf(methodPercent), Integer.valueOf(methods),
+                    Integer.valueOf(totalMethods), Integer.valueOf(classes),
+                    Integer.valueOf(totalClasses));
+        }
+        if (totalClasses > 0) {
+            int percent = (int) Math.round(classes * 100.0 / totalClasses);
+            context.stats().add("flow.coveragePercent", percent);
+            int minimum = context.config().optionInt("flow.minCoverage", 80);
+            int required = context.config().optionInt("flow.requireCoverage", 0);
+            String breakdown = "helper=" + skipHelper + " rule=" + skipRule + " shape=" + skipShape
+                    + " annotation=" + skipAnnotation + " noMethods=" + skipNoMethods
+                    + " rollback=" + skipRollback;
+
+            context.log().info("flow-obfuscation: coverage %d%% classes, %d%% methods "
+                    + "(%d/%d program classes, %d/%d methods; %s)",
+                    Integer.valueOf(percent), Integer.valueOf(totalMethods > 0
+                            ? (int) Math.round(methods * 100.0 / totalMethods) : 100),
+                    Integer.valueOf(classes), Integer.valueOf(totalClasses),
+                    Integer.valueOf(methods), Integer.valueOf(totalMethods), breakdown);
+            if (required > 0 && percent < required) {
+                throw new IllegalStateException("flow-obfuscation: coverage " + percent + "% ("
+                        + classes + "/" + totalClasses + ") is below flow.requireCoverage="
+                        + required + "% (" + breakdown + ")");
+            }
+            if (percent < minimum) {
+                context.log().warn("flow-obfuscation: coverage %d%% (%d/%d program classes); "
+                        + "untouched classes keep their plain control flow (%s). Raise the coverage "
+                        + "or set flow.requireCoverage to make this fatal.",
+                        Integer.valueOf(percent), Integer.valueOf(classes),
+                        Integer.valueOf(totalClasses), breakdown);
+            }
+        }
         context.stats().add("flow.predicates", predicates);
         context.stats().add("flow.branches.inverted", branches);
         context.stats().add("flow.deadBlocks", deadBlocks);
@@ -231,10 +424,64 @@ public final class FlowObfuscationPass implements Pass {
         context.stats().add("flow.transposed", transposed);
         context.stats().add("flow.reordered.blocks", reordered);
         context.stats().add("flow.bogusRanges", bogusRanges);
-        context.stats().add("flow.rangePredicates", rangePredicates);
-        context.stats().add("flow.hashPredicates", hashPredicates);
+        context.stats().add("flow.intervalPredicates", intervalPredicates);
+        context.stats().add("flow.tablePredicates", tablePredicates);
+        context.stats().add("flow.mbaPredicates", mbaPredicates);
+        context.stats().add("flow.bogusPops", bogusPops);
+        context.stats().add("flow.entryShuffles", entryShuffles);
+        context.stats().add("flow.crossClassPredicates", crossClassPredicates);
+        context.stats().add("flow.differentialBranches", differentialBranches);
+
+        context.stats().add("flow.irreducibleEntries", irreducibleEntries);
+
+        context.stats().add("flow.rangePredicates", intervalPredicates);
+        context.stats().add("flow.hashPredicates", tablePredicates);
         context.stats().add("flow.aggressive", aggressive ? 1 : 0);
         context.stats().add("flow.skipped", skipped);
+        context.stats().add("flow.ineligible", ineligible);
+
+        context.stats().add("flow.runtimeTables", runtimeTables);
+        context.stats().add("flow.runtimeTableClasses", runtimeTableClasses);
+        context.stats().add("flow.runtimeTablePairs", maskedConstants);
+        context.stats().add("flow.crossClassHosts", crossClassHosts.hostCount());
+        context.stats().add("flow.crossClassPairs", crossClassHosts.pairCount());
+        context.stats().add("flow.maskedConstants", maskedConstants);
+        context.stats().add("flow.fallbackConstants", fallbackConstants);
+        context.stats().text("flow.tableMode", tableMode);
+        context.stats().text("flow.table", tableMode);
+
+        int groupCount = 0;
+        int groupFields = 0;
+        int accessorCount = 0;
+        Set<String> predicateTypes = new LinkedHashSet<String>();
+        StringBuilder typeMix = new StringBuilder();
+        for (FlowGroup candidate : groups.values()) {
+            if (!candidate.established) {
+                continue;
+            }
+            ClassNode holderNode = context.classes().getClass(candidate.holder);
+            if (holderNode == null || !hasField(holderNode, candidate.fieldName)) {
+                continue;
+            }
+            groupCount++;
+            groupFields++;
+            accessorCount += countAccessors(holderNode, candidate);
+            predicateTypes.add(candidate.fieldType);
+            if (typeMix.length() > 0) {
+                typeMix.append(',');
+            }
+            typeMix.append(typeLabel(candidate.fieldType)).append('=')
+                    .append(candidate.predicates);
+        }
+        context.stats().add("flow.groups", groupCount);
+        context.stats().add("flow.groupFields", groupFields);
+        context.stats().add("flow.accessors", accessorCount);
+        context.stats().add("flow.predicateTypes", predicateTypes.size());
+        context.stats().text("flow.predicateTypeMix",
+                typeMix.length() == 0 ? "none" : typeMix.toString());
+        context.stats().add("flow.analyzer.methods", analyzerMethods);
+        context.stats().add("flow.analyzer.loops", analyzerLoops);
+        context.stats().add("flow.analyzer.anchors", analyzerSites);
         context.stats().add("otp.enabled", otpClass != null ? 1 : 0);
         if (otpClass != null) {
             context.stats().add("otp.methods", otpMethods);
@@ -246,14 +493,17 @@ public final class FlowObfuscationPass implements Pass {
             context.stats().add("flow.reduced.methods", reducedMethods);
         }
         context.log().info("flow-obfuscation[%s]: %d methods across %d classes, %d predicates "
-                        + "(%d range, %d hash), %d branches inverted, %d dead blocks, %d junk blocks, "
-                        + "%d transposed blocks (%d rescheduled), %d bogus exception ranges "
+                        + "(%d interval, %d table, %d differential), %d branches inverted, "
+                        + "%d dead blocks, %d junk blocks, %d transposed blocks (%d rescheduled), "
+                        + "%d bogus exception ranges, %d irreducible entries, "
+                        + "%d runtime tables / %d masked constants (table=%s) "
                         + "(%d verification skips, %d classes kept conservative)",
-                level, methods, classes, predicates, rangePredicates, hashPredicates, branches,
-                deadBlocks, junkBlocks, transposed, reordered, bogusRanges, skipped, reducedClasses);
+                level, methods, classes, predicates, intervalPredicates, tablePredicates,
+                differentialBranches, branches, deadBlocks, junkBlocks, transposed, reordered,
+                bogusRanges, irreducibleEntries, runtimeTables, maskedConstants, tableMode, skipped,
+                reducedClasses);
     }
 
-    /** Debug aid: when a transformed class no longer serializes, name the failing method. */
     private static void explainUnserializable(PassContext context, ClassNode node, MethodGate gate) {
         for (MethodNode method : node.methods) {
             ClassNode mini = new ClassNode();
@@ -283,16 +533,10 @@ public final class FlowObfuscationPass implements Pass {
         }
     }
 
-    /**
-     * Retry a class whose full transform no longer serializes with the minimal
-     * shape: only the entry guard prelude, no junk/dead blocks/transposition/
-     * bogus ranges. Returns the number of transformed methods, or 0 when even the
-     * conservative shape cannot be serialized (the caller then restores the
-     * original class).
-     */
-    private static int conservativeTransform(PassContext context, ClassNode node, String fieldName,
-                                             int expected, int maxInstructions, MethodGate gate,
-                                             String otpClass) {
+    private static int conservativeTransform(PassContext context, ClassNode node, GuardPlan plan,
+                                             int maxInstructions, MethodGate gate,
+                                             String otpClass, FlowGroup group,
+                                             boolean useAnalyzer) {
         List<MethodNode> backups = new ArrayList<MethodNode>();
         for (MethodNode method : node.methods) {
             backups.add(MethodGate.copy(method));
@@ -305,8 +549,9 @@ public final class FlowObfuscationPass implements Pass {
                     continue;
                 }
                 MethodNode work = MethodGate.copy(method);
-                Result result = transformMethod(context, node, work, fieldName, expected,
-                        false, false, maxInstructions, false, false, false, otpClass);
+                Result result = transformMethod(context, node, work, plan,
+                        false, false, maxInstructions, false, false, false, otpClass,
+                        group, useAnalyzer);
                 if (!gate.verify(node, work)) {
                     context.log().debug("flow-obfuscation: conservative verify rejected %s.%s",
                             node.name, method.name);
@@ -322,7 +567,9 @@ public final class FlowObfuscationPass implements Pass {
                 node.fields = fieldBackups;
                 return 0;
             }
-            addFieldInit(node, fieldName, expected);
+            materializeGroup(node, group);
+            addFieldInit(node, plan);
+            plan.materialize(node);
             if (gate.writes(node)) {
                 return transformed;
             }
@@ -365,72 +612,83 @@ public final class FlowObfuscationPass implements Pass {
     }
 
     private static Result transformMethod(PassContext context, ClassNode owner, MethodNode method,
-                                          String fieldName, int expected, boolean normal,
+                                          GuardPlan plan, boolean normal,
                                           boolean aggressive, int maxInstructions,
                                           boolean transpose, boolean bogusRanges,
-                                          boolean allowJunk, String otpClass) {
+                                          boolean allowJunk, String otpClass,
+                                          FlowGroup group, boolean useAnalyzer) {
         Result result = new Result();
         int budget = Math.max(48, maxInstructions - method.instructions.size());
         int spent = 0;
 
-        // 1. Branch inversion with a junk payload. Must run before the opaque
-        //    branches are inserted, otherwise they would be inverted too.
         if (normal) {
             int inverted = invertBranches(context, method, aggressive, budget - spent);
             result.inverted = inverted;
             spent += inverted * 4;
         }
 
-        // 2. Analyse the (already inverted) code to find block entries with an
-        //    empty operand stack. A branch over junk is only safe where no
-        //    uninitialized object sits on the stack.
         Frame<BasicValue>[] frames = normal ? analyse(owner.name, method) : null;
 
-        // 3. Runtime carrier local + entry opaque predicates.
+        MethodFlowAnalyzer analyzer = null;
+        if (frames != null && useAnalyzer) {
+            analyzer = MethodFlowAnalyzer.of(owner.name, method, frames);
+        }
+
         int used = nextFreeLocal(method);
         int carrier = -1;
-        // The OTP carrier is useful on every flow level: it is the only value in
-        // the guard that is guaranteed to change between two identical calls.
+
         if (normal || aggressive || otpClass != null) {
             carrier = used++;
+            method.maxLocals = Math.max(method.maxLocals, used);
+        }
+        int mbaSlotX = -1;
+        int mbaSlotY = -1;
+        if (carrier >= 0 && context.config().optionBool("flow.mbaPredicates", true)) {
+            mbaSlotX = used++;
+            mbaSlotY = used++;
             method.maxLocals = Math.max(method.maxLocals, used);
         }
         InsnList prelude = new InsnList();
         if (carrier >= 0) {
             emitCarrierInit(context, prelude, carrier, otpClass);
         }
-        emitFieldGuard(context, prelude, owner.name, fieldName, expected);
+        if (emitGuard(context, prelude, plan, group, context.random().nextInt(4) == 0)) {
+            result.crossClassPredicates++;
+        }
         result.predicates++;
         if (otpClass != null && carrier >= 0) {
-            emitOtpBranch(context, prelude, carrier, aggressive);
+
+            emitDifferentialBranch(context, prelude, carrier, aggressive);
             result.predicates++;
+            result.differentialBranches++;
         }
         if (carrier >= 0 && (normal || aggressive)) {
-            emitOpaqueTrue(context, prelude, carrier, aggressive, result);
+            emitOpaqueTrue(context, prelude, plan, carrier, aggressive, result, mbaSlotX, mbaSlotY);
             result.predicates++;
         }
         if (aggressive && carrier >= 0) {
-            emitOpaqueTrueLong(context, prelude, carrier);
+            emitOpaqueTrueLong(context, prelude, plan, carrier, result);
             result.predicates++;
-            emitOpaqueTrue(context, prelude, carrier, true, result);
+            emitOpaqueTrue(context, prelude, plan, carrier, true, result, mbaSlotX, mbaSlotY);
             result.predicates++;
         }
         method.instructions.insert(prelude);
 
-        // 4. Dead blocks at selected reachable block entries (stack empty).
         if (frames != null && (normal || aggressive)) {
             int limit = aggressive ? 8 : 5;
-            List<AbstractInsnNode> anchors = selectAnchors(method, frames, limit, context);
+            List<AbstractInsnNode> anchors = selectAnchors(method, frames, limit, context,
+                    analyzer, result);
             for (AbstractInsnNode anchor : anchors) {
                 if (spent >= budget) {
                     break;
                 }
-                // Every selected block entry gets its own field guard, not just the
-                // method prelude: Zelix KlassMaster guards each basic block, which is
-                // why its output keeps CFR from reconstructing readable control flow.
+
                 InsnList block = new InsnList();
-                emitFieldGuard(context, block, owner.name, fieldName, expected);
-                block.add(opaqueBranchesOverJunk(context, carrier, aggressive, result));
+                if (emitGuard(context, block, plan, group, context.random().nextInt(4) == 0)) {
+                    result.crossClassPredicates++;
+                }
+                block.add(opaqueBranchesOverJunk(context, plan, carrier, aggressive, result,
+                        mbaSlotX, mbaSlotY));
                 if (anchor instanceof LabelNode) {
                     method.instructions.insert(anchor, block);
                 } else {
@@ -441,11 +699,6 @@ public final class FlowObfuscationPass implements Pass {
             }
         }
 
-        // 5. Stack-balanced junk arithmetic sprinkled through reachable, ordinary
-        //    code positions. Inserting into unreachable code or exception ranges can
-        //    make StackMapTable recomputation fail for methods with mixed long/double
-        //    locals and handler frames (seen on the hard-input StackStress fixture),
-        //    so those sites are skipped instead of risking a whole-class rollback.
         Frame<BasicValue>[] junkFrames = analyse(owner.name, method);
         int junkBudget = aggressive ? Math.min(16, method.instructions.size() / 6 + 2)
                 : Math.min(6, method.instructions.size() / 12 + 1);
@@ -455,7 +708,7 @@ public final class FlowObfuscationPass implements Pass {
         int inserted = 0;
         int guard = snapshot.length * 4 + 16;
         while (allowJunk && unsafe != null && inserted < junkBudget && spent < budget && guard-- > 0) {
-            // Deterministic but well mixed site selection.
+
             if (context.random().nextInt(4) != 0) {
                 continue;
             }
@@ -469,15 +722,54 @@ public final class FlowObfuscationPass implements Pass {
             spent += junk.size();
         }
         result.junkBlocks = inserted;
+
+        int bogusPops = 0;
+        BogusPop bogusPop = new BogusPop(owner);
+        if (allowJunk && unsafe != null && context.config().optionBool("flow.bogusPops", false)) {
+            int bogusBudget = aggressive ? 8 : 3;
+            int bogusGuard = snapshot.length * 2 + 8;
+            while (bogusPops < bogusBudget && spent < budget && bogusGuard-- > 0) {
+                int index = context.random().nextInt(snapshot.length);
+                if (unsafe[index] || junkFrames[index] == null) {
+                    continue;
+                }
+                Frame<BasicValue> frame = junkFrames[index];
+                int depth = Math.min(frame.getStackSize(), aggressive ? 3 : 2);
+                if (depth <= 0) {
+                    continue;
+                }
+                InsnList bogus = new InsnList();
+                for (int i = 0; i < depth; i++) {
+                    Type type = frame.getStack(frame.getStackSize() - 1 - i).getType();
+                    if (type == null || !BogusPop.supported(type)) {
+                        bogus = null;
+                        break;
+                    }
+                    bogus.add(bogusPop.generateDummyPop(type,
+                            context.random().nextLong() ^ (long) index));
+                }
+                if (bogus == null) {
+                    continue;
+                }
+                method.instructions.insertBefore(snapshot[index], bogus);
+                bogusPops++;
+                spent += bogus.size();
+            }
+        }
+        result.bogusPops = bogusPops;
+
         result.maxStack = 12;
         result.transformed = true;
         if (result.maxStack > method.maxStack) {
             method.maxStack = result.maxStack;
         }
 
-        // 6. Code transposition: method-level block scheduling first (moves many
-        //    blocks and repairs the fall-through edges), then the single-block
-        //    mover as a fallback for methods the scheduler rejected.
+        if (context.config().optionBool("flow.entryShuffle", false)) {
+            if (emitEntryShuffle(context, method, carrier)) {
+                result.entryShuffles++;
+            }
+        }
+
         boolean reorder = context.config().optionBool("flow.reorder", false);
         if (reorder) {
             int scheduled = reorderBlocks(context, owner.name, method, Math.max(1, budget / 6));
@@ -495,21 +787,19 @@ public final class FlowObfuscationPass implements Pass {
             }
         }
 
-        // 7. Bogus exception ranges: a range over non-throwing code whose
-        //    synthetic handler simply rethrows, so semantics do not change but
-        //    the exception table and the code map become misleading.
+        if (carrier >= 0 && context.config().optionBool("flow.irreducible", true)) {
+            result.irreducible += addIrreducibleEntry(context, owner.name, method, carrier, plan);
+        }
+
         if (bogusRanges) {
             result.bogusRanges += addBogusRanges(context, method, aggressive);
         }
         return result;
     }
 
-    // -------------------------------------------------------------- predicates
-
     private static void emitCarrierInit(PassContext context, InsnList out, int carrier, String otpClass) {
         if (otpClass != null) {
-            // One-time state instead of a fresh sample: the carrier advances with
-            // every protected call, so the guard below cannot be replayed.
+
             out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, otpClass, "carrier", "()I", false));
             out.add(new VarInsnNode(Opcodes.ISTORE, carrier));
             return;
@@ -523,135 +813,125 @@ public final class FlowObfuscationPass implements Pass {
         out.add(new VarInsnNode(Opcodes.ISTORE, carrier));
     }
 
-    /**
-     * Emits a branch whose direction is decided by the one-time state.
-     *
-     * <p>Bit 0 of the OTP carrier alternates on every advance, so the junk block
-     * runs on one invocation and is skipped on the next. The block is
-     * stack-neutral and touches no local, so both paths are semantically
-     * identical; only the executed instruction sequence differs. A red team that
-     * traces one call therefore sees the wrong path on the following one.</p>
-     */
-    private static void emitOtpBranch(PassContext context, InsnList out, int carrier, boolean aggressive) {
-        LabelNode real = new LabelNode();
+    private static void emitDifferentialBranch(PassContext context, InsnList out, int carrier,
+                                               boolean aggressive) {
+        LabelNode setPath = new LabelNode();
+        LabelNode join = new LabelNode();
         out.add(new VarInsnNode(Opcodes.ILOAD, carrier));
         out.add(new InsnNode(Opcodes.ICONST_1));
         out.add(new InsnNode(Opcodes.IAND));
-        out.add(new JumpInsnNode(Opcodes.IFNE, real));
+        out.add(new JumpInsnNode(Opcodes.IFNE, setPath));
         out.add(junk(context, aggressive));
-        out.add(real);
+        out.add(new JumpInsnNode(Opcodes.GOTO, join));
+        out.add(setPath);
+        out.add(junk(context, aggressive));
+        out.add(join);
     }
 
-    /**
-     * Emits {@code if (f0 == f1) goto real;} followed by junk.
-     *
-     * <p>Both fields are filled at class-init time from a runtime expression and
-     * are not {@code final}, so the comparison has no constant to fold and a
-     * decompiler has to keep the branch and the junk behind it.</p>
-     */
-    private static void emitFieldGuard(PassContext context, InsnList out, String owner,
-                                       String fieldName, int expected) {
+    private static void emitIntervalAlwaysTrue(InsnList out, LabelNode target) {
+        AsmUtil.pushInt(out, 0x7FFFFFFF);
+        out.add(new InsnNode(Opcodes.IAND));
+        out.add(new InsnNode(Opcodes.DUP));
+        AsmUtil.pushInt(out, 8);
+        out.add(new InsnNode(Opcodes.IOR));
+        out.add(new InsnNode(Opcodes.SWAP));
+        AsmUtil.pushInt(out, 7);
+        out.add(new InsnNode(Opcodes.IAND));
+        out.add(new JumpInsnNode(Opcodes.IF_ICMPGT, target));
+    }
+
+    private static void emitFieldGuard(PassContext context, InsnList out, GuardPlan plan,
+                                       boolean tableForm) {
         LabelNode real = new LabelNode();
-        out.add(new FieldInsnNode(Opcodes.GETSTATIC, owner, fieldName + "0", "I"));
-        out.add(new FieldInsnNode(Opcodes.GETSTATIC, owner, fieldName + "1", "I"));
-        out.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, real));
+        out.add(new FieldInsnNode(Opcodes.GETSTATIC, plan.owner, plan.fieldName + "0", "I"));
+        if (plan.crossHost != null) {
+            out.add(new FieldInsnNode(Opcodes.GETSTATIC, plan.crossHost, plan.crossSecond, "I"));
+        } else {
+            out.add(new FieldInsnNode(Opcodes.GETSTATIC, plan.owner, plan.fieldName + "1", "I"));
+        }
+        out.add(new InsnNode(Opcodes.IXOR));
+        if (tableForm && plan.expectedMask != null) {
+            plan.table.emitInt(out, plan.expectedMask);
+            out.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, real));
+        } else {
+            emitIntervalAlwaysTrue(out, real);
+        }
         out.add(junk(context, false));
         out.add(real);
     }
 
-    /** Emits an always-true integer predicate over junk (v1 forms plus range/hash forms). */
-    private static void emitOpaqueTrue(PassContext context, InsnList out, int carrier,
-                                       boolean aggressive, Result result) {
+    private static void emitOpaqueTrue(PassContext context, InsnList out, GuardPlan plan,
+                                       int carrier, boolean aggressive, Result result,
+                                       int mbaSlotX, int mbaSlotY) {
         LabelNode real = new LabelNode();
-        int forms = aggressive ? 6 : 3;
-        int variant = context.random().nextInt(forms);
-        if (variant == 0) {
-            // (x * (x + 1)) & 1 == 0
-            out.add(new VarInsnNode(Opcodes.ILOAD, carrier));
-            out.add(new InsnNode(Opcodes.DUP));
-            out.add(new InsnNode(Opcodes.ICONST_1));
-            out.add(new InsnNode(Opcodes.IADD));
-            out.add(new InsnNode(Opcodes.IMUL));
-            out.add(new InsnNode(Opcodes.ICONST_1));
-            out.add(new InsnNode(Opcodes.IAND));
-            out.add(new JumpInsnNode(Opcodes.IFEQ, real));
-        } else if (variant == 1) {
-            // (x | 1) != 0
-            out.add(new VarInsnNode(Opcodes.ILOAD, carrier));
-            out.add(new InsnNode(Opcodes.ICONST_1));
-            out.add(new InsnNode(Opcodes.IOR));
+        int variant = context.random().nextInt(4);
+        if (variant == 3 && mbaSlotX >= 0) {
+            out.add(AsmMba.generateMba(mbaSlotX, mbaSlotY, true,
+                    context.random().nextInt(1000)));
             out.add(new JumpInsnNode(Opcodes.IFNE, real));
-        } else if (variant == 2) {
-            // x - x == 0
-            out.add(new VarInsnNode(Opcodes.ILOAD, carrier));
-            out.add(new VarInsnNode(Opcodes.ILOAD, carrier));
-            out.add(new InsnNode(Opcodes.ISUB));
-            out.add(new JumpInsnNode(Opcodes.IFEQ, real));
-        } else if (variant == 3) {
-            // range predicate: (x >>> 30) is in [0,3], so <= 3 always holds
-            out.add(new VarInsnNode(Opcodes.ILOAD, carrier));
-            AsmUtil.pushInt(out, 30);
-            out.add(new InsnNode(Opcodes.IUSHR));
-            out.add(new InsnNode(Opcodes.ICONST_3));
-            out.add(new JumpInsnNode(Opcodes.IF_ICMPLE, real));
-            result.rangePredicates++;
-        } else if (variant == 4) {
-            // range predicate: ((x | 1) & 1) == 1 always holds
-            out.add(new VarInsnNode(Opcodes.ILOAD, carrier));
-            out.add(new InsnNode(Opcodes.ICONST_1));
-            out.add(new InsnNode(Opcodes.IOR));
-            out.add(new InsnNode(Opcodes.ICONST_1));
-            out.add(new InsnNode(Opcodes.IAND));
-            out.add(new InsnNode(Opcodes.ICONST_1));
+            result.mbaPredicates++;
+            out.add(junk(context, aggressive));
+            out.add(real);
+            return;
+        }
+        if (variant == 1 && plan.relationA != null && plan.relationB != null) {
+            plan.table.emitInt(out, plan.relationA);
+            plan.table.emitInt(out, plan.relationB);
             out.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, real));
-            result.rangePredicates++;
+            result.tablePredicates++;
+        } else if (variant == 2) {
+            emitDifferentialBranch(context, out, carrier, aggressive);
+            result.differentialBranches++;
+            return;
         } else {
-            // hash predicate: h = (x ^ c1) * c2; (h ^ h) == 0 always holds
             out.add(new VarInsnNode(Opcodes.ILOAD, carrier));
-            AsmUtil.pushInt(out, 0x5BD1E995);
-            out.add(new InsnNode(Opcodes.IXOR));
-            AsmUtil.pushInt(out, 0x2C1B3C6D);
-            out.add(new InsnNode(Opcodes.IMUL));
-            out.add(new InsnNode(Opcodes.DUP));
-            out.add(new InsnNode(Opcodes.IXOR));
-            out.add(new JumpInsnNode(Opcodes.IFEQ, real));
-            result.hashPredicates++;
+            if (plan.mask != null) {
+                plan.table.emitInt(out, plan.mask);
+                out.add(new InsnNode(Opcodes.IXOR));
+            }
+            emitIntervalAlwaysTrue(out, real);
+            result.intervalPredicates++;
         }
         out.add(junk(context, aggressive));
         out.add(real);
     }
 
-    /** Emits the long parity identity {@code (y*(y+1))&1 == 0} over junk. */
-    private static void emitOpaqueTrueLong(PassContext context, InsnList out, int carrier) {
+    private static void emitOpaqueTrueLong(PassContext context, InsnList out, GuardPlan plan,
+                                           int carrier, Result result) {
         LabelNode real = new LabelNode();
-        out.add(new VarInsnNode(Opcodes.ILOAD, carrier));
-        out.add(new InsnNode(Opcodes.I2L));
-        out.add(new InsnNode(Opcodes.DUP2));
-        out.add(new InsnNode(Opcodes.LCONST_1));
-        out.add(new InsnNode(Opcodes.LADD));
-        out.add(new InsnNode(Opcodes.LMUL));
-        out.add(new InsnNode(Opcodes.LCONST_1));
-        out.add(new InsnNode(Opcodes.LAND));
-        out.add(new InsnNode(Opcodes.LCONST_0));
-        out.add(new InsnNode(Opcodes.LCMP));
-        out.add(new JumpInsnNode(Opcodes.IFEQ, real));
+        if (plan.relationA != null && plan.relationB != null) {
+
+            plan.table.emitInt(out, plan.relationA);
+            out.add(new InsnNode(Opcodes.I2L));
+            AsmUtil.pushInt(out, 32);
+            out.add(new InsnNode(Opcodes.LSHL));
+            plan.table.emitInt(out, plan.relationB);
+            out.add(new InsnNode(Opcodes.I2L));
+            out.add(new InsnNode(Opcodes.LXOR));
+            out.add(new VarInsnNode(Opcodes.ILOAD, carrier));
+            out.add(new InsnNode(Opcodes.I2L));
+            out.add(new InsnNode(Opcodes.LXOR));
+            out.add(new InsnNode(Opcodes.DUP2));
+            AsmUtil.pushInt(out, 32);
+            out.add(new InsnNode(Opcodes.LUSHR));
+            out.add(new InsnNode(Opcodes.LXOR));
+            out.add(new InsnNode(Opcodes.L2I));
+        } else {
+            out.add(new VarInsnNode(Opcodes.ILOAD, carrier));
+        }
+        emitIntervalAlwaysTrue(out, real);
+        result.intervalPredicates++;
         out.add(junk(context, true));
         out.add(real);
     }
 
-    /**
-     * Always-true branch over a junk block: the branch is taken on every real
-     * execution, so the junk path is dead and the following code is reached by
-     * fall-through from the branch target.
-     */
-    private static InsnList opaqueBranchesOverJunk(PassContext context, int carrier, boolean aggressive,
-                                                   Result result) {
+    private static InsnList opaqueBranchesOverJunk(PassContext context, GuardPlan plan, int carrier,
+                                                   boolean aggressive, Result result,
+                                                   int mbaSlotX, int mbaSlotY) {
         InsnList block = new InsnList();
-        emitOpaqueTrue(context, block, carrier, aggressive, result);
+        emitOpaqueTrue(context, block, plan, carrier, aggressive, result, mbaSlotX, mbaSlotY);
         return block;
     }
-
-    // ------------------------------------------------------------------- junk
 
     private static InsnList junk(PassContext context, boolean aggressive) {
         InsnList out = new InsnList();
@@ -696,13 +976,6 @@ public final class FlowObfuscationPass implements Pass {
         return out;
     }
 
-    /**
-     * Marks instruction indices where stack-neutral junk must not be inserted:
-     * pseudo nodes, unreachable instructions, block leaders (jump targets and
-     * handler entries), the instruction after a control transfer, and everything
-     * inside an exception range. A whole-class rollback is much worse than a
-     * slightly smaller junk budget, so the pass prefers conservative sites.
-     */
     private static boolean[] unsafeJunkSites(MethodNode method, AbstractInsnNode[] snapshot,
                                              Frame<BasicValue>[] frames) {
         boolean[] unsafe = new boolean[snapshot.length];
@@ -773,8 +1046,6 @@ public final class FlowObfuscationPass implements Pass {
         }
     }
 
-    // -------------------------------------------------------------- inversion
-
     private static int invertBranches(PassContext context, MethodNode method, boolean all, int budget) {
         int count = 0;
         for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; ) {
@@ -821,8 +1092,6 @@ public final class FlowObfuscationPass implements Pass {
         }
     }
 
-    // --------------------------------------------------------------- analysis
-
     private static Frame<BasicValue>[] analyse(String owner, MethodNode method) {
         int previousMaxStack = method.maxStack;
         int previousMaxLocals = method.maxLocals;
@@ -840,14 +1109,39 @@ public final class FlowObfuscationPass implements Pass {
         }
     }
 
-    /**
-     * Picks block entries whose operand stack is empty. These are safe branch
-     * anchors: an uninitialized object can never be carried over the new
-     * conditional edge.
-     */
     private static List<AbstractInsnNode> selectAnchors(MethodNode method,
                                                         Frame<BasicValue>[] frames, int limit,
-                                                        PassContext context) {
+                                                        PassContext context,
+                                                        MethodFlowAnalyzer analyzer,
+                                                        Result result) {
+
+        List<AbstractInsnNode> candidates = new ArrayList<AbstractInsnNode>();
+        if (analyzer != null) {
+            candidates.addAll(analyzer.safePoints());
+            if (!candidates.isEmpty()) {
+                result.analyzerSites++;
+                result.analyzerLoops += analyzer.loopCount();
+            }
+        }
+        if (candidates.isEmpty()) {
+            candidates = leaderCandidates(method, frames);
+        }
+        List<AbstractInsnNode> selected = new ArrayList<AbstractInsnNode>();
+        if (candidates.isEmpty()) {
+            return selected;
+        }
+        int guard = candidates.size() * 4 + 4;
+        while (selected.size() < limit && guard-- > 0) {
+            AbstractInsnNode candidate = candidates.get(context.random().nextInt(candidates.size()));
+            if (!selected.contains(candidate)) {
+                selected.add(candidate);
+            }
+        }
+        return selected;
+    }
+
+    private static List<AbstractInsnNode> leaderCandidates(MethodNode method,
+                                                           Frame<BasicValue>[] frames) {
         Set<AbstractInsnNode> leaders = new LinkedHashSet<AbstractInsnNode>();
         AbstractInsnNode first = method.instructions.getFirst();
         if (first != null) {
@@ -872,57 +1166,116 @@ public final class FlowObfuscationPass implements Pass {
             if (frames[index].getStackSize() != 0) {
                 continue;
             }
-            // Never anchor on the very first instruction: the entry prelude
-            // already covers it, and inserting before it would run before the
-            // carrier is initialised.
             if (leader == first) {
                 continue;
             }
             candidates.add(leader);
         }
-        List<AbstractInsnNode> selected = new ArrayList<AbstractInsnNode>();
-        if (candidates.isEmpty()) {
-            return selected;
-        }
-        int guard = candidates.size() * 4 + 4;
-        while (selected.size() < limit && guard-- > 0) {
-            AbstractInsnNode candidate = candidates.get(context.random().nextInt(candidates.size()));
-            if (!selected.contains(candidate)) {
-                selected.add(candidate);
-            }
-        }
-        return selected;
+        return candidates;
     }
 
     private static boolean isReturnOrThrow(int opcode) {
         return (opcode >= Opcodes.IRETURN && opcode <= Opcodes.RETURN) || opcode == Opcodes.ATHROW;
     }
 
-    // -------------------------------------------------------- transposition
+    private static boolean emitEntryShuffle(PassContext context, MethodNode method, int carrier) {
+        if (method.instructions == null || method.instructions.size() < 12) {
+            return false;
+        }
+        int locals = ((method.access & Opcodes.ACC_STATIC) != 0) ? 0 : 1;
+        for (Type type : Type.getArgumentTypes(method.desc)) {
+            locals += type.getSize();
+        }
+        if (locals >= method.maxLocals) {
+            return false;
+        }
+        AbstractInsnNode first = method.instructions.getFirst();
+        LabelNode bodyStart = new LabelNode();
+        InsnList head = new InsnList();
+        Type[] localTypes = new Type[method.maxLocals];
+        AbstractInsnNode[] snapshot = method.instructions.toArray();
+        for (AbstractInsnNode insn : snapshot) {
+            if (!(insn instanceof VarInsnNode)) {
+                continue;
+            }
+            VarInsnNode var = (VarInsnNode) insn;
+            int opcode = var.getOpcode();
+            Type type = null;
+            if (opcode == Opcodes.ILOAD || opcode == Opcodes.ISTORE) {
+                type = Type.INT_TYPE;
+            } else if (opcode == Opcodes.LLOAD || opcode == Opcodes.LSTORE) {
+                type = Type.LONG_TYPE;
+            } else if (opcode == Opcodes.FLOAD || opcode == Opcodes.FSTORE) {
+                type = Type.FLOAT_TYPE;
+            } else if (opcode == Opcodes.DLOAD || opcode == Opcodes.DSTORE) {
+                type = Type.DOUBLE_TYPE;
+            } else if (opcode == Opcodes.ALOAD || opcode == Opcodes.ASTORE) {
+                type = Type.getObjectType("java/lang/Object");
+            }
+            if (type != null && var.var < localTypes.length && localTypes[var.var] == null) {
+                localTypes[var.var] = type;
+            }
+        }
+        int initialized = 0;
+        for (int slot = locals; slot < method.maxLocals; slot++) {
+            Type type = localTypes[slot];
+            if (type == null || slot == carrier) {
+                continue;
+            }
+            pushDefault(head, type);
+            head.add(new VarInsnNode(storeOpcode(type), slot));
+            initialized++;
+            if (type.getSize() == 2 && slot + 1 < method.maxLocals) {
+                localTypes[slot + 1] = null;
+                slot++;
+            }
+        }
+        if (initialized == 0) {
+            return false;
+        }
+        head.add(new JumpInsnNode(Opcodes.GOTO, bodyStart));
+        method.instructions.insertBefore(first, bodyStart);
+        method.instructions.insertBefore(bodyStart, head);
+        method.maxStack = Math.max(method.maxStack, 2);
+        return true;
+    }
 
-    /**
-     * Method-level block scheduling (the Zelix KlassMaster
-     * {@code MethodFlowAnalyzer} idea): several independent basic blocks are
-     * lifted out of the method body and appended in shuffled order, every
-     * fall-through edge is repaired with an explicit {@code GOTO}, and the old
-     * position of a moved block keeps a {@code GOTO} to its new location.
-     *
-     * <p>The emitted layout therefore no longer matches the control-flow graph a
-     * decompiler reconstructs: CFR has to rebuild the method from a graph whose
-     * blocks are scattered over the code array, which is what makes its
-     * structuring fail far more often than on a merely branch-inverted
-     * method.</p>
-     *
-     * <p>Safety rules: a block is only moved when its entry operand stack is
-     * empty (so a {@code GOTO} from the old position is type-correct), it neither
-     * lies inside nor contains the boundary of any exception range (the table is
-     * position based, so moving such a block would change what is protected), and
-     * it contains no monitor instruction. Every result still goes through
-     * {@link MethodGate}, so a method that does not verify is rolled back.</p>
-     *
-     * @param maxBlocks upper bound of moved blocks for this method
-     * @return number of moved blocks
-     */
+    private static void pushDefault(InsnList out, Type type) {
+        switch (type.getSort()) {
+            case Type.LONG:
+                out.add(new InsnNode(Opcodes.LCONST_0));
+                return;
+            case Type.FLOAT:
+                out.add(new InsnNode(Opcodes.FCONST_0));
+                return;
+            case Type.DOUBLE:
+                out.add(new InsnNode(Opcodes.DCONST_0));
+                return;
+            case Type.ARRAY:
+            case Type.OBJECT:
+                out.add(new InsnNode(Opcodes.ACONST_NULL));
+                return;
+            default:
+                out.add(new InsnNode(Opcodes.ICONST_0));
+        }
+    }
+
+    private static int storeOpcode(Type type) {
+        switch (type.getSort()) {
+            case Type.LONG:
+                return Opcodes.LSTORE;
+            case Type.FLOAT:
+                return Opcodes.FSTORE;
+            case Type.DOUBLE:
+                return Opcodes.DSTORE;
+            case Type.ARRAY:
+            case Type.OBJECT:
+                return Opcodes.ASTORE;
+            default:
+                return Opcodes.ISTORE;
+        }
+    }
+
     private static int reorderBlocks(PassContext context, String owner, MethodNode method, int maxBlocks) {
         if (maxBlocks <= 0 || method.instructions == null) {
             return 0;
@@ -1081,9 +1434,7 @@ public final class FlowObfuscationPass implements Pass {
                     toMove.add(insns[i]);
                 }
             }
-            // Repair the edge that used to fall into the block: keep a GOTO at the
-            // old position unless the predecessor is itself moved (then its own
-            // fall-through repair covers it).
+
             AbstractInsnNode previous = null;
             int previousIndex = -1;
             for (int i = block.start - 1; i >= 0; i--) {
@@ -1098,7 +1449,7 @@ public final class FlowObfuscationPass implements Pass {
             if (previous != null && !predecessorMoved && !endsWithoutFallthrough(previous)) {
                 method.instructions.insertBefore(label, new JumpInsnNode(Opcodes.GOTO, label));
             }
-            // Repair the edge that used to fall out of the block.
+
             AbstractInsnNode trailing = null;
             if (block.lastReal >= 0 && !endsWithoutFallthrough(insns[block.lastReal])
                     && index.intValue() + 1 < blocks.size()) {
@@ -1120,7 +1471,6 @@ public final class FlowObfuscationPass implements Pass {
         return moved;
     }
 
-    /** Returns the label at {@code node}, inserting one when the node is not a label. */
     private static LabelNode labelFor(MethodNode method, AbstractInsnNode node,
                                       java.util.IdentityHashMap<AbstractInsnNode, LabelNode> cache) {
         LabelNode cached = cache.get(node);
@@ -1138,20 +1488,6 @@ public final class FlowObfuscationPass implements Pass {
         return label;
     }
 
-    /**
-     * Moves one independent basic block to the end of the method.
-     *
-     * <p>Safety rules: the block must be entered with an empty operand stack,
-     * must not be covered by (or contain the boundary of) any exception range,
-     * must not contain monitor instructions, must end with an unconditional
-     * control transfer, and the physically preceding block must not fall
-     * through into it. Under these rules every path that reached the block
-     * jumps to its (moved) label, no path depended on the old physical
-     * position, and appending the block at the end cannot create a fall-through
-     * into the end of the code.</p>
-     *
-     * @return number of blocks moved (0 or 1)
-     */
     private static int transposeBlocks(PassContext context, String owner, MethodNode method) {
         Frame<BasicValue>[] frames;
         try {
@@ -1305,6 +1641,85 @@ public final class FlowObfuscationPass implements Pass {
         return 1;
     }
 
+    private static int addIrreducibleEntry(PassContext context, String owner, MethodNode method,
+                                           int carrier, GuardPlan plan) {
+        Frame<BasicValue>[] frames;
+        try {
+            frames = new Analyzer<BasicValue>(new BasicInterpreter()).analyzeAndComputeMaxs(owner, method);
+        } catch (AnalyzerException e) {
+            return 0;
+        } catch (RuntimeException e) {
+            return 0;
+        }
+        AbstractInsnNode[] insns = method.instructions.toArray();
+        if (insns.length < 24 || frames.length != insns.length) {
+            return 0;
+        }
+        int insertIndex = -1;
+        for (int i = 0; i < insns.length; i++) {
+            if (insns[i].getOpcode() == Opcodes.ISTORE
+                    && ((VarInsnNode) insns[i]).var == carrier) {
+                insertIndex = i + 1;
+                break;
+            }
+        }
+        if (insertIndex < 0 || insertIndex >= insns.length) {
+            return 0;
+        }
+        Frame<BasicValue> entryFrame = frames[insertIndex];
+        if (entryFrame == null || entryFrame.getStackSize() != 0) {
+            return 0;
+        }
+        int lastReal = -1;
+        for (int i = 0; i < insns.length; i++) {
+            if (insns[i].getOpcode() >= 0) {
+                lastReal = i;
+            }
+        }
+
+        if (lastReal < 0 || !endsWithoutFallthrough(insns[lastReal])) {
+            return 0;
+        }
+        LabelNode first = new LabelNode();
+        LabelNode second = new LabelNode();
+        InsnList cycle = new InsnList();
+        cycle.add(first);
+        cycle.add(junk(context, false));
+        cycle.add(new JumpInsnNode(Opcodes.GOTO, second));
+        cycle.add(second);
+        cycle.add(junk(context, false));
+        cycle.add(new JumpInsnNode(Opcodes.GOTO, first));
+        method.instructions.insert(insns[lastReal], cycle);
+
+        InsnList entries = new InsnList();
+        if (plan != null && plan.deadRelation != null) {
+
+            emitTableDeadEdge(entries, plan, 0x1657, first);
+            emitTableDeadEdge(entries, plan, 0x2B8F, second);
+        } else {
+
+            emitDeadEdge(entries, carrier, 7, 9, first);
+            emitDeadEdge(entries, carrier, 15, 16, second);
+        }
+        method.instructions.insertBefore(insns[insertIndex], entries);
+        return 1;
+    }
+
+    private static void emitTableDeadEdge(InsnList out, GuardPlan plan, int offset, LabelNode target) {
+        plan.table.emitInt(out, plan.deadRelation);
+        AsmUtil.pushInt(out, plan.deadRelationValue ^ offset);
+        out.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, target));
+    }
+
+    private static void emitDeadEdge(InsnList out, int carrier, int mask, int value,
+                                     LabelNode target) {
+        out.add(new VarInsnNode(Opcodes.ILOAD, carrier));
+        AsmUtil.pushInt(out, mask);
+        out.add(new InsnNode(Opcodes.IAND));
+        AsmUtil.pushInt(out, value);
+        out.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, target));
+    }
+
     private static void addLeader(Set<Integer> leaders,
                                   java.util.IdentityHashMap<AbstractInsnNode, Integer> positions,
                                   AbstractInsnNode node) {
@@ -1323,7 +1738,6 @@ public final class FlowObfuscationPass implements Pass {
                 || opcode == Opcodes.LOOKUPSWITCH || isReturnOrThrow(opcode);
     }
 
-    /** Basic block candidate (instruction-index range, real instruction bounds). */
     private static final class Block {
         int start;
         int end;
@@ -1333,16 +1747,6 @@ public final class FlowObfuscationPass implements Pass {
         boolean tryBoundary;
     }
 
-    // -------------------------------------------------- bogus exception ranges
-
-    /**
-     * Adds up to one or two exception-table entries over ranges that contain no
-     * original handler. The synthetic handler only rethrows the caught throwable
-     * (same propagation, same stack trace), so behaviour is unchanged while the
-     * exception table, the handler graph and decompiler output become wrong.
-     *
-     * @return number of ranges added
-     */
     private static int addBogusRanges(PassContext context, MethodNode method, boolean aggressive) {
         int wanted = aggressive ? 2 : 1;
         int added = 0;
@@ -1417,26 +1821,33 @@ public final class FlowObfuscationPass implements Pass {
         return true;
     }
 
-    // --------------------------------------------------------------- class bits
+    private static void attachCrossGuard(GuardPlan plan, CrossClassHosts hosts) {
+        ClassNode owner = plan.context.classes().getClass(plan.owner);
+        if (plan.field1 == null) {
+            return;
+        }
+        int secondConstant = plan.field1.value();
+        CrossClass cross = hosts.crossClassFor(owner, secondConstant);
+        if (cross == null) {
+            return;
+        }
+        plan.crossHost = cross.host;
+        plan.crossSecond = cross.second;
+        plan.crossFirstConstant = plan.field0 == null ? secondConstant ^ plan.expected : plan.field0.value();
+    }
 
-    /**
-     * Creates the two guard fields used by {@link #emitFieldGuard}.
-     *
-     * <p>Both fields end up holding {@code expected}, but the value is written by
-     * an expression evaluated in {@code <clinit>} instead of a literal, and the
-     * fields are not {@code final}. A literal comparison ({@code if (f == 12345)})
-     * was folded away by CFR and Procyon, which kept the protected classes
-     * readable; two runtime-initialized fields cannot be folded.</p>
-     */
-    private static void addFieldInit(ClassNode node, String fieldName, int expected) {
-        String first = fieldName + "0";
-        String second = fieldName + "1";
+    private static void addFieldInit(ClassNode node, GuardPlan plan) {
+        String first = plan.fieldName + "0";
+        String second = plan.fieldName + "1";
+        boolean cross = plan.crossHost != null;
         node.fields.add(new FieldNode(
                 Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
                 first, "I", null, null));
-        node.fields.add(new FieldNode(
-                Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
-                second, "I", null, null));
+        if (!cross) {
+            node.fields.add(new FieldNode(
+                    Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+                    second, "I", null, null));
+        }
 
         MethodNode clinit = null;
         for (MethodNode method : node.methods) {
@@ -1452,33 +1863,53 @@ public final class FlowObfuscationPass implements Pass {
             clinit.maxStack = 1;
             node.methods.add(clinit);
         }
-        // int n = (int) System.nanoTime();
-        // f0 = n ^ (n ^ expected);  f1 = (n ^ expected) ^ n;  (same value, different
-        // instruction order so neither field looks like a constant)
-        int slot = clinit.maxLocals;
-        clinit.maxLocals = Math.max(clinit.maxLocals, slot + 2);
         InsnList init = new InsnList();
-        init.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/System",
-                "nanoTime", "()J", false));
-        init.add(new InsnNode(Opcodes.L2I));
-        init.add(new VarInsnNode(Opcodes.ISTORE, slot));
-
-        init.add(new VarInsnNode(Opcodes.ILOAD, slot));
-        init.add(new VarInsnNode(Opcodes.ILOAD, slot));
-        AsmUtil.pushInt(init, expected);
-        init.add(new InsnNode(Opcodes.IXOR));
-        init.add(new InsnNode(Opcodes.IXOR));
-        init.add(new FieldInsnNode(Opcodes.PUTSTATIC, node.name, first, "I"));
-
-        init.add(new VarInsnNode(Opcodes.ILOAD, slot));
-        AsmUtil.pushInt(init, expected);
-        init.add(new InsnNode(Opcodes.IXOR));
-        init.add(new VarInsnNode(Opcodes.ILOAD, slot));
-        init.add(new InsnNode(Opcodes.IXOR));
-        init.add(new FieldInsnNode(Opcodes.PUTSTATIC, node.name, second, "I"));
-
+        if (cross) {
+            AsmUtil.pushInt(init, plan.crossFirstConstant);
+            init.add(new FieldInsnNode(Opcodes.PUTSTATIC, node.name, first, "I"));
+        } else if (plan.field0 != null && plan.field1 != null) {
+            plan.table.emitInt(init, plan.field0);
+            init.add(new FieldInsnNode(Opcodes.PUTSTATIC, node.name, first, "I"));
+            plan.table.emitInt(init, plan.field1);
+            init.add(new FieldInsnNode(Opcodes.PUTSTATIC, node.name, second, "I"));
+        } else {
+            int slot = clinit.maxLocals;
+            clinit.maxLocals = Math.max(clinit.maxLocals, slot + 1);
+            emitScrambledSample(init, slot, nonZero(plan.randomSeed(0)));
+            init.add(new FieldInsnNode(Opcodes.PUTSTATIC, node.name, first, "I"));
+            emitScrambledSample(init, slot, nonZero(plan.randomSeed(1)));
+            init.add(new FieldInsnNode(Opcodes.PUTSTATIC, node.name, second, "I"));
+        }
         clinit.instructions.insert(init);
-        clinit.maxStack = Math.max(clinit.maxStack, 3);
+        clinit.maxStack = Math.max(clinit.maxStack, 4);
+    }
+
+    private static void emitScrambledSample(InsnList out, int slot, int seed) {
+        out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/System",
+                "nanoTime", "()J", false));
+        out.add(new InsnNode(Opcodes.L2I));
+        AsmUtil.pushInt(out, seed);
+        out.add(new InsnNode(Opcodes.IXOR));
+        out.add(new VarInsnNode(Opcodes.ISTORE, slot));
+        out.add(new VarInsnNode(Opcodes.ILOAD, slot));
+        out.add(new VarInsnNode(Opcodes.ILOAD, slot));
+        AsmUtil.pushInt(out, 13);
+        out.add(new InsnNode(Opcodes.ISHL));
+        out.add(new InsnNode(Opcodes.IXOR));
+        out.add(new VarInsnNode(Opcodes.ISTORE, slot));
+        out.add(new VarInsnNode(Opcodes.ILOAD, slot));
+        out.add(new VarInsnNode(Opcodes.ILOAD, slot));
+        AsmUtil.pushInt(out, 17);
+        out.add(new InsnNode(Opcodes.IUSHR));
+        out.add(new InsnNode(Opcodes.IXOR));
+        out.add(new VarInsnNode(Opcodes.ISTORE, slot));
+        out.add(new VarInsnNode(Opcodes.ILOAD, slot));
+        out.add(new VarInsnNode(Opcodes.ILOAD, slot));
+        AsmUtil.pushInt(out, 5);
+        out.add(new InsnNode(Opcodes.ISHL));
+        out.add(new InsnNode(Opcodes.IXOR));
+        out.add(new VarInsnNode(Opcodes.ISTORE, slot));
+        out.add(new VarInsnNode(Opcodes.ILOAD, slot));
     }
 
     private static String uniqueFieldName(ClassNode node) {
@@ -1513,6 +1944,569 @@ public final class FlowObfuscationPass implements Pass {
         return value == 0 ? 0x51ED : value;
     }
 
+    private static Map<String, FlowGroup> selectGroups(PassContext context) {
+        Map<String, List<ClassNode>> buckets = new LinkedHashMap<String, List<ClassNode>>();
+        for (ClassNode node : context.classes().classes().values()) {
+            if (!transformable(context, node)) {
+                continue;
+            }
+            String key = groupKey(context, node.name);
+            List<ClassNode> bucket = buckets.get(key);
+            if (bucket == null) {
+                bucket = new ArrayList<ClassNode>();
+                buckets.put(key, bucket);
+            }
+            bucket.add(node);
+        }
+        Map<String, FlowGroup> groups = new LinkedHashMap<String, FlowGroup>();
+        for (Map.Entry<String, List<ClassNode>> entry : buckets.entrySet()) {
+            List<ClassNode> bucket = entry.getValue();
+            if (bucket.isEmpty()) {
+                continue;
+            }
+            groups.put(entry.getKey(), new FlowGroup(context, entry.getKey(), bucket.get(0)));
+        }
+        return groups;
+    }
+
+    private static boolean transformable(PassContext context, ClassNode node) {
+        if (context.classes().isGenerated(node.name) || context.classes().isFrozen(node.name)) {
+            return false;
+        }
+        if (context.rules().skipBodyTransform(node.name) || !context.rules().transformClass(node)) {
+            return false;
+        }
+        if ((node.access & (Opcodes.ACC_INTERFACE | Opcodes.ACC_ANNOTATION)) != 0
+                || "module-info".equals(node.name)) {
+            return false;
+        }
+        Boolean enabled = AsmUtil.annotationBoolean(node.invisibleAnnotations, ANNOTATION, "enabled");
+        if (enabled == null) {
+            enabled = AsmUtil.annotationBoolean(node.visibleAnnotations, ANNOTATION, "enabled");
+        }
+        return !Boolean.FALSE.equals(enabled);
+    }
+
+    private static String groupKey(PassContext context, String internalName) {
+        int slash = internalName.lastIndexOf('/');
+        if (slash < 0) {
+            return "";
+        }
+        String scope = context.config().option("flow.groupScope", "package");
+        if ("root".equalsIgnoreCase(scope)) {
+            int first = internalName.indexOf('/');
+            return first < 0 ? "" : internalName.substring(0, first);
+        }
+        return internalName.substring(0, slash);
+    }
+
+    private static boolean emitGuard(PassContext context, InsnList out, GuardPlan plan, FlowGroup group,
+                                  boolean tableForm) {
+        if (plan.crossHost != null) {
+            emitFieldGuard(context, out, plan, tableForm);
+            return true;
+        }
+        if (group != null && group.established) {
+            emitAccessorGuard(context, out, group);
+            return false;
+        }
+        emitFieldGuard(context, out, plan, tableForm);
+        return false;
+    }
+
+    private static void emitAccessorGuard(PassContext context, InsnList out, FlowGroup group) {
+        LabelNode real = new LabelNode();
+        int variant = context.random().nextInt(3);
+        if (variant == 0) {
+
+            out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, group.holder, group.getterName,
+                    getterDescriptor(group.fieldType), false));
+            out.add(new JumpInsnNode(branchIfSet(group), real));
+            out.add(junk(context, false));
+            out.add(real);
+        } else if (variant == 1) {
+
+            LabelNode skip = new LabelNode();
+            out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, group.holder, group.getterName,
+                    getterDescriptor(group.fieldType), false));
+            out.add(new JumpInsnNode(branchIfUnset(group), skip));
+            out.add(junk(context, false));
+            out.add(skip);
+        } else {
+
+            out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, group.holder, group.negatedGetterName,
+                    "()Z", false));
+            out.add(new JumpInsnNode(group.nonZeroValue ? Opcodes.IFEQ : Opcodes.IFNE, real));
+            out.add(junk(context, false));
+            out.add(real);
+        }
+        group.predicates++;
+    }
+
+    private static int branchIfSet(FlowGroup group) {
+        if (isIntType(group.fieldType)) {
+            return group.nonZeroValue ? Opcodes.IFNE : Opcodes.IFEQ;
+        }
+        return group.nonZeroValue ? Opcodes.IFNONNULL : Opcodes.IFNULL;
+    }
+
+    private static int branchIfUnset(FlowGroup group) {
+        if (isIntType(group.fieldType)) {
+            return group.nonZeroValue ? Opcodes.IFEQ : Opcodes.IFNE;
+        }
+        return group.nonZeroValue ? Opcodes.IFNULL : Opcodes.IFNONNULL;
+    }
+
+    private static boolean isIntType(String type) {
+        return "I".equals(type) || "Z".equals(type);
+    }
+
+    private static String getterDescriptor(String type) {
+        return "()" + type;
+    }
+
+    private static String setterDescriptor(String type) {
+        return "(" + type + ")V";
+    }
+
+    private static boolean materializeGroup(ClassNode node, FlowGroup group) {
+        if (group == null || !group.established || !group.holder.equals(node.name)) {
+            return false;
+        }
+        if (hasField(node, group.fieldName)) {
+            return false;
+        }
+        node.fields.add(new FieldNode(
+                Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+                group.fieldName, group.fieldType, null, null));
+        node.methods.add(groupGetter(group));
+        node.methods.add(groupSetter(group));
+        node.methods.add(groupNegatedGetter(group));
+        MethodNode clinit = ensureClinit(node);
+        InsnList init = new InsnList();
+        emitGroupInit(init, group);
+        clinit.instructions.insert(init);
+        clinit.maxStack = Math.max(clinit.maxStack, 4);
+        return true;
+    }
+
+    private static void emitGroupInit(InsnList out, FlowGroup group) {
+        String type = group.fieldType;
+        if ("Z".equals(type)) {
+            out.add(new InsnNode(group.nonZeroValue ? Opcodes.ICONST_1 : Opcodes.ICONST_0));
+        } else if ("I".equals(type)) {
+            AsmUtil.pushInt(out, group.nonZeroValue ? group.intValue : 0);
+        } else if ("Ljava/lang/String;".equals(type)) {
+            if (group.nonZeroValue) {
+                AsmUtil.pushInt(out, group.intValue);
+                out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Integer",
+                        "toHexString", "(I)Ljava/lang/String;", false));
+            } else {
+                out.add(new InsnNode(Opcodes.ACONST_NULL));
+            }
+        } else if (group.nonZeroValue) {
+            AsmUtil.pushInt(out, 2);
+            out.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_INT));
+            out.add(new InsnNode(Opcodes.DUP));
+            out.add(new InsnNode(Opcodes.ICONST_0));
+            AsmUtil.pushInt(out, group.intValue);
+            out.add(new InsnNode(Opcodes.IASTORE));
+        } else {
+            out.add(new InsnNode(Opcodes.ACONST_NULL));
+        }
+        out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, group.holder, group.setterName,
+                setterDescriptor(type), false));
+    }
+
+    private static MethodNode groupGetter(FlowGroup group) {
+        MethodNode getter = new MethodNode(
+                Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+                group.getterName, getterDescriptor(group.fieldType), null, null);
+        getter.instructions.add(new FieldInsnNode(Opcodes.GETSTATIC, group.holder,
+                group.fieldName, group.fieldType));
+        getter.instructions.add(new InsnNode(AsmUtil.returnOpcode(Type.getType(group.fieldType))));
+        getter.maxStack = 1;
+        getter.maxLocals = 0;
+        return getter;
+    }
+
+    private static MethodNode groupSetter(FlowGroup group) {
+        MethodNode setter = new MethodNode(
+                Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+                group.setterName, setterDescriptor(group.fieldType), null, null);
+        setter.instructions.add(new VarInsnNode(AsmUtil.loadOpcode(Type.getType(group.fieldType)), 0));
+        setter.instructions.add(new FieldInsnNode(Opcodes.PUTSTATIC, group.holder,
+                group.fieldName, group.fieldType));
+        setter.instructions.add(new InsnNode(Opcodes.RETURN));
+        setter.maxStack = 1;
+        setter.maxLocals = 1;
+        return setter;
+    }
+
+    private static MethodNode groupNegatedGetter(FlowGroup group) {
+        MethodNode negated = new MethodNode(
+                Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+                group.negatedGetterName, "()Z", null, null);
+        LabelNode isSet = new LabelNode();
+        negated.instructions.add(new FieldInsnNode(Opcodes.GETSTATIC, group.holder,
+                group.fieldName, group.fieldType));
+        negated.instructions.add(new JumpInsnNode(
+                isIntType(group.fieldType) ? Opcodes.IFNE : Opcodes.IFNONNULL, isSet));
+        negated.instructions.add(new InsnNode(Opcodes.ICONST_1));
+        negated.instructions.add(new InsnNode(Opcodes.IRETURN));
+        negated.instructions.add(isSet);
+        negated.instructions.add(new InsnNode(Opcodes.ICONST_0));
+        negated.instructions.add(new InsnNode(Opcodes.IRETURN));
+        negated.maxStack = 1;
+        negated.maxLocals = 0;
+        return negated;
+    }
+
+    private static MethodNode ensureClinit(ClassNode node) {
+        for (MethodNode method : node.methods) {
+            if ("<clinit>".equals(method.name) && "()V".equals(method.desc)) {
+                return method;
+            }
+        }
+        MethodNode clinit = new MethodNode(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null);
+        clinit.instructions.add(new InsnNode(Opcodes.RETURN));
+        clinit.maxLocals = 0;
+        clinit.maxStack = 1;
+        node.methods.add(clinit);
+        return clinit;
+    }
+
+    private static boolean hasField(ClassNode node, String name) {
+        for (FieldNode field : node.fields) {
+            if (field.name.equals(name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasMethod(ClassNode node, String name) {
+        for (MethodNode method : node.methods) {
+            if (method.name.equals(name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static int countAccessors(ClassNode node, FlowGroup group) {
+        int count = 0;
+        if (hasMethod(node, group.getterName)) {
+            count++;
+        }
+        if (hasMethod(node, group.setterName)) {
+            count++;
+        }
+        if (hasMethod(node, group.negatedGetterName)) {
+            count++;
+        }
+        return count;
+    }
+
+    private static String typeLabel(String type) {
+        if ("Z".equals(type)) {
+            return "boolean";
+        }
+        if ("I".equals(type)) {
+            return "int";
+        }
+        if ("Ljava/lang/String;".equals(type)) {
+            return "String";
+        }
+        return "array";
+    }
+
+    private static String uniqueName(Set<String> names, String prefix, int index) {
+        String candidate = prefix + Integer.toHexString(index);
+        int suffix = 0;
+        while (names.contains(candidate)) {
+            candidate = prefix + Integer.toHexString(index) + "$" + Integer.toHexString(suffix++);
+        }
+        names.add(candidate);
+        return candidate;
+    }
+
+    private static final class FlowGroup {
+        private static final String[] FIELD_TYPES = {
+            "Z", "I", "Ljava/lang/String;", "[I",
+        };
+
+        final String key;
+        final String holder;
+        final String fieldName;
+        final String getterName;
+        final String setterName;
+        final String negatedGetterName;
+        final String fieldType;
+        final boolean nonZeroValue;
+        final int intValue;
+        boolean established;
+        int predicates;
+
+        FlowGroup(PassContext context, String key, ClassNode holder) {
+            this.key = key;
+            this.holder = holder.name;
+            this.fieldType = FIELD_TYPES[context.random().nextInt(FIELD_TYPES.length)];
+            this.nonZeroValue = context.random().nextBoolean();
+            this.intValue = nonZero(context.random().nextInt());
+            Set<String> names = new HashSet<String>();
+            for (FieldNode field : holder.fields) {
+                names.add(field.name);
+            }
+            for (MethodNode method : holder.methods) {
+                names.add(method.name);
+            }
+            this.fieldName = uniqueName(names, "z$g", 0);
+            this.getterName = uniqueName(names, "z$g", 1);
+            this.setterName = uniqueName(names, "z$g", 2);
+            this.negatedGetterName = uniqueName(names, "z$g", 3);
+        }
+    }
+
+    private static final class GuardPlan {
+        final PassContext context;
+        final RuntimeTable table;
+        final String owner;
+        final String fieldName;
+        final int expected;
+        String crossHost;
+        String crossSecond;
+        int crossFirstConstant;
+        final RuntimeTable.Pair field0;
+        final RuntimeTable.Pair field1;
+        final RuntimeTable.Pair expectedMask;
+        final RuntimeTable.Pair relationA;
+        final RuntimeTable.Pair relationB;
+        final RuntimeTable.Pair mask;
+        final RuntimeTable.Pair deadRelation;
+        final int deadRelationValue;
+        int fallbacks;
+
+        GuardPlan(PassContext context, RuntimeTable table, String owner, String fieldName,
+                  int expected) {
+            this.context = context;
+            this.table = table;
+            this.owner = owner;
+            this.fieldName = fieldName;
+            this.expected = expected;
+            int firstValue = nonZero(context.random().nextInt());
+            this.field0 = table.pair(firstValue);
+            this.field1 = table.pair(firstValue ^ expected);
+            this.expectedMask = table.pair(expected);
+            int relationValue = context.random().nextInt();
+            this.relationA = table.pair(relationValue);
+            this.relationB = table.pair(relationValue);
+            this.mask = table.pair(nonZero(context.random().nextInt()));
+            int deadValue = nonZero(context.random().nextInt());
+            this.deadRelationValue = deadValue;
+            this.deadRelation = table.pair(deadValue);
+            if (field0 == null || field1 == null) {
+                fallbacks++;
+            }
+            if (expectedMask == null) {
+                fallbacks++;
+            }
+            if (relationA == null || relationB == null) {
+                fallbacks++;
+            }
+        }
+
+        void materialize(ClassNode node) {
+            table.materialize(node);
+        }
+
+        int randomSeed(int index) {
+            return context.random().nextInt();
+        }
+    }
+
+    private static final class CrossClassHosts {
+
+        private final PassContext context;
+        private final boolean enabled;
+        private final List<ClassNode> candidates = new ArrayList<ClassNode>();
+        private final Map<String, CrossClass> assigned = new LinkedHashMap<String, CrossClass>();
+        private final Map<String, Integer> nextIds = new LinkedHashMap<String, Integer>();
+        private final Set<String> hosts = new LinkedHashSet<String>();
+
+        CrossClassHosts(PassContext context, boolean enabled) {
+            this.context = context;
+            this.enabled = enabled;
+            if (!enabled) {
+                return;
+            }
+            List<String> names = new ArrayList<String>();
+            for (ClassNode node : context.classes().classes().values()) {
+                if (transformable(context, node)) {
+                    names.add(node.name);
+                }
+            }
+            Collections.sort(names);
+            for (String name : names) {
+                ClassNode node = context.classes().getClass(name);
+                if (node != null) {
+                    candidates.add(node);
+                }
+            }
+        }
+
+        boolean isEnabled() {
+            return enabled;
+        }
+
+        int hostCount() {
+            return hosts.size();
+        }
+
+        int pairCount() {
+            return assigned.size();
+        }
+
+        void prepare(ClassNode owner) {
+            crossClassFor(owner, 0);
+        }
+
+        int[] crossClassFieldIds(ClassNode owner) {
+            CrossClass fields = crossClassFor(owner, 0);
+            return fields == null ? null : new int[] { fields.firstId, fields.secondId };
+        }
+
+        CrossClass crossClassFor(ClassNode owner, int secondValue) {
+            if (!enabled || owner == null || candidates.size() < 2) {
+                return null;
+            }
+            CrossClass cached = assigned.get(owner.name);
+            if (cached != null) {
+                return cached;
+            }
+            int size = candidates.size();
+            int index = -1;
+            for (int i = 0; i < size; i++) {
+                if (candidates.get(i).name.equals(owner.name)) {
+                    index = i;
+                    break;
+                }
+            }
+            int salt = (owner.name.hashCode() ^ (int) context.config().seed()) & 0x7FFFFFFF;
+            int start = index < 0 ? salt % size : (index + 1 + salt % size) % size;
+            ClassNode host = null;
+            for (int i = 0; i < size; i++) {
+                ClassNode candidate = candidates.get((start + i) % size);
+                if (!candidate.name.equals(owner.name)) {
+                    host = candidate;
+                    break;
+                }
+            }
+            if (host == null) {
+                return null;
+            }
+            CrossClass created = materialize(host, secondValue);
+            assigned.put(owner.name, created);
+            hosts.add(host.name);
+            context.log().debug("flow-obfuscation: %s reads its cross-class guard from %s.%s/"
+                    + "%s", owner.name, host.name, created.first, created.second);
+            return created;
+        }
+
+        private CrossClass materialize(ClassNode host, int secondValue) {
+            int firstId = allocate(host);
+            int secondId = allocate(host);
+            String first = fieldName(firstId);
+            String second = fieldName(secondId);
+            MethodNode clinit = ensureClinit(host);
+            int slot = nextFreeLocal(clinit);
+            clinit.maxLocals = Math.max(clinit.maxLocals, slot + 1);
+            InsnList init = new InsnList();
+            emitScrambledSample(init, slot, nonZero(context.random().nextInt()));
+            init.add(new FieldInsnNode(Opcodes.PUTSTATIC, host.name, first, "I"));
+            AsmUtil.pushInt(init, secondValue);
+            init.add(new FieldInsnNode(Opcodes.PUTSTATIC, host.name, second, "I"));
+            clinit.instructions.insert(init);
+            clinit.maxStack = Math.max(clinit.maxStack, 4);
+            return new CrossClass(host.name, first, second, firstId, secondId);
+        }
+
+        CrossClass valueSlot(ClassNode owner, int value) {
+            if (!enabled || owner == null || candidates.size() < 2) {
+                return null;
+            }
+            ClassNode host = hostFor(owner);
+            if (host == null) {
+                return null;
+            }
+            int id = allocate(host);
+            String name = fieldName(id);
+            MethodNode clinit = ensureClinit(host);
+            InsnList init = new InsnList();
+            AsmUtil.pushInt(init, value);
+            init.add(new FieldInsnNode(Opcodes.PUTSTATIC, host.name, name, "I"));
+            clinit.instructions.insert(init);
+            clinit.maxStack = Math.max(clinit.maxStack, 2);
+            hosts.add(host.name);
+            return new CrossClass(host.name, name, name, id, id);
+        }
+
+        private ClassNode hostFor(ClassNode owner) {
+            int size = candidates.size();
+            int index = -1;
+            for (int i = 0; i < size; i++) {
+                if (candidates.get(i).name.equals(owner.name)) {
+                    index = i;
+                    break;
+                }
+            }
+            int salt = (owner.name.hashCode() ^ (int) context.config().seed()) & 0x7FFFFFFF;
+            int start = index < 0 ? salt % size : (index + 1 + salt % size) % size;
+            for (int i = 0; i < size; i++) {
+                ClassNode candidate = candidates.get((start + i) % size);
+                if (!candidate.name.equals(owner.name)) {
+                    return candidate;
+                }
+            }
+            return null;
+        }
+
+        private int allocate(ClassNode host) {
+            Integer next = nextIds.get(host.name);
+            int id = next == null ? 0 : next.intValue();
+            String name;
+            do {
+                name = fieldName(id);
+                id++;
+            } while (hasField(host, name) || hasMethod(host, name));
+            nextIds.put(host.name, Integer.valueOf(id));
+            host.fields.add(new FieldNode(
+                    Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+                    name, "I", null, null));
+            return id - 1;
+        }
+
+        private static String fieldName(int id) {
+            return "z$x" + Integer.toHexString(id);
+        }
+    }
+
+    static final class CrossClass {
+        final String host;
+        final String first;
+        final String second;
+        final int firstId;
+        final int secondId;
+
+        CrossClass(String host, String first, String second, int firstId, int secondId) {
+            this.host = host;
+            this.first = first;
+            this.second = second;
+            this.firstId = firstId;
+            this.secondId = secondId;
+        }
+    }
+
     private static final class Result {
         boolean transformed;
         int predicates;
@@ -1522,8 +2516,16 @@ public final class FlowObfuscationPass implements Pass {
         int transposed;
         int reordered;
         int bogusRanges;
-        int rangePredicates;
-        int hashPredicates;
+        int intervalPredicates;
+        int tablePredicates;
+        int mbaPredicates;
+        int bogusPops;
+        int entryShuffles;
+        int crossClassPredicates;
+        int differentialBranches;
+        int irreducible;
+        int analyzerSites;
+        int analyzerLoops;
         int maxStack;
     }
 }

@@ -50,10 +50,6 @@ public final class OtpTest {
         System.out.println("OtpTest: " + checks + " checks passed");
     }
 
-    // ------------------------------------------------------------------
-    // Runtime state machine
-    // ------------------------------------------------------------------
-
     private static void testStateMachine() {
         long first = UmbraOtp.next();
         long second = UmbraOtp.next();
@@ -101,10 +97,6 @@ public final class OtpTest {
         check(seen.size() == 2000, "concurrent advances never hand out the same state");
     }
 
-    // ------------------------------------------------------------------
-    // Protected output
-    // ------------------------------------------------------------------
-
     private static void testProtectedOutput() throws Exception {
         Path root = Paths.get("").toAbsolutePath();
         Path input = root.resolve("demo").resolve("demo.jar");
@@ -141,7 +133,6 @@ public final class OtpTest {
         }
     }
 
-    /** Finds the injected state class: static {@code long next()} plus {@code int carrier()}. */
     private static String findOtpClass(Path jar) throws Exception {
         for (String name : classNames(jar)) {
             ClassNode node = read(jar, name);
@@ -167,7 +158,6 @@ public final class OtpTest {
         return null;
     }
 
-    /** Counts methods that invoke the state class at their entry. */
     private static int callSites(Path jar, String otpClass) throws Exception {
         int sites = 0;
         for (String name : classNames(jar)) {
@@ -191,9 +181,7 @@ public final class OtpTest {
         if (method.instructions == null) {
             return false;
         }
-        // The prelude is at the head of the method: the field guard, the carrier
-        // init and the OTP branch. Allow a small window so debug nodes do not
-        // hide the call.
+
         int seen = 0;
         for (AbstractInsnNode insn = method.instructions.getFirst();
              insn != null && seen < 24; insn = insn.getNext()) {
@@ -210,7 +198,6 @@ public final class OtpTest {
         return false;
     }
 
-    /** Counts methods whose entry prelude branches on {@code carrier & 1}. */
     private static int carrierBitBranches(Path jar, String otpClass) throws Exception {
         int count = 0;
         for (String name : classNames(jar)) {
@@ -230,12 +217,6 @@ public final class OtpTest {
         return count;
     }
 
-    /**
-     * True when the entry prelude consumes the carrier and branches on its low
-     * bit ({@code carrier; ICONST_1; IAND; IFNE}). That branch is what makes the
-     * next call take the other path, so its presence is asserted separately from
-     * the call itself.
-     */
     private static boolean branchesOnCarrierBit(MethodNode method, String otpClass) {
         if (method.instructions == null) {
             return false;
@@ -347,11 +328,11 @@ public final class OtpTest {
                         try {
                             Files.deleteIfExists(p);
                         } catch (Exception ignored) {
-                            // Best effort temp cleanup.
+
                         }
                     });
         } catch (Exception ignored) {
-            // Best effort temp cleanup.
+
         }
     }
 }

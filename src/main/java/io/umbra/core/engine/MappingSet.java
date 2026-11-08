@@ -12,9 +12,8 @@ public final class MappingSet {
     private final Map<String, String> methods = new LinkedHashMap<String, String>();
     private final Map<String, String> fields = new LinkedHashMap<String, String>();
 
-    /** Global method map keyed by {@code name + desc}; preserves override families. */
     private final Map<String, String> globalMethods = new LinkedHashMap<String, String>();
-    /** Global field map keyed by {@code name + ":" + desc}. */
+
     private final Map<String, String> globalFields = new LinkedHashMap<String, String>();
 
     public void mapClass(String from, String to) {
@@ -22,13 +21,11 @@ public final class MappingSet {
         reverseClasses.put(to, from);
     }
 
-    /** Records a method mapping keyed by {@code owner#name#desc}. */
     public void mapMethod(String owner, String name, String desc, String to) {
         methods.put(owner + "#" + name + "#" + desc, to);
         globalMethods.put(name + desc, to);
     }
 
-    /** Records a field mapping keyed by {@code owner#name#desc}. */
     public void mapField(String owner, String name, String desc, String to) {
         fields.put(owner + "#" + name + "#" + desc, to);
         globalFields.put(name + ":" + desc, to);

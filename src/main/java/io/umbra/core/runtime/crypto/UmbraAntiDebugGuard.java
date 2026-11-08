@@ -45,7 +45,6 @@ import java.util.Set;
 @Deprecated
 public final class UmbraAntiDebugGuard {
 
-    // Substituted at injection time.
     private static final String LEVEL_TEXT = "@@LEVEL@@";
     private static final String THREAD_TEXT = "@@THREAD@@";
     private static final String JVMTI_TEXT = "@@JVMTI@@";
@@ -65,7 +64,6 @@ public final class UmbraAntiDebugGuard {
     private UmbraAntiDebugGuard() {
     }
 
-    /** Called at the start of every program entry point. */
     public static void check() {
         if (checked) {
             return;
@@ -88,17 +86,12 @@ public final class UmbraAntiDebugGuard {
         }
     }
 
-    /** Re-check entry point used by the background watchdog. */
     public static void watch() {
         int level = level();
         if (level > 0 && detect(level)) {
             fail();
         }
     }
-
-    // ------------------------------------------------------------------
-    // Detection
-    // ------------------------------------------------------------------
 
     private static boolean detect(int level) {
         if (level >= 1 && scanInputArguments(level)) {
@@ -129,7 +122,7 @@ public final class UmbraAntiDebugGuard {
                 }
             }
         } catch (Throwable ignored) {
-            // Management API unavailable.
+
         }
         return false;
     }
@@ -153,7 +146,7 @@ public final class UmbraAntiDebugGuard {
                 }
             }
         } catch (Throwable ignored) {
-            // ignore
+
         }
         try {
             java.lang.management.ThreadMXBean bean =
@@ -168,16 +161,11 @@ public final class UmbraAntiDebugGuard {
                 }
             }
         } catch (Throwable ignored) {
-            // ignore
+
         }
         return false;
     }
 
-    /**
-     * Probes the common JDWP ports with the real JDWP handshake. Only a peer
-     * that echoes {@code JDWP-Handshake} counts as a debugger; an arbitrary
-     * listening service does not.
-     */
     private static boolean hasJdwpPort() {
         for (int i = 0; i < DEBUG_PORTS.length; i++) {
             if (handshake(DEBUG_PORTS[i])) {
@@ -220,7 +208,7 @@ public final class UmbraAntiDebugGuard {
             try {
                 socket.close();
             } catch (Throwable ignored) {
-                // ignore
+
             }
         }
     }
@@ -239,7 +227,7 @@ public final class UmbraAntiDebugGuard {
                             Long.valueOf(2500L), Integer.valueOf(0));
             ((Thread) watchdog).start();
         } catch (Throwable ignored) {
-            // Watchdog is best effort.
+
         }
     }
 

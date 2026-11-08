@@ -1,0 +1,6 @@
+umbra-demo-resource
+alpha=17
+beta=42
+gamma=你好
+delta=3.5
+sentinel=resource-ok

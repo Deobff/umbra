@@ -29,12 +29,10 @@ public final class LayoutReport {
         return layout;
     }
 
-    /** Numeric stats, already namespaced under {@code layout.}. */
     public Map<String, Long> counts() {
         return counts;
     }
 
-    /** Textual stats such as {@code layout.kind}. */
     public Map<String, String> texts() {
         return texts;
     }

@@ -57,10 +57,12 @@ import java.util.Random;
  *
  * <p>The code ints are masked <em>after</em> the integrity value is computed;
  * the interpreter unmasks the code region, verifies the integrity and only then
- * uses the payload. Opcodes are written into the stream in permuted form; the
- * per-program permutation table is emitted once in a shared holder and passed
- * to the interpreter as an argument (format 3, previously it was copied into
- * every payload).</p>
+ * uses the payload. Opcodes are written into the stream in permuted form.
+ * Payloads with {@link #FLAG_KEYED_PERM} use the keyed Feistel permutation
+ * ({@link #permuteOpcode}) derived from the per-payload key, so every payload
+ * encodes opcodes differently and no 256-entry table is emitted at all. Legacy
+ * format-3/4 payloads keep the old contract: one shared permutation table is
+ * emitted once per program and passed to the interpreter as an argument.</p>
  *
  * <h3>Format 4: rolling opcode key</h3>
  *
@@ -89,18 +91,14 @@ public final class Vm2Format {
     private Vm2Format() {
     }
 
-    /** Legacy format version of the serialized payload (3 = shared opcode map). */
     public static final int FORMAT = 3;
-    /**
-     * Current payload format: format 3 plus the rolling opcode-key layer.
-     * Readers accept both {@link #FORMAT} and this version.
-     */
+
     public static final int ROLLING_FORMAT = 4;
-    /** ASCII characters used to encode one payload int in a block string. */
+
     public static final int CHARS_PER_INT = 6;
-    /** Maximum number of payload ints per block string (class-file friendly). */
+
     public static final int MAX_INTS_PER_BLOCK = 6000;
-    /** First character of the 64 symbol block alphabet (0x20 .. 0x5F). */
+
     public static final char BLOCK_BASE = 0x20;
 
     public static final int FLAG_ENCRYPT = 1;
@@ -108,78 +106,74 @@ public final class Vm2Format {
     public static final int FLAG_OPCODES = 4;
     public static final int FLAG_TRYS = 8;
 
-    // ------------------------------------------------------------------
-    // Superinstructions (vm2.fusion)
-    //
-    // Real opcode numbers above the JVM set (0..201 because GOTO_W/JSR_W are
-    // never emitted by ASM for class files below the 32K method limit and the
-    // remaining numbers are unused). Operand layout per superinstruction is
-    // documented next to its constant and mirrored exactly by UmbraVM2.
-    // ------------------------------------------------------------------
+    public static final int FLAG_KEYED_PERM = 16;
 
-    /** First superinstruction opcode; all of them fit below 256. */
+    public static final int FLAG_SEMANTIC = 32;
+
     public static final int SUPER_BASE = 202;
-    /** ILOAD a; ILOAD b; IADD (operands: a, b). */
-    public static final int SUPER_IADD_LL = 202;
-    /** ILOAD a; ILOAD b; ISUB (operands: a, b). */
-    public static final int SUPER_ISUB_LL = 203;
-    /** ILOAD a; ILOAD b; IMUL (operands: a, b). */
-    public static final int SUPER_IMUL_LL = 204;
-    /** ILOAD a; ILOAD b; IAND (operands: a, b). */
-    public static final int SUPER_IAND_LL = 205;
-    /** ILOAD a; ILOAD b; IOR (operands: a, b). */
-    public static final int SUPER_IOR_LL = 206;
-    /** ILOAD a; ILOAD b; IXOR (operands: a, b). */
-    public static final int SUPER_IXOR_LL = 207;
-    /** ILOAD a; constant; IADD (operands: a, constant). */
-    public static final int SUPER_ILOAD_CONST_ADD = 208;
-    /** ILOAD a; constant; ISUB (operands: a, constant). */
-    public static final int SUPER_ILOAD_CONST_SUB = 209;
-    /** ILOAD a; constant; IMUL (operands: a, constant). */
-    public static final int SUPER_ILOAD_CONST_MUL = 210;
-    /** ILOAD a; constant; IAND (operands: a, constant). */
-    public static final int SUPER_ILOAD_CONST_AND = 211;
-    /** ILOAD a; constant; IOR (operands: a, constant). */
-    public static final int SUPER_ILOAD_CONST_OR = 212;
-    /** ILOAD a; constant; IXOR (operands: a, constant). */
-    public static final int SUPER_ILOAD_CONST_XOR = 213;
-    /** ILOAD a; ILOAD b; IF_ICMPEQ target (operands: a, b, target). */
-    public static final int SUPER_IF_ICMPEQ_LL = 214;
-    /** ILOAD a; ILOAD b; IF_ICMPNE target (operands: a, b, target). */
-    public static final int SUPER_IF_ICMPNE_LL = 215;
-    /** ILOAD a; ILOAD b; IF_ICMPLT target (operands: a, b, target). */
-    public static final int SUPER_IF_ICMPLT_LL = 216;
-    /** ILOAD a; ILOAD b; IF_ICMPGE target (operands: a, b, target). */
-    public static final int SUPER_IF_ICMPGE_LL = 217;
-    /** ILOAD a; ILOAD b; IF_ICMPGT target (operands: a, b, target). */
-    public static final int SUPER_IF_ICMPGT_LL = 218;
-    /** ILOAD a; ILOAD b; IF_ICMPLE target (operands: a, b, target). */
-    public static final int SUPER_IF_ICMPLE_LL = 219;
-    /** LLOAD a; LLOAD b; LADD (operands: a, b). */
-    public static final int SUPER_LADD_LL = 220;
-    /** LLOAD a; LLOAD b; LSUB (operands: a, b). */
-    public static final int SUPER_LSUB_LL = 221;
-    /** LLOAD a; LLOAD b; LMUL (operands: a, b). */
-    public static final int SUPER_LMUL_LL = 222;
-    /** LLOAD a; LLOAD b; LAND (operands: a, b). */
-    public static final int SUPER_LAND_LL = 223;
-    /** LLOAD a; LLOAD b; LOR (operands: a, b). */
-    public static final int SUPER_LOR_LL = 224;
-    /** LLOAD a; LLOAD b; LXOR (operands: a, b). */
-    public static final int SUPER_LXOR_LL = 225;
-    /** ALOAD a; GETFIELD ref (operands: a, fieldRef). */
-    public static final int SUPER_ALOAD_GETFIELD = 226;
-    /** ICONST/BIPUSH/SIPUSH constant; ISTORE a (operands: constant, a). */
-    public static final int SUPER_CONST_ISTORE = 227;
-    /** Last superinstruction opcode. */
-    public static final int SUPER_LAST = 227;
 
-    /** Header ints before the argument-kind table. */
+    public static final int SUPER_IADD_LL = 202;
+
+    public static final int SUPER_ISUB_LL = 203;
+
+    public static final int SUPER_IMUL_LL = 204;
+
+    public static final int SUPER_IAND_LL = 205;
+
+    public static final int SUPER_IOR_LL = 206;
+
+    public static final int SUPER_IXOR_LL = 207;
+
+    public static final int SUPER_ILOAD_CONST_ADD = 208;
+
+    public static final int SUPER_ILOAD_CONST_SUB = 209;
+
+    public static final int SUPER_ILOAD_CONST_MUL = 210;
+
+    public static final int SUPER_ILOAD_CONST_AND = 211;
+
+    public static final int SUPER_ILOAD_CONST_OR = 212;
+
+    public static final int SUPER_ILOAD_CONST_XOR = 213;
+
+    public static final int SUPER_IF_ICMPEQ_LL = 214;
+
+    public static final int SUPER_IF_ICMPNE_LL = 215;
+
+    public static final int SUPER_IF_ICMPLT_LL = 216;
+
+    public static final int SUPER_IF_ICMPGE_LL = 217;
+
+    public static final int SUPER_IF_ICMPGT_LL = 218;
+
+    public static final int SUPER_IF_ICMPLE_LL = 219;
+
+    public static final int SUPER_LADD_LL = 220;
+
+    public static final int SUPER_LSUB_LL = 221;
+
+    public static final int SUPER_LMUL_LL = 222;
+
+    public static final int SUPER_LAND_LL = 223;
+
+    public static final int SUPER_LOR_LL = 224;
+
+    public static final int SUPER_LXOR_LL = 225;
+
+    public static final int SUPER_ALOAD_GETFIELD = 226;
+
+    public static final int SUPER_CONST_ISTORE = 227;
+
+    public static final int SUPER_CALL = 228;
+
+    public static final int SUPER_CALL_LOCAL = 229;
+
+    public static final int SUPER_LAST = 229;
+
     public static final int HEADER = 10;
-    /** Number of ints in the holder meta array. */
+
     public static final int META_LEN = 8;
 
-    // Constant tags of the serialized constant pool.
     public static final int CONST_INT = 1;
     public static final int CONST_LONG = 2;
     public static final int CONST_FLOAT = 3;
@@ -187,7 +181,6 @@ public final class Vm2Format {
     public static final int CONST_STRING = 5;
     public static final int CONST_CLASS = 6;
 
-    // Local variable kinds used by the argument-kind table.
     public static final int KIND_UNUSED = 0;
     public static final int KIND_INT = 1;
     public static final int KIND_LONG = 2;
@@ -195,7 +188,6 @@ public final class Vm2Format {
     public static final int KIND_DOUBLE = 4;
     public static final int KIND_REF = 5;
 
-    // Outer (stage one) mini program opcodes.
     public static final int OUTER_PUSH = 0;
     public static final int OUTER_XOR = 1;
     public static final int OUTER_ADD = 2;
@@ -210,11 +202,6 @@ public final class Vm2Format {
 
     private static final long GOLDEN = 0x9E3779B97F4A7C15L;
 
-    // ------------------------------------------------------------------
-    // Key derivation and cryptography (mirrored by UmbraVM2)
-    // ------------------------------------------------------------------
-
-    /** Derives the per-method key from the holder meta array. */
     public static long metaKey(int[] meta) {
         long key = (((long) meta[1]) << 32) ^ (((long) meta[2]) & 0xFFFFFFFFL)
                 ^ (((long) meta[7]) * GOLDEN);
@@ -224,30 +211,16 @@ public final class Vm2Format {
         return key;
     }
 
-    /**
-     * Magic stored in the holder {@code meta} array ({@code meta[0]}). It is
-     * derived from key material the reader already needs, so every payload
-     * carries a different marker and no fixed literal exists in the build or in
-     * the injected interpreter that could serve as a fingerprint. The reader
-     * can recompute it because {@code meta[1]}, {@code meta[2]} and
-     * {@code meta[7]} are read before the check.
-     */
     public static int magicFor(int[] meta) {
         return (int) (metaKey(meta) >>> 32) ^ meta[7] ^ 0x2B;
     }
 
-    /**
-     * Magic stored at the start of the serialized payload ({@code plain[0]}).
-     * Derived from the per-method key instead of a constant; both sides compute
-     * it from the value they already share.
-     */
     public static int payloadMagic(long key) {
         long mixed = key ^ (key >>> 32) ^ 0x2B;
         mixed *= GOLDEN;
         return (int) (mixed >>> 32) ^ (int) mixed;
     }
 
-    /** Position-dependent operand mask applied to the serialized code stream. */
     public static int mask(long key, int index) {
         long h = key ^ (((long) index) * GOLDEN);
         h ^= h >>> 33;
@@ -258,7 +231,6 @@ public final class Vm2Format {
         return (int) h;
     }
 
-    /** XORs the array with the keystream derived from {@code key}. */
     public static void crypt(int[] data, long key) {
         long state = key == 0L ? 0x2545F4914F6CDD1DL : key;
         for (int i = 0; i < data.length; i++) {
@@ -269,7 +241,6 @@ public final class Vm2Format {
         }
     }
 
-    /** FNV-1a 32 over the payload; the interpreter compares it with {@code meta[5]}. */
     public static int integrity(int[] data) {
         int hash = 0x811C9DC5;
         for (int i = 0; i < data.length; i++) {
@@ -286,15 +257,6 @@ public final class Vm2Format {
         return hash;
     }
 
-    // ------------------------------------------------------------------
-    // Rolling opcode-key layer (format 4, mirrored by UmbraVM2)
-    // ------------------------------------------------------------------
-
-    /**
-     * Initial rolling state of a payload. Derived from the first-stage key, so
-     * the mask sequence differs per virtualized method even though the opcode
-     * permutation table is shared by the whole program.
-     */
     public static long rollSeed(long key) {
         long roll = key ^ 0x243F6A8885A308D3L;
         roll ^= roll << 13;
@@ -308,38 +270,14 @@ public final class Vm2Format {
         return roll;
     }
 
-    /** The 8-bit opcode mask contributed by one rolling state. */
     public static int rollMask(long roll) {
         return (int) (roll >>> 56);
     }
 
-    /**
-     * Advances the rolling state by one instruction. The chain is keyed on the
-     * <em>permuted</em> opcode value (what is stored in the stream before the
-     * rolling XOR), so the reader can update the state before consulting the
-     * decoder table.
-     */
     public static long rollStep(long roll, int encodedOpcode) {
         return roll * 0x9E3779B97F4A7C15L ^ (((long) encodedOpcode) + 1L);
     }
 
-    // ------------------------------------------------------------------
-    // Opcode permutation
-    // ------------------------------------------------------------------
-
-    /**
-     * Builds a per-program opcode permutation.
-     *
-     * <p>All 256 byte values are permuted, so the reserved superinstruction
-     * numbers ({@link #SUPER_BASE}..{@link #SUPER_LAST}) travel through the
-     * same table as the JVM opcodes. Unused JVM opcode slots are mapped too,
-     * which keeps the table size fixed and gives the decoder no implicit
-     * "invalid" values to special-case.</p>
-     *
-     * @return an array {@code encodedByReal} where {@code encodedByReal[opcode]}
-     *         is the number stored in the payload and
-     *         {@code encodedByReal[256]} is the number of real opcodes covered
-     */
     public static int[] opcodePermutation(Random random) {
         int[] pool = new int[256];
         for (int i = 0; i < pool.length; i++) {
@@ -359,7 +297,75 @@ public final class Vm2Format {
         return encodedByReal;
     }
 
-    /** Builds the decoder table ({@code encoded -> real}) stored in the payload. */
+    public static final int PERMUTATION_ROUNDS = 6;
+
+    private static final long PERM_ROUND = 0x9E3779B97F4A7C15L;
+    private static final long PERM_HALF = 0x2545F4914F6CDD1DL;
+
+    private static int permutationRound(long key, int round, int half) {
+        long h = key + (round + 1) * PERM_ROUND + half * PERM_HALF;
+        h ^= h >>> 33;
+        h *= 0xFF51AFD7ED558CCDL;
+        h ^= h >>> 33;
+        h *= 0xC4CEB9FE1A85EC53L;
+        h ^= h >>> 33;
+        return (int) (h >>> 60) & 0xF;
+    }
+
+    public static int permuteOpcode(long key, int opcode) {
+        int left = (opcode >>> 4) & 0xF;
+        int right = opcode & 0xF;
+        for (int round = 0; round < PERMUTATION_ROUNDS; round++) {
+            int next = right;
+            right = left ^ permutationRound(key, round, right);
+            left = next;
+        }
+        return ((left << 4) | right) & 0xFF;
+    }
+
+    public static int unpermuteOpcode(long key, int encoded) {
+        int left = (encoded >>> 4) & 0xF;
+        int right = encoded & 0xF;
+        for (int round = PERMUTATION_ROUNDS - 1; round >= 0; round--) {
+
+            int roundInput = left;
+            left = right ^ permutationRound(key, round, roundInput);
+            right = roundInput;
+        }
+        return ((left << 4) | right) & 0xFF;
+    }
+
+    public static int[] keyedPermutation(long key) {
+        int[] encodedByReal = new int[257];
+        for (int opcode = 0; opcode < 256; opcode++) {
+            encodedByReal[opcode] = permuteOpcode(key, opcode);
+        }
+        encodedByReal[256] = 256;
+        return encodedByReal;
+    }
+
+    public static int[] keyedDecoder(long key) {
+        return decoderTable(keyedPermutation(key));
+    }
+
+    private static final long SEMANTIC_SALT = 0x5E4D414E54494353L;
+
+    public static int semanticOf(long key, int opcode) {
+        return permuteOpcode(key ^ SEMANTIC_SALT, opcode);
+    }
+
+    public static int realOf(long key, int semantic) {
+        return unpermuteOpcode(key ^ SEMANTIC_SALT, semantic);
+    }
+
+    public static int[] semanticDecoder(long key) {
+        int[] table = new int[256];
+        for (int semantic = 0; semantic < 256; semantic++) {
+            table[semantic] = realOf(key, semantic);
+        }
+        return table;
+    }
+
     public static int[] decoderTable(int[] encodedByReal) {
         int[] table = new int[256];
         for (int i = 0; i < table.length; i++) {
@@ -372,16 +378,6 @@ public final class Vm2Format {
         return table;
     }
 
-    /**
-     * Number of operand ints that follow an opcode slot. This is the single
-     * source of truth shared by the translator, the payload validator and the
-     * reference decoder in the tests; {@code UmbraVM2} carries an identical copy
-     * because runtime templates must be self-contained.
-     *
-     * @param opcode     real opcode (JVM or superinstruction)
-     * @param code       code stream
-     * @param opcodeSlot slot of the opcode inside {@code code}
-     */
     public static int operandSlots(int opcode, int[] code, int opcodeSlot) {
         switch (opcode) {
             case SUPER_IADD_LL:
@@ -405,6 +401,10 @@ public final class Vm2Format {
             case SUPER_ALOAD_GETFIELD:
             case SUPER_CONST_ISTORE:
                 return 2;
+            case SUPER_CALL:
+                return 1;
+            case SUPER_CALL_LOCAL:
+                return 2;
             case SUPER_IF_ICMPEQ_LL:
             case SUPER_IF_ICMPNE_LL:
             case SUPER_IF_ICMPLT_LL:
@@ -412,32 +412,32 @@ public final class Vm2Format {
             case SUPER_IF_ICMPGT_LL:
             case SUPER_IF_ICMPLE_LL:
                 return 3;
-            case 16: // BIPUSH
-            case 17: // SIPUSH
-            case 18: // LDC
-            case 21: case 22: case 23: case 24: case 25: // xLOAD
-            case 54: case 55: case 56: case 57: case 58: // xSTORE
-            case 169: // RET
-            case 188: // NEWARRAY
-            case 178: case 179: case 180: case 181: // xFIELD
-            case 182: case 183: case 184: case 185: // INVOKEx
-            case 187: // NEW
-            case 189: case 192: case 193: // ANEWARRAY, CHECKCAST, INSTANCEOF
-            case 167: // GOTO
-            case 198: case 199: // IFNULL, IFNONNULL
+            case 16:
+            case 17:
+            case 18:
+            case 21: case 22: case 23: case 24: case 25:
+            case 54: case 55: case 56: case 57: case 58:
+            case 169:
+            case 188:
+            case 178: case 179: case 180: case 181:
+            case 182: case 183: case 184: case 185:
+            case 187:
+            case 189: case 192: case 193:
+            case 167:
+            case 198: case 199:
             case 153: case 154: case 155: case 156: case 157: case 158:
             case 159: case 160: case 161: case 162: case 163: case 164:
             case 165: case 166:
                 return 1;
-            case 132: // IINC
-            case 197: // MULTIANEWARRAY
+            case 132:
+            case 197:
                 return 2;
-            case 170: { // TABLESWITCH
+            case 170: {
                 int high = code[opcodeSlot + 3];
                 int low = code[opcodeSlot + 2];
                 return 3 + (high - low + 1);
             }
-            case 171: { // LOOKUPSWITCH
+            case 171: {
                 int pairs = code[opcodeSlot + 2];
                 return 2 + 2 * pairs;
             }
@@ -446,16 +446,6 @@ public final class Vm2Format {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Outer ("stage one") program
-    // ------------------------------------------------------------------
-
-    /**
-     * Generates a random outer program. The program starts with its own length
-     * in ints, followed by the mini instructions. It is interpreted with the
-     * initial stack {@code [key1, salt, plainLen, blockCount]} and its top of
-     * stack becomes the second-stage key.
-     */
     public static int[] generateOuterProgram(Random random) {
         IntList code = new IntList();
         int ops = 7 + random.nextInt(6);
@@ -525,10 +515,6 @@ public final class Vm2Format {
         return program;
     }
 
-    /**
-     * Executes an outer program (identical to the interpreter implementation)
-     * and returns the derived second-stage key.
-     */
     public static long runOuterProgram(int[] program, long key1, int salt, int plainLen, int blockCount) {
         if (program.length < 1) {
             throw new IllegalStateException("empty outer program");
@@ -608,11 +594,6 @@ public final class Vm2Format {
         return stack[sp - 1];
     }
 
-    // ------------------------------------------------------------------
-    // Translation result and serialization
-    // ------------------------------------------------------------------
-
-    /** A finished virtualized method body, before payload encoding. */
     public static final class Program {
         public final int[] code;
         public final Object[] constants;
@@ -623,11 +604,7 @@ public final class Vm2Format {
         public final int[] argKinds;
         public final int stackHint;
         public final int flags;
-        /**
-         * Ascending slots of the opcode ints inside {@link #code}, used to apply
-         * the format-4 rolling layer. {@code null} for legacy (format 3)
-         * programs, which are serialized with {@link #serializeLegacy}.
-         */
+
         public final int[] opcodePositions;
 
         public Program(int[] code, Object[] constants, String[] refs, int[] handlers,
@@ -652,7 +629,6 @@ public final class Vm2Format {
         }
     }
 
-    /** Encoded payload plus its integrity value. */
     public static final class Encoded {
         public final int[] payload;
         public final int integrity;
@@ -663,21 +639,6 @@ public final class Vm2Format {
         }
     }
 
-    /**
-     * Serializes a translated program with the current format
-     * ({@link #ROLLING_FORMAT}): the opcode slots listed in
-     * {@link Program#opcodePositions} are XORed with the rolling opcode key
-     * before the position mask is applied.
-     *
-     * <p>The opcode permutation table is <em>not</em> part of the payload any
-     * more: it is identical for every method of a program, so the pass emits it
-     * once in a shared holder and passes it to the interpreter as an argument
-     * (see {@code FORMAT} 3/4).</p>
-     *
-     * @param program translated method with opcode positions
-     * @param key     per-method key (used for the operand mask and the rolling layer)
-     * @return masked payload and its pre-mask integrity
-     */
     public static Encoded serialize(Program program, long key) {
         if (program.opcodePositions == null) {
             throw new IllegalStateException("format-4 payload needs opcode positions");
@@ -685,11 +646,6 @@ public final class Vm2Format {
         return serialize(program, key, ROLLING_FORMAT, program.opcodePositions);
     }
 
-    /**
-     * Serializes a translated program in the legacy format 3 (no rolling
-     * opcode layer). Kept for reader-compatibility tests and for programs whose
-     * opcode positions are not tracked.
-     */
     public static Encoded serializeLegacy(Program program, long key) {
         return serialize(program, key, FORMAT, null);
     }
@@ -779,7 +735,6 @@ public final class Vm2Format {
         }
     }
 
-    /** Splits a payload into {@code count} contiguous blocks. */
     public static List<int[]> split(int[] payload, int count) {
         if (count < 1) {
             count = 1;
@@ -801,7 +756,6 @@ public final class Vm2Format {
         return blocks;
     }
 
-    /** Serializes the constant pool helper used by tests and diagnostics. */
     public static String describe(Program program) {
         StringBuilder out = new StringBuilder();
         out.append("code=").append(program.code.length)
@@ -812,13 +766,6 @@ public final class Vm2Format {
         return out.toString();
     }
 
-    /**
-     * Encodes a payload block as a printable-ASCII string: every int becomes six
-     * chars from the 0x20..0x5F range (six 6-bit groups, the last group only
-     * carries the two top bits). The holder class initializer decodes the string
-     * with a small loop, so the class file cost is ~6 bytes per payload int
-     * instead of a constant-pool int plus store bytecode per element.
-     */
     public static String encodeBlock(int[] values) {
         char[] encoded = new char[values.length * CHARS_PER_INT];
         int position = 0;
@@ -831,7 +778,6 @@ public final class Vm2Format {
         return new String(encoded);
     }
 
-    /** Inverse of {@link #encodeBlock(int[])} (kept for tests/diagnostics). */
     public static int[] decodeBlock(String encoded) {
         if ((encoded.length() % CHARS_PER_INT) != 0) {
             throw new IllegalArgumentException("malformed VM2 block string");
@@ -847,14 +793,12 @@ public final class Vm2Format {
         return values;
     }
 
-    /** Number of block classes needed for a payload of the given size. */
     public static int blockCount(int payloadInts, int requestedBlocks) {
         int count = Math.max(1, requestedBlocks);
         int needed = (payloadInts + MAX_INTS_PER_BLOCK - 1) / MAX_INTS_PER_BLOCK;
         return Math.min(payloadInts, Math.max(count, needed));
     }
 
-    /** Growable int array (avoids boxing while building payloads). */
     public static final class IntList {
         private int[] values;
         private int size;
@@ -895,7 +839,6 @@ public final class Vm2Format {
         }
     }
 
-    /** Ordered constant pool builder shared by the translator. */
     public static final class ConstantPool {
         private final List<Object> values = new ArrayList<Object>();
         private final Map<Object, Integer> index = new LinkedHashMap<Object, Integer>();

@@ -63,7 +63,6 @@ final class ClassAnnotationDetector {
         }
     }
 
-    /** Returns counts for [forge, neoforge, fabric, quilt, mixin]. */
     private static int[] scanAnnotationList(List<AnnotationNode> annotations, ClassNode node,
                                             MinecraftScan scan) {
         int[] counts = new int[5];

@@ -50,10 +50,6 @@ public final class MinecraftAdapterTest {
         System.out.println("MinecraftAdapterTest: " + checks + " checks passed");
     }
 
-    // ------------------------------------------------------------------
-    // plain jar
-    // ------------------------------------------------------------------
-
     private static void testPlainJar() throws Exception {
         ClassPool pool = new ClassPool();
         addClass(pool, node("com/example/Plain"));
@@ -81,10 +77,6 @@ public final class MinecraftAdapterTest {
         check(adjusted.optionBool("classEncryption.enabled", false), "NONE keeps class encryption");
         check(adjusted.methodVirtualization().enabled(), "NONE keeps virtualization");
     }
-
-    // ------------------------------------------------------------------
-    // Fabric
-    // ------------------------------------------------------------------
 
     private static void testFabric() throws Exception {
         ClassPool pool = fabricPool();
@@ -207,12 +199,6 @@ public final class MinecraftAdapterTest {
                 "missing entry method still gets a keep rule");
     }
 
-    /**
-     * Regression test for the QA fixture shape: {@code entrypoints} is a map of
-     * environment groups whose values are strings, arrays, nested arrays and
-     * descriptor objects. Every entry class/method must be kept, and the
-     * descriptor's {@code adapter} value must never become a keep rule.
-     */
     private static void testEntrypointShapes() throws Exception {
         ClassPool pool = new ClassPool();
         resource(pool, "fabric.mod.json", json(
@@ -253,10 +239,6 @@ public final class MinecraftAdapterTest {
         check(!profile.keepRules().contains("com/example/Absent"),
                 "entrypoint fixture has no unrelated keep rules");
     }
-
-    // ------------------------------------------------------------------
-    // legacy Forge (mcmod.info + manifest coremod)
-    // ------------------------------------------------------------------
 
     private static void testForgeLegacy() throws Exception {
         ClassPool pool = new ClassPool();
@@ -317,10 +299,6 @@ public final class MinecraftAdapterTest {
         check(has(profile.preservedResources(), "META-INF/legacy_at.cfg"), "FMLAT resource preserved");
     }
 
-    // ------------------------------------------------------------------
-    // modern Forge
-    // ------------------------------------------------------------------
-
     private static void testForgeModern() throws Exception {
         ClassPool pool = new ClassPool();
         addClass(pool, annotated(node("com/example/modern/ModernMod"), "Lnet/minecraftforge/fml/common/Mod;"));
@@ -366,10 +344,6 @@ public final class MinecraftAdapterTest {
                 "mods.toml access transformer member kept");
     }
 
-    // ------------------------------------------------------------------
-    // NeoForge
-    // ------------------------------------------------------------------
-
     private static void testNeoForge() throws Exception {
         ClassPool pool = new ClassPool();
         addClass(pool, annotated(node("com/example/neo/NeoMod"), "Lnet/neoforged/fml/common/Mod;"));
@@ -402,10 +376,6 @@ public final class MinecraftAdapterTest {
         check(has(profile.preservedResources(), "META-INF/neoforge.mods.toml"),
                 "neoforge.mods.toml preserved");
     }
-
-    // ------------------------------------------------------------------
-    // Quilt
-    // ------------------------------------------------------------------
 
     private static void testQuilt() throws Exception {
         ClassPool pool = new ClassPool();
@@ -450,10 +420,6 @@ public final class MinecraftAdapterTest {
         check(has(profile.preservedResources(), "quiltmod.accesswidener"), "Quilt access widener preserved");
     }
 
-    // ------------------------------------------------------------------
-    // mixin-only archive
-    // ------------------------------------------------------------------
-
     private static void testMixinOnlyJar() throws Exception {
         ClassPool pool = new ClassPool();
         ClassNode mixin = node("com/example/mixinlib/LibraryMixin");
@@ -478,10 +444,6 @@ public final class MinecraftAdapterTest {
         check(profile.targetCount() >= 1, "mixin-only target counted");
         check(has(profile.preservedResources(), "mixinlib.mixins.json"), "mixin-only config preserved");
     }
-
-    // ------------------------------------------------------------------
-    // broken metadata
-    // ------------------------------------------------------------------
 
     private static void testBrokenMetadata() throws Exception {
         ClassPool pool = new ClassPool();
@@ -524,10 +486,6 @@ public final class MinecraftAdapterTest {
                 "broken metadata still applies the feature downgrade");
     }
 
-    // ------------------------------------------------------------------
-    // adjust() feature matrix
-    // ------------------------------------------------------------------
-
     private static void testAdjustMatrix() throws Exception {
         ClassPool pool = fabricPool();
         MinecraftProfile profile = MinecraftAdapter.detect(pool, baseConfig(), logTo(new ArrayList<String>()));
@@ -561,8 +519,6 @@ public final class MinecraftAdapterTest {
         check(adjusted.junk().enabled(), "junk members kept for non-exempt classes");
         check(adjusted.debug().enabled(), "debug info cleanup kept");
 
-        // minecraft.forceVmp keeps the virtualization engine while other
-        // conflicting features stay disabled.
         MinecraftProfile forced = MinecraftAdapter.detect(fabricPool(),
                 baseConfig("minecraft.forceVmp", "true"), logTo(new ArrayList<String>()));
         UmbraConfig forcedBase = baseConfig("minecraft.forceVmp", "true");
@@ -573,7 +529,6 @@ public final class MinecraftAdapterTest {
                 "forceVmp still disables class encryption");
         check(anyContains(forced.notes(), "forceVmp"), "forceVmp policy noted");
 
-        // minecraft.allowConflicts skips the downgrade entirely.
         MinecraftProfile conflicts = MinecraftAdapter.detect(fabricPool(),
                 baseConfig("minecraft.allowConflicts", "true"), logTo(new ArrayList<String>()));
         UmbraConfig conflictBase = baseConfig("minecraft.allowConflicts", "true");
@@ -586,10 +541,6 @@ public final class MinecraftAdapterTest {
         check(conflictAdjusted.resources().rewriteContent(), "allowConflicts keeps resource rewriting");
         check(anyContains(conflicts.notes(), "allowConflicts"), "allowConflicts policy noted");
     }
-
-    // ------------------------------------------------------------------
-    // asMap
-    // ------------------------------------------------------------------
 
     private static void testProfileMap() throws Exception {
         MinecraftProfile profile = MinecraftAdapter.detect(fabricPool(), baseConfig(),
@@ -611,10 +562,6 @@ public final class MinecraftAdapterTest {
         check(Boolean.FALSE.equals(disabled.get("classEncryption")), "asMap disables class encryption");
         check(Boolean.FALSE.equals(disabled.get("native")), "asMap disables native code");
     }
-
-    // ------------------------------------------------------------------
-    // configuration helpers
-    // ------------------------------------------------------------------
 
     private static UmbraConfig baseConfig(String... options) throws Exception {
         UmbraConfig.Builder builder = new UmbraConfig.Builder()
@@ -653,10 +600,6 @@ public final class MinecraftAdapterTest {
         }
         return false;
     }
-
-    // ------------------------------------------------------------------
-    // pool helpers
-    // ------------------------------------------------------------------
 
     private static ClassNode node(String internalName, String... methods) {
         ClassNode node = new ClassNode();
@@ -708,10 +651,6 @@ public final class MinecraftAdapterTest {
     private static void resource(ClassPool pool, String name, String text) {
         pool.putResource(name, text.getBytes(StandardCharsets.UTF_8), 0L, 0);
     }
-
-    // ------------------------------------------------------------------
-    // assertions
-    // ------------------------------------------------------------------
 
     private static boolean has(List<String> values, String expected) {
         return values.contains(expected);

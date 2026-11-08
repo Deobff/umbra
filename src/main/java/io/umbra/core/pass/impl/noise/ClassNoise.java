@@ -52,12 +52,10 @@ public final class ClassNoise {
     public static final int LEVEL_STRONG = 2;
     public static final int LEVEL_HOSTILE = 3;
 
-    /** Per-class payload budget in bytes, indexed by level. */
     private static final int[] PER_CLASS_BUDGET = { 0, 1024, 8192, 24576 };
-    /** Global payload budget in bytes, indexed by level. */
+
     private static final int[] GLOBAL_BUDGET = { 0, 512 * 1024, 1024 * 1024, 4 * 1024 * 1024 };
 
-    /** Approximate bytes of an attribute header: name index, length and CP entry. */
     private static final int ATTRIBUTE_HEADER = 6;
 
     private static final String[] WRONG_LOCATION_METHOD_ATTRIBUTES = {
@@ -79,14 +77,6 @@ public final class ClassNoise {
         return GLOBAL_BUDGET[clampLevel(level)];
     }
 
-    /**
-     * Applies metadata noise to {@code node}.
-     *
-     * @param preserveAntiLlm when true, methods that Umbra's anti-LLM wrapper
-     *                        would be able to wrap must not receive method
-     *                        attributes (the wrapper skips methods with custom
-     *                        attributes); debug-table noise is still added
-     */
     public static Result apply(ClassNode node, int level, Random random, NoiseBudget budget,
                                boolean preserveAntiLlm) {
         if (node == null || budget == null) {
@@ -98,11 +88,10 @@ public final class ClassNoise {
         return applier.result;
     }
 
-    /** Per-class outcome. */
     public static final class Result {
-        /** Class-file attributes added (including line-number/local/method-parameter rows). */
+
         public int attributes;
-        /** Payload bytes charged to the budget. */
+
         public int bytes;
     }
 
@@ -130,13 +119,12 @@ public final class ClassNoise {
 
         void run() {
             if (level >= LEVEL_HOSTILE) {
-                // Added first so the (tiny) trap always fits the per-class budget.
+
                 classLevelCodeTrap();
             }
             classAttributes();
             if (level >= LEVEL_STRONG) {
-                // Structural noise goes before the large debug/junk blobs so it
-                // is never starved by the per-class budget.
+
                 classSignature();
                 fakeInnerClasses();
             }
@@ -162,8 +150,6 @@ public final class ClassNoise {
             return node.methods == null ? Collections.<MethodNode>emptyList() : node.methods;
         }
 
-        // ------------------------------------------------------------ budget
-
         private boolean charge(int cost) {
             if (classUsed + cost > classLimit) {
                 return false;
@@ -175,7 +161,6 @@ public final class ClassNoise {
             return true;
         }
 
-        /** Adds one random-named unknown attribute with an exact payload length. */
         private void randomAttribute(List<Attribute> target, int payloadLength) {
             String name = gen.attributeName();
             int cost = ATTRIBUTE_HEADER + name.length() + payloadLength;
@@ -186,7 +171,6 @@ public final class ClassNoise {
             result.attributes++;
         }
 
-        /** Adds an unknown attribute with an explicit name and payload. */
         private boolean namedAttribute(List<Attribute> target, String name,
                                        byte[] payload) {
             int cost = ATTRIBUTE_HEADER + name.length() + payload.length;
@@ -197,8 +181,6 @@ public final class ClassNoise {
             result.attributes++;
             return true;
         }
-
-        // ------------------------------------------------------- class level
 
         private List<Attribute> classAttributesList() {
             if (node.attrs == null) {
@@ -212,7 +194,7 @@ public final class ClassNoise {
             for (int i = 0; i < count; i++) {
                 randomAttribute(classAttributesList(), gen.nextInt(level >= LEVEL_STRONG ? 32 : 48));
             }
-            // Guarantee at least one zero-length synthetic attribute.
+
             randomAttribute(classAttributesList(), 0);
         }
 
@@ -231,7 +213,7 @@ public final class ClassNoise {
                 result.attributes++;
             }
             if (level >= LEVEL_HOSTILE) {
-                // Replace the file name too: stack traces and decompilers show it.
+
                 String sourceFile = gen.sourceFile();
                 if (charge(ATTRIBUTE_HEADER + sourceFile.length())) {
                     node.sourceFile = sourceFile;
@@ -287,11 +269,6 @@ public final class ClassNoise {
             }
         }
 
-        /**
-         * A class-level attribute named {@code Code}. The JVM only recognises
-         * {@code Code} inside a method, so it is silently skipped there; CFR
-         * (0.152) drops the whole class when it sees it.
-         */
         private void classLevelCodeTrap() {
             namedAttribute(classAttributesList(), "Code", new byte[] { 0, 0, 0, 0 });
         }
@@ -332,8 +309,6 @@ public final class ClassNoise {
             }
         }
 
-        // ------------------------------------------------------ field level
-
         private List<Attribute> fieldAttributes(FieldNode field) {
             if (field.attrs == null) {
                 field.attrs = new ArrayList<Attribute>();
@@ -355,8 +330,6 @@ public final class ClassNoise {
                 }
             }
         }
-
-        // ----------------------------------------------------- method level
 
         private List<Attribute> methodAttributes(MethodNode method) {
             if (method.attrs == null) {
@@ -382,7 +355,7 @@ public final class ClassNoise {
                 }
             }
             if (level >= LEVEL_STRONG && node.version >= Opcodes.V1_5) {
-                // Structural noise before the cheap-but-numerous debug rows.
+
                 String signature = gen.methodSignature();
                 if (charge(ATTRIBUTE_HEADER + signature.length())) {
                     method.signature = signature;
@@ -403,7 +376,6 @@ public final class ClassNoise {
             }
         }
 
-        /** Real opcode instructions of a method (labels/line numbers/frames skipped). */
         private List<AbstractInsnNode> realInstructions(MethodNode method) {
             List<AbstractInsnNode> real = new ArrayList<AbstractInsnNode>();
             for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
@@ -414,11 +386,6 @@ public final class ClassNoise {
             return real;
         }
 
-        /**
-         * Inserts labels before existing opcodes. A {@code LineNumberTable}
-         * start_pc must point at an opcode (HotSpot rejects {@code code_length}),
-         * so never reference the trailing end label.
-         */
         private List<LabelNode> insertLabelsBefore(MethodNode method, List<AbstractInsnNode> real,
                                                    int count) {
             List<LabelNode> labels = new ArrayList<LabelNode>(count);
@@ -451,12 +418,6 @@ public final class ClassNoise {
             }
         }
 
-        /**
-         * Replaces the local-variable table with contradictory rows. Descriptors
-         * stay single-slot and legal, indices stay below {@code max_locals}
-         * because HotSpot validates both; the JVM never matches them against the
-         * actual types.
-         */
         private void localVariableNoise(MethodNode method) {
             if (method.maxLocals <= 0) {
                 return;
@@ -490,7 +451,6 @@ public final class ClassNoise {
             }
         }
 
-        /** Adds odd {@code MethodParameters} rows for class-file version 52+. */
         private void parameterNoise(MethodNode method) {
             if (node.version < Opcodes.V1_8) {
                 return;
@@ -513,11 +473,6 @@ public final class ClassNoise {
             }
         }
 
-        /**
-         * Attributes that are valid only inside {@code Code} or on fields, but
-         * placed on the method: the JVM ignores them at this location, parsers
-         * that dispatch on the name do not.
-         */
         private void wrongLocationMethodAttributes(MethodNode method) {
             int count = 2 + gen.nextInt(3);
             int[] used = new int[WRONG_LOCATION_METHOD_ATTRIBUTES.length];
@@ -543,10 +498,6 @@ public final class ClassNoise {
             }
         }
 
-        /**
-         * Mirrors the eligibility rule of {@code AntiLlmPass.wrapEligible} so
-         * adding method attributes never disables an anti-LLM wrapper.
-         */
         private boolean antiLlmWrappable(MethodNode method) {
             if ((method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE
                     | Opcodes.ACC_BRIDGE | Opcodes.ACC_SYNTHETIC)) != 0) {

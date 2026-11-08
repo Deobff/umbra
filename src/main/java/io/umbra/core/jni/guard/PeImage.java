@@ -15,17 +15,16 @@ public final class PeImage {
     private PeImage() {
     }
 
-    /** Returns the file offset of the function exported as {@code symbol}, or -1. */
     public static long exportFileOffset(byte[] image, String symbol) {
         if (image == null || image.length < 0x100 || symbol == null) {
             return -1L;
         }
         try {
-            if (u16(image, 0) != 0x5A4D) { // MZ
+            if (u16(image, 0) != 0x5A4D) {
                 return -1L;
             }
             int pe = u32(image, 0x3C);
-            if (pe <= 0 || pe + 24 >= image.length || u32(image, pe) != 0x00004550) { // PE\0\0
+            if (pe <= 0 || pe + 24 >= image.length || u32(image, pe) != 0x00004550) {
                 return -1L;
             }
             int coff = pe + 4;
@@ -77,10 +76,6 @@ public final class PeImage {
         return -1L;
     }
 
-    /**
-     * Returns the first {@code length} file bytes of an exported function, or an
-     * empty array when the symbol cannot be resolved.
-     */
     public static byte[] exportPrologue(byte[] image, String symbol, int length) {
         long offset = exportFileOffset(image, symbol);
         if (offset < 0 || offset + length > image.length) {
@@ -91,7 +86,6 @@ public final class PeImage {
         return out;
     }
 
-    /** One randomized code-section sample: RVA + the file bytes expected there. */
     public static final class CodeSample {
         public final int rva;
         public final byte[] bytes;
@@ -102,18 +96,6 @@ public final class PeImage {
         }
     }
 
-    /**
-     * Picks {@code count} randomized windows inside the image's executable
-     * section. The guard compares the loaded bytes at those RVAs against these
-     * values, so inline hooks/patching at randomized positions are detected
-     * (positions differ per build because the seed differs).
-     *
-     * @param image  compiled PE image
-     * @param seed   protection seed (deterministic per build, unpredictable across builds)
-     * @param count  number of samples
-     * @param window bytes per sample (1..64)
-     * @return samples; empty when the image is not a parseable PE executable
-     */
     public static CodeSample[] codeSamples(byte[] image, long seed, int count, int window) {
         int size = Math.max(1, Math.min(64, window));
         int wanted = Math.max(0, count);
@@ -121,7 +103,7 @@ public final class PeImage {
             return new CodeSample[0];
         }
         try {
-            if (u16(image, 0) != 0x5A4D) { // MZ
+            if (u16(image, 0) != 0x5A4D) {
                 return new CodeSample[0];
             }
             int pe = u32(image, 0x3C);
@@ -144,7 +126,7 @@ public final class PeImage {
                 int characteristics = u32(image, section + 36);
                 int rawSize = u32(image, section + 16);
                 int rawPointer = u32(image, section + 20);
-                if ((characteristics & 0x20000000) == 0 // IMAGE_SCN_MEM_EXECUTE
+                if ((characteristics & 0x20000000) == 0
                         || rawSize < size || rawPointer <= 0
                         || rawPointer + size > image.length) {
                     continue;
@@ -155,9 +137,7 @@ public final class PeImage {
                     bestRaw = rawPointer;
                     bestRawSize = Math.min(rawSize, image.length - rawPointer);
                     bestVirtualAddress = u32(image, section + 12);
-                    // Samples must stay inside the bytes the loader actually
-                    // maps: file alignment padding past VirtualSize is not part
-                    // of the loaded image.
+
                     int mapped = Math.min(bestRawSize, virtualSize);
                     bestSampleSize = Math.max(0, mapped);
                 }
@@ -170,7 +150,7 @@ public final class PeImage {
             int usable = bestSampleSize - size;
             for (int i = 0; i < wanted; i++) {
                 int offset = usable <= 0 ? 0 : random.nextInt(usable + 1);
-                // keep samples 8-byte aligned so patched-byte values stay stable
+
                 offset &= ~7;
                 if (offset + size > bestSampleSize) {
                     offset = Math.max(0, bestSampleSize - size);
@@ -185,11 +165,6 @@ public final class PeImage {
         }
     }
 
-    /**
-     * File offset of the unique little-endian 8-byte {@code magic} in the image,
-     * or -1 when it is missing or ambiguous. Used to locate post-link-patched data
-     * tables without a PE export symbol.
-     */
     public static long magicOffset(byte[] image, long magic) {
         if (image == null || image.length < 16) {
             return -1L;
@@ -215,18 +190,6 @@ public final class PeImage {
         return found;
     }
 
-    /**
-     * Patches the compiled guard image with the randomized code-section samples.
-     *
-     * <p>The generated guard contains a magic-located sample table whose compiled
-     * placeholder has {@code count = 0}. This method finds the table by its magic,
-     * computes the samples from the linked image, writes count/window/RVAs/bytes
-     * into the file, and returns the patched image. The runtime check only becomes
-     * active when the count is non-zero, so a failed patch degrades to "no check"
-     * instead of a false positive (single compile, no export symbol).</p>
-     *
-     * @return patched image or {@code null} when the table is absent/ambiguous
-     */
     public static byte[] withCodeSamples(byte[] image, long seed, long magic) {
         if (image == null) {
             return null;
@@ -261,11 +224,6 @@ public final class PeImage {
         return patched;
     }
 
-    /**
-     * Reads the first {@code length} file bytes of the {@code functions} native
-     * entry points from the magic-located pointer table (order: init, check, self,
-     * token). Returns an empty array when the table is missing/ambiguous.
-     */
     public static byte[][] functionPrologues(byte[] image, long magic, int functions,
                                              int length) {
         if (image == null || functions <= 0 || length <= 0) {
@@ -307,7 +265,6 @@ public final class PeImage {
         return prologues;
     }
 
-    /** Name of every entry in the PE export table (empty when there is none). */
     public static java.util.List<String> exportNames(byte[] image) {
         java.util.List<String> names = new java.util.ArrayList<String>();
         if (image == null || image.length < 0x100) {
@@ -348,12 +305,11 @@ public final class PeImage {
                 }
             }
         } catch (RuntimeException ignored) {
-            // best effort: a malformed export table yields no names
+
         }
         return names;
     }
 
-    /** PE COFF timeDateStamp (0 for reproducible builds). */
     public static int timestamp(byte[] image) {
         if (image == null || image.length < 0x40) {
             return 0;
@@ -365,7 +321,6 @@ public final class PeImage {
         return u32(image, pe + 8);
     }
 
-    /** Section names in header order (e.g. {@code .text}, {@code .rdata}). */
     public static String[] sectionNames(byte[] image) {
         if (image == null || image.length < 0x40) {
             return new String[0];

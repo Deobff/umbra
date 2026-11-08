@@ -21,10 +21,6 @@ public final class Presets {
         return apply(base, true);
     }
 
-    /**
-     * Applies the preset named in the configuration, optionally tolerating a
-     * configuration without {@code input}/{@code output} (CLI override loading).
-     */
     public static UmbraConfig apply(UmbraConfig base, boolean requirePaths) throws ConfigException {
         if (base.preset() == null || base.preset().trim().isEmpty()) {
             return base;
@@ -44,7 +40,7 @@ public final class Presets {
         }
         UmbraConfig.Builder b = base.toBuilder();
         if ("library".equals(name)) {
-            // Preserve public API names while still allowing string/constant/flow transforms.
+
             b.softKeepPublicApi(true);
             b.keep(merge(base.keep(), "@io.umbra.annotations.Keep"));
         } else if ("spring".equals(name) || "spring-boot".equals(name)) {
@@ -110,9 +106,9 @@ public final class Presets {
             b.option("layout.war", "true");
             b.option("layout.multiRelease", "preserve");
             b.option("layout.moduleInfo", "auto");
+            b.option("string.allowKeylessFallback", "true");
         } else if ("nocturne".equals(name)) {
-            // Nocturne is an exclusive body engine: the engine turns the other
-            // body transforms off when this option is active.
+
             b.option("nocturne.enabled", "true");
             b.option("nocturne.variants", "3");
             b.option("string.strength", "3");
@@ -137,24 +133,10 @@ public final class Presets {
         return new ArrayList<String>(new java.util.LinkedHashSet<String>(values));
     }
 
-    /**
-     * Applies the strength ladder used by the GUI, QA matrix and documentation.
-     *
-     * <p>All three presets keep the project buildable with the stock toolchain:
-     * native code generation stays opt-in because it needs a C compiler.</p>
-     *
-     * <p>The instruction ceilings scale with the tier as well. They are
-     * eligibility thresholds ("do not transform a method body larger than this"),
-     * and a single shared value made {@code light} as expensive per method as
-     * {@code maximum} on the platform's larger methods. Scaling them keeps the
-     * promise of each tier: {@code light} stays cheap, {@code maximum} also covers
-     * the big methods.</p>
-     */
     private static void applyStrength(UmbraConfig.Builder b, UmbraConfig base, String name) {
         boolean maximum = "maximum".equals(name) || "max".equals(name);
         boolean balanced = maximum || "balanced".equals(name);
 
-        // Per-tier instruction ceilings: light < balanced < maximum.
         int flowLimit = maximum ? 8000 : (balanced ? 4000 : 2000);
         int virtualizationLimit = maximum ? 4000 : (balanced ? 2000 : 1000);
         int vmLimit = maximum ? 4000 : 2000;
@@ -162,10 +144,7 @@ public final class Presets {
 
         b.flow(new UmbraConfig.FlowOptions(true, maximum ? "normal" : "light", flowLimit, balanced));
         b.exceptionObfuscation(new UmbraConfig.ExceptionOptions(balanced));
-                // Virtualization runs before flow obfuscation and used to take every
-        // eligible method, which left the flow pass almost nothing to transform
-        // (8 of 26 classes on a real jar). Capping the per-class VM quota keeps
-        // both layers active: VM hides the hot methods, flow obfuscates the rest.
+
         int vmMaxMethods = maximum ? 16 : 0;
         b.methodVirtualization(
                 new UmbraConfig.VirtualizationOptions(true, virtualizationLimit, vmMaxMethods));
@@ -173,21 +152,12 @@ public final class Presets {
         b.junk(new UmbraConfig.JunkOptions(true, maximum ? 4 : 2, maximum ? 4 : 2));
         b.stringEncryption(new UmbraConfig.StringEncryptionOptions(true, 2));
         b.integerEncryption(new UmbraConfig.IntegerEncryptionOptions(true, true));
-        // Generic signatures are kept by default: framework code (Gson
-        // TypeToken, reflection libraries, DI containers) depends on the
-        // Signature attribute, and stripping it breaks otherwise valid input
-        // JARs. Users can opt in to signature erasure via a YAML config.
+
         b.debug(new UmbraConfig.DebugOptions(true, true, true, true, false, false, true));
         b.reflection(new UmbraConfig.ReflectionOptions(true, maximum));
-        // Business classes join one random package at the strongest tiers, so the
-        // archive shows no original package tree (Zelix KlassMaster renames
-        // everything into the default package for the same reason). Explicit
-        // keep rules still win: frozen classes are never repackaged.
+
         if (maximum || "aggressive".equals(name)) {
-            // Flatten every renamed class into the default package (the layout
-            // Zelix KlassMaster produces) and keep the generated helpers there
-            // too, so a directory listing shows neither the original module tree
-            // nor a suspicious foreign package.
+
             UmbraConfig.RenamerOptions target = base.renamer();
             b.renamer(new UmbraConfig.RenamerOptions(target.enabled(), target.prefix(),
                     true, "", target.renameClasses(), target.renameMethods(), target.renameFields(),
@@ -196,21 +166,16 @@ public final class Presets {
             b.option("runtime.package", "flat");
         }
         b.option("string.strength", maximum ? "3" : (balanced ? "2" : "1"));
-        // Per-call string re-keying (P0-2-c): the selected sites carry two ciphertexts
-        // under different engines and the injected one-time state picks between them
-        // on every call, so a single captured decryption does not describe the next.
+
         b.option("string.otpEngines", String.valueOf(balanced));
         b.option("string.otpMaxSites", maximum ? "32" : "16");
         b.option("string.engine", "auto");
         b.option("string.stackTraceHide", String.valueOf(balanced));
         b.option("string.wipe", String.valueOf(balanced));
         b.option("flow.aggressive", String.valueOf(maximum));
-        // Method-level block scheduling (the ZKM MethodFlowAnalyzer idea): moves
-        // independent blocks and repairs the fall-through edges, so the emitted
-        // layout no longer matches the control-flow graph a decompiler rebuilds.
+
         b.option("flow.reorder", String.valueOf(balanced));
-        // One-time-program state: the guarded entry path changes on every call.
-        // Opt-in on light so the cheapest tier keeps its "smallest output" promise.
+
         b.option("otp.enabled", String.valueOf(balanced));
         b.option("vm2.fusion", String.valueOf(balanced));
         b.option("vm2.enabled", String.valueOf(balanced));
@@ -224,6 +189,13 @@ public final class Presets {
         b.option("mba.depth", maximum ? "2" : "1");
         b.option("classEncryption.enabled", String.valueOf(balanced));
         b.option("classEncryption.integrity", String.valueOf(balanced));
+        if (!balanced) {
+            b.option("string.allowKeylessFallback", "true");
+        }
+
+        b.option("classEncryption.nativeKey", String.valueOf(maximum));
+
+        b.option("classEncryption.nativeKey.fallback", String.valueOf(!maximum));
         b.option("integrity.enabled", String.valueOf(maximum));
         b.option("integrity.level", maximum ? "2" : "1");
         b.option("antiDebug.level", maximum ? "2" : "0");

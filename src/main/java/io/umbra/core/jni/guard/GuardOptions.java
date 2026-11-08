@@ -13,13 +13,11 @@ import java.util.Locale;
  */
 public final class GuardOptions {
 
-    /** Detection action codes shared with the injected template. */
     public static final int ACTION_THROW = 1;
     public static final int ACTION_EXIT = 2;
     public static final int ACTION_CORRUPT = 3;
     public static final int ACTION_LOG = 4;
 
-    /** Detection bitmask values (kept in sync with the generated C guard). */
     public static final int DETECT_DEBUGGER = 1;
     public static final int DETECT_REMOTE_DEBUGGER = 1 << 1;
     public static final int DETECT_PEB = 1 << 2;
@@ -37,7 +35,7 @@ public final class GuardOptions {
     public static final int DETECT_TOKEN = 1 << 14;
     public static final int DETECT_BACKFILL = 1 << 15;
     public static final int DETECT_AGENT = 1 << 16;
-    // Umbra 3.1 dynamic-protection signals (native guard).
+
     public static final int DETECT_REMOTE_THREAD = 1 << 17;
     public static final int DETECT_EXEC_MEMORY = 1 << 18;
     public static final int DETECT_IMAGE_BP = 1 << 19;
@@ -46,17 +44,17 @@ public final class GuardOptions {
     public static final int DETECT_HANDLE_DUMP = 1 << 22;
     public static final int DETECT_CODE_SAMPLE = 1 << 23;
     public static final int DETECT_LINUX = 1 << 24;
-    // Umbra 3.3 native memory protection (PhantomShield port).
-    /** Guard code-section CRC readback mismatch (inline patch after startup). */
+
     public static final int DETECT_CODE_CRC = 1 << 25;
-    /** Guard data-page protection tampering (PAGE_NOACCESS/PAGE_GUARD rotation). */
+
     public static final int DETECT_PAGE_GUARD = 1 << 26;
 
-    /**
-     * Default {@code antiDebug.execWhitelist}: JVM/AWT modules whose executable
-     * mappings are not evidence of manual mapping. {@code javafx*} covers the
-     * per-platform JavaFX native libraries.
-     */
+    public static final int DETECT_TEXT_RWX = 1 << 27;
+
+    public static final int DETECT_GUARD_PROBE = 1 << 28;
+
+    public static final int DETECT_PAIR = 1 << 29;
+
     public static final String DEFAULT_EXEC_WHITELIST = "jvm.dll,java.dll,javafx*,awt.dll";
 
     private static final String[] DEBUG_OPTION_MARKERS = {
@@ -66,7 +64,6 @@ public final class GuardOptions {
     private GuardOptions() {
     }
 
-    /** Maps {@code antiDebug.action} to the numeric action code (default throw). */
     public static int actionCode(String action) {
         String value = action == null ? "" : action.trim().toLowerCase(Locale.ROOT);
         if ("exit".equals(value)) {
@@ -81,7 +78,6 @@ public final class GuardOptions {
         return ACTION_THROW;
     }
 
-    /** Canonical action name ({@code throw}, {@code exit}, {@code corrupt} or {@code log}). */
     public static String actionName(int code) {
         switch (code) {
             case ACTION_EXIT:
@@ -95,11 +91,6 @@ public final class GuardOptions {
         }
     }
 
-    /**
-     * Detects a JDWP / debug-agent JVM option.
-     *
-     * @param vmArguments JVM input arguments ({@code RuntimeMXBean.getInputArguments()})
-     */
     public static boolean hasDebugOption(List<String> vmArguments) {
         if (vmArguments == null) {
             return false;
@@ -112,7 +103,6 @@ public final class GuardOptions {
         return false;
     }
 
-    /** True for JDWP / debug transport options; case-insensitive. */
     public static boolean isDebugOption(String argument) {
         if (argument == null) {
             return false;
@@ -126,7 +116,6 @@ public final class GuardOptions {
         return false;
     }
 
-    /** True for {@code -javaagent:}/{@code -agentpath:} style instrumentation agents. */
     public static boolean isInstrumentationOption(String argument) {
         if (argument == null) {
             return false;
@@ -137,11 +126,6 @@ public final class GuardOptions {
                 || value.startsWith("-agentlib:jdwp");
     }
 
-    /**
-     * Detects JDWP/debug or instrumentation markers inside agent-style
-     * environment variables ({@code JAVA_TOOL_OPTIONS}, {@code _JAVA_OPTIONS},
-     * {@code JDK_JAVA_OPTIONS}).
-     */
     public static boolean hasDebugEnvironment(String name, String value) {
         if (value == null || name == null) {
             return false;
@@ -154,7 +138,6 @@ public final class GuardOptions {
         return isDebugOption(value) || isInstrumentationOption(value);
     }
 
-    /** Detects a Frida / instrumentation marker in the process environment. */
     public static boolean isFridaEnvironment(String name, String value) {
         if (name == null) {
             return false;
@@ -176,7 +159,6 @@ public final class GuardOptions {
         return false;
     }
 
-    /** Deterministic keyed token transform shared with the native guard. */
     public static long mixToken(long secret, int challenge, long fileHash) {
         long hash = 0xcbf29ce484222325L ^ secret ^ fileHash;
         hash ^= ((long) challenge) & 0xFFFFFFFFL;
@@ -187,7 +169,6 @@ public final class GuardOptions {
         return hash;
     }
 
-    /** FNV-1a 64-bit digest, used for the guard DLL self-integrity value. */
     public static long fnv1a64(byte[] data, int offset, int length) {
         long hash = 0xcbf29ce484222325L;
         for (int i = offset; i < offset + length; i++) {
@@ -201,12 +182,6 @@ public final class GuardOptions {
         return fnv1a64(data, 0, data == null ? 0 : data.length);
     }
 
-    /**
-     * FNV-1a 32-bit digest of an ASCII name, shared with the generated native
-     * resolver: the guard decrypts an API name into a stack buffer and only calls
-     * {@code GetProcAddress} when its hash matches this build-time constant, so a
-     * patched literal cannot be redirected to another export.
-     */
     public static int fnv1a32(String text) {
         int hash = 0x811C9DC5;
         for (int i = 0; i < text.length(); i++) {
@@ -216,25 +191,15 @@ public final class GuardOptions {
         return hash;
     }
 
-    /** {@link #fnv1a32(String)} formatted as the C constant emitted into the guard. */
     public static String fnv1a32Hex(String text) {
         return "0x" + hex(fnv1a32(text) & 0xFFFFFFFFL, 8) + "UL";
     }
 
-    /**
-     * Canonical {@code antiDebug.execWhitelist} value: the configured list or the
-     * conservative JVM/AWT default when it is blank.
-     */
     public static String execWhitelist(String configured) {
         String value = configured == null ? "" : configured.trim();
         return value.isEmpty() ? DEFAULT_EXEC_WHITELIST : value;
     }
 
-    /**
-     * Case-insensitive match of a module name or path against a comma-separated
-     * whitelist. A token ending in {@code *} matches on its prefix, every other
-     * token on a substring; blank tokens are ignored.
-     */
     public static boolean execWhitelistMatches(String whitelist, String moduleName) {
         if (whitelist == null || moduleName == null) {
             return false;
@@ -287,7 +252,6 @@ public final class GuardOptions {
         return out;
     }
 
-    /** Formats a detection mask for logs ({@code 0x00000004}). */
     public static String describeMask(int mask) {
         return "0x" + hex(mask & 0xFFFFFFFFL, 8);
     }

@@ -19,10 +19,6 @@ final class ModMetadataDetector {
     private ModMetadataDetector() {
     }
 
-    // ------------------------------------------------------------------
-    // Fabric
-    // ------------------------------------------------------------------
-
     static void scanFabric(String resourceName, byte[] bytes, MinecraftScan scan) {
         scan.loaderFabric();
         scan.preserveResource(resourceName);
@@ -47,10 +43,6 @@ final class ModMetadataDetector {
         scan.evidence("fabric.mod.json",
                 id == null ? "fabric.mod.json" : "fabric.mod.json id=" + id);
     }
-
-    // ------------------------------------------------------------------
-    // Quilt
-    // ------------------------------------------------------------------
 
     static void scanQuilt(String resourceName, byte[] bytes, MinecraftScan scan) {
         scan.loaderQuilt();
@@ -78,10 +70,6 @@ final class ModMetadataDetector {
         scan.evidence("quilt.mod.json",
                 id == null ? "quilt.mod.json" : "quilt.mod.json id=" + id);
     }
-
-    // ------------------------------------------------------------------
-    // Legacy Forge mcmod.info
-    // ------------------------------------------------------------------
 
     static void scanLegacy(String resourceName, byte[] bytes, MinecraftScan scan) {
         scan.loaderForge();
@@ -154,21 +142,6 @@ final class ModMetadataDetector {
         return map == null ? null : map.get(key);
     }
 
-    // ------------------------------------------------------------------
-    // shared helpers
-    // ------------------------------------------------------------------
-
-    /**
-     * Recursively handles an entrypoints value tree.
-     *
-     * <p>The top-level value is a map of environment groups
-     * ({@code main}, {@code client}, {@code server}, {@code preLaunch}, ...);
-     * each group value is a string, an array, a nested array or an entry
-     * descriptor object such as
-     * {@code {"value": "pkg.Class::method", "adapter": "default"}}. Descriptor
-     * objects must only contribute their {@code value}/{@code class}, never
-     * sibling keys like {@code adapter}.</p>
-     */
     static void scanEntrypoints(Object value, MinecraftScan scan) {
         if (value == null) {
             return;
@@ -201,15 +174,12 @@ final class ModMetadataDetector {
             }
             return;
         }
-        // Not a descriptor object: a group map (main/client/server/...) whose
-        // values are entrypoint strings, arrays or descriptors. Iterate every
-        // group instead of assuming a fixed set of names.
+
         for (Object groupValue : object.values()) {
             scanEntrypoints(groupValue, scan);
         }
     }
 
-    /** Returns the class value of an entry descriptor object, if it is one. */
     private static Object entrypointValue(Map<String, Object> object) {
         if (object.containsKey("value")) {
             return object.get("value");
@@ -242,7 +212,6 @@ final class ModMetadataDetector {
         }
     }
 
-    /** Handles {@code mixins}/{@code mixin}: strings or objects with a config. */
     static void collectMixinConfigs(Object value, MinecraftScan scan) {
         if (value == null) {
             return;

@@ -20,7 +20,6 @@ public final class UmbraCantrip {
     private UmbraCantrip() {
     }
 
-    /** Executes all chunks and returns the values emitted by {@code .}. */
     public static int[] run(String[] chunks) {
         if (chunks == null || chunks.length == 0) {
             return new int[0];
@@ -109,7 +108,7 @@ public final class UmbraCantrip {
                     }
                     break;
                 default:
-                    // Formatting/whitespace and unknown dialect hints are ignored.
+
                     break;
             }
             pc++;
@@ -135,22 +134,10 @@ public final class UmbraCantrip {
         throw new IllegalStateException("Cantrip: unbalanced loop");
     }
 
-    // ---------------------------------------------------------------- sealed layer
-    //
-    // The second virtualization layer stores each dialect program twice removed
-    // from its syntax: the command characters are substituted through a per-build
-    // permutation (a different opcode table for every build), then the text is
-    // ChaCha20-encrypted and Base64-encoded. A static reader therefore sees opaque
-    // base64 blobs instead of `~value;.` programs, and has to reimplement both the
-    // cipher and the permutation to recover the payload integers. The interpreter
-    // only exposes decode-and-run; the dialect semantics stay inside `run`.
-
-    /** Decodes sealed chunks and executes them. */
     public static int[] runSealed(String[] sealed, int key) {
         return run(decode(sealed, key));
     }
 
-    /** Seals plain dialect chunks (build side): substitute, encrypt, base64. */
     public static String[] seal(String[] plain, int key) {
         if (plain == null) {
             return new String[0];
@@ -171,7 +158,6 @@ public final class UmbraCantrip {
         return out;
     }
 
-    /** Reverses {@link #seal(String[], int)} without executing the program. */
     public static String[] decode(String[] sealed, int key) {
         if (sealed == null) {
             return new String[0];
@@ -196,7 +182,6 @@ public final class UmbraCantrip {
         return out;
     }
 
-    /** Per-build opcode table: a deterministic permutation of the 128 low code points. */
     private static int[] permutation(int key) {
         int[] table = new int[128];
         for (int i = 0; i < 128; i++) {
@@ -215,7 +200,6 @@ public final class UmbraCantrip {
         return table;
     }
 
-    /** Expands the 32-bit dialect key into a 256-bit ChaCha20 key. */
     private static byte[] keyBytes(int key) {
         byte[] out = new byte[32];
         long state = 0x9E3779B97F4A7C15L ^ (key & 0xFFFFFFFFL);
@@ -231,7 +215,6 @@ public final class UmbraCantrip {
         return out;
     }
 
-    /** 96-bit nonce derived from the dialect key (unique per build). */
     private static byte[] nonce(int key) {
         byte[] bytes = keyBytes(key);
         byte[] nonce = new byte[12];
@@ -241,7 +224,6 @@ public final class UmbraCantrip {
         return nonce;
     }
 
-    /** ChaCha20 (20 rounds, 32-bit counter starting at 1) mirroring the string layer. */
     private static byte[] chacha20(byte[] key, byte[] nonce, byte[] data) {
         byte[] out = data.clone();
         int[] state = new int[16];

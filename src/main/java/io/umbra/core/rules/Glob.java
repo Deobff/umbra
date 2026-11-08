@@ -32,7 +32,6 @@ public final class Glob {
         return pattern.matcher(normalize(internalName)).matches();
     }
 
-    /** Normalizes a dotted or slash-separated class name to internal form. */
     public static String normalize(String name) {
         if (name == null) {
             return "";

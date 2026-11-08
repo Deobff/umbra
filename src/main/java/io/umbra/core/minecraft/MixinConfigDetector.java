@@ -21,7 +21,6 @@ final class MixinConfigDetector {
     private MixinConfigDetector() {
     }
 
-    /** Examines a resource that may be a mixin configuration. */
     static void maybeScan(String resourceName, byte[] bytes, MinecraftScan scan) {
         if (resourceName == null || scan.isMixinConfigConsumed(resourceName)) {
             return;
@@ -77,7 +76,6 @@ final class MixinConfigDetector {
         apply(resourceName, root, scan);
     }
 
-    /** Parses a mixin config referenced by loader metadata but not named like one. */
     static void parseDeclared(ClassPool pool, String resourcePath, MinecraftScan scan) {
         if (resourcePath == null || scan.isMixinConfigConsumed(resourcePath)) {
             return;

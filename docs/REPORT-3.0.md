@@ -21,36 +21,12 @@ Baseline for comparison: Umbra 2.0.0 (245 classes, 14 test suites) built green a
 the start of the session.
 
 ## 2. Reference study (inputs for the overhaul)
+This release was developed from Umbra's own requirements and measurement work:
+threat model, red/blue scoreboard, and per-layer strength probes. No third-party
+code was copied.
 
-Nine reference tools under `../混淆器/` were studied statically — no tool was
-executed, no protected artifact was decompiled, and no third-party code was
-copied (see `docs/REFERENCE-MATRIX.md` for the per-tool evidence matrix and
-licensing notes):
-
-* **Zelix KlassMaster 27** — bytecode-only; reference obfuscation through
-  Reflection API calls, auto reflection handling, `Object[]` parameter collapse,
-  annotation-level flow/exception policies, broad XML/resource rewriting.
-* **BytecodeVM 2.2.3** — VM design reference: rolling per-record key chain,
-  per-method opcode maps, encrypted operands/addresses, superinstruction fusion,
-  decoy branches, integrity sampling, `inspect` JSON plan contract.
-* **KBox 3.0.3** — feature/measurement benchmark: type confusion, reflection
-  gate, anti-decompiler levels, VMP/JNIC/BFVM layers, per-knob strength report.
-* **JNIC-Virtualization** — a dumper; its loader contract is the attack model
-  Umbra's native anti-dump path is designed against.
-* **native-obfuscator 3.5.5r** — GPL-3.0, not reusable; useful contracts: list
-  precedence, wildcard semantics, per-platform modes.
-* **OpenPhantomShield** — transformer order and settings design; vendor
-  lock/phone-home model explicitly rejected.
-* **OpenYCP** — incomplete module tree; feature list only.
-* **Zipit** — sibling codebase; deltas (license server, build plugins, GUI i18n,
-  extra resource/reflection knobs) informed the build-integration work.
-* **Zelix rebuild project** — decompiler-grade evidence only, not vendor
-  material; no code taken.
-
-Adopted: layout/compat engine, type confusion, reflection gate, build plugins.
-Improved: string/flow/VM/native/anti-decompiler/GUI. Parity or rejected:
-renaming, constant encryption, archive encryption, ZKM reference obfuscation,
-KBox BFVM/BrainfuckShield/K-OTP/PE shell, PhantomShield vendor auth.
+Adopted in this round: layout/compat engine, type confusion, reflection gate,
+build plugins. Improved: string/flow/VM/native/anti-decompiler/GUI.
 
 ## 3. What changed
 

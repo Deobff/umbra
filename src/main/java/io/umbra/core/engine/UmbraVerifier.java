@@ -61,40 +61,25 @@ import java.util.zip.ZipInputStream;
  */
 public final class UmbraVerifier {
 
-    /** Directory prefixes whose contents are class-path roots for non-flat layouts. */
     private static final String BOOT_CLASSES = "BOOT-INF/classes/";
     private static final String WAR_CLASSES = "WEB-INF/classes/";
     private static final String BOOT_LIB = "BOOT-INF/lib/";
     private static final String WAR_LIB = "WEB-INF/lib/";
     private static final String VERSIONS_PREFIX = "META-INF/versions/";
 
-    /** Class-file major version supported by the JVM running Umbra. */
     private static final int RUNTIME_CLASS_MAJOR = runtimeClassMajor();
 
     private UmbraVerifier() {
     }
 
-    /**
-     * @param jar output archive
-     * @return human-readable verification failures; empty when the archive links
-     *         and its layout is structurally intact
-     * @throws IOException if the archive cannot be read
-     */
     public static List<String> verify(Path jar) throws IOException {
         return verify(jar, Collections.<Path>emptyList());
     }
 
-    /**
-     * @param jar       output archive
-     * @param libraries library JARs/directories added to the verification class path
-     * @return human-readable verification failures; empty on success
-     * @throws IOException if the archive cannot be read
-     */
     public static List<String> verify(Path jar, List<Path> libraries) throws IOException {
         return verifyDetailed(jar, libraries).errors();
     }
 
-    /** Full verification result, including per-layout reporting. */
     public static Report verifyDetailed(Path jar, List<Path> libraries) throws IOException {
         Report report = new Report();
         List<String> warnings = new ArrayList<String>();
@@ -198,7 +183,6 @@ public final class UmbraVerifier {
         boolean hasBootClasses = hasPrefix(entryNames, BOOT_CLASSES);
         boolean hasWarClasses = hasPrefix(entryNames, WAR_CLASSES);
 
-        // Layout-destroying post-processors: the container root vanished.
         if (bootLoaderMain && !hasBootClasses && !hasWarClasses) {
             report.errors.add("layout: manifest Main-Class is a Spring Boot loader (" + mainClass
                     + ") but the nested class root (BOOT-INF/classes/ or WEB-INF/classes/) is missing; "
@@ -237,15 +221,13 @@ public final class UmbraVerifier {
         checkEntryPoint(report, entryNames, "Launcher-Agent-Class",
                 attributes.get("Launcher-Agent-Class"), report.layout);
 
-        // Multi-release structural checks.
         checkMultiRelease(report, entryNames, attributes, versionedEntries, classBytes);
-        // Module descriptors.
+
         checkModuleInfo(report, moduleInfoEntries, classBytes);
         if (report.layout.kind() == JarLayout.Kind.WAR && !entryNames.contains("WEB-INF/web.xml")) {
             report.notes.add("WAR layout without WEB-INF/web.xml (allowed for annotation-only web apps)");
         }
 
-        // Verify that archive class entries sit at their expected paths.
         for (String entryName : classEntryNames) {
             byte[] bytes = classBytes.get(entryName);
             if (bytes == null) {
@@ -267,15 +249,14 @@ public final class UmbraVerifier {
             report.expectedClassEntries.add(expectedPath);
         }
 
-        // Load classes: root classes through the archive URL, nested-layout
-        // classes through a child-first map; nested libraries are extracted so
-        // application classes can link their dependencies.
         Path extraction = null;
         try {
             List<URL> urls = new ArrayList<URL>();
             urls.add(jar.toUri().toURL());
             if (!nestedLibraries.isEmpty()) {
-                extraction = Files.createTempDirectory("umbra-verify-libs-");
+
+                extraction = Files.createTempDirectory(
+                        io.umbra.core.jni.NativeCompiler.randomToken());
                 int index = 0;
                 for (String name : nestedLibraries) {
                     byte[] libraryBytes = nestedLibraryBytes.get(name);
@@ -308,8 +289,7 @@ public final class UmbraVerifier {
                 }
                 String rootRelativePath = binaryName.replace('.', '/') + ".class";
                 if (!rootRelativePath.equals(entryName)) {
-                    // Container-prefixed class: a plain URLClassLoader cannot
-                    // find it, so define the bytes through the child-first hook.
+
                     prefixed.put(binaryName, bytes);
                 }
             }
@@ -343,9 +323,7 @@ public final class UmbraVerifier {
                     }
                     int major = classMajorVersion(bytes);
                     if (major > RUNTIME_CLASS_MAJOR) {
-                        // The tool may run on an older JDK than the protected
-                        // artifact targets; structural checks still apply but
-                        // the JVM cannot link these classes here.
+
                         report.notes.add(entryName + ": not linked, class file version " + major
                                 + " requires a newer JVM than " + RUNTIME_CLASS_MAJOR);
                         report.skippedByVersion++;
@@ -378,10 +356,6 @@ public final class UmbraVerifier {
         return report;
     }
 
-    // ------------------------------------------------------------------
-    // Structural checks
-    // ------------------------------------------------------------------
-
     private static void checkEntryPoint(Report report, Set<String> entryNames, String attribute,
                                         String value, JarLayout layout) {
         if (value == null || value.trim().isEmpty()) {
@@ -393,9 +367,7 @@ public final class UmbraVerifier {
         if (entryNames.contains(nestedPath) || entryNames.contains(flatPath)) {
             return;
         }
-        // A versioned-only class is a valid multi-release layout: the JVM
-        // selects it from META-INF/versions/N on the matching runtime even
-        // though no base entry exists.
+
         String suffix = "/" + flatPath;
         for (String candidate : entryNames) {
             if (candidate.startsWith(VERSIONS_PREFIX) && candidate.endsWith(suffix)) {
@@ -448,7 +420,7 @@ public final class UmbraVerifier {
                 continue;
             }
             if (inner.equals("module-info.class")) {
-                continue; // validated by checkModuleInfo
+                continue;
             }
             String internalName;
             int major;
@@ -517,9 +489,7 @@ public final class UmbraVerifier {
             report.errors.add(entryName + ": nested library archive is empty");
             return;
         }
-        // ZipInputStream silently stops at the first invalid signature, so a
-        // corrupt/garbage "nested jar" would otherwise be reported as an empty
-        // archive. Validate the ZIP structure explicitly first.
+
         if (bytes.length < 4 || !hasSignature(bytes, 0, 0x04034b50)) {
             report.errors.add(entryName + ": nested library is not a valid ZIP archive "
                     + "(missing local file header signature)");
@@ -540,7 +510,7 @@ public final class UmbraVerifier {
                 entries++;
                 byte[] buffer = new byte[4096];
                 while (in.read(buffer) >= 0) {
-                    // Drain the entry so the next header is read correctly.
+
                 }
             }
         } catch (ZipException malformed) {
@@ -565,7 +535,6 @@ public final class UmbraVerifier {
                 && (bytes[offset + 3] & 0xFF) == ((signature >>> 24) & 0xFF);
     }
 
-    /** Scans the trailing comment window for the ZIP end-of-central-directory record. */
     private static boolean hasEndOfCentralDirectory(byte[] bytes) {
         int start = Math.max(0, bytes.length - (0xFFFF + 22));
         for (int offset = bytes.length - 22; offset >= start; offset--) {
@@ -576,7 +545,6 @@ public final class UmbraVerifier {
         return false;
     }
 
-    /** Class-file major version supported by the JVM running Umbra (52 for Java 8). */
     private static int runtimeClassMajor() {
         String property = System.getProperty("java.class.version", "");
         int dot = property.indexOf('.');
@@ -598,11 +566,6 @@ public final class UmbraVerifier {
         return ((bytes[6] & 0xFF) << 8) | (bytes[7] & 0xFF);
     }
 
-    /**
-     * Expected entry path for a class: classes under the container class root
-     * live at {@code prefix + internalName.class}; preserved root classes (for
-     * example Spring Boot loader classes) stay at the archive root.
-     */
     private static String expectedEntryPath(String internalName, String actualEntry, JarLayout layout) {
         if (!layout.isFlat() && !actualEntry.startsWith(layout.classPrefix())) {
             return internalName + ".class";
@@ -635,11 +598,11 @@ public final class UmbraVerifier {
                         try {
                             Files.deleteIfExists(path);
                         } catch (IOException ignored) {
-                            // Best-effort temporary cleanup.
+
                         }
                     });
         } catch (IOException ignored) {
-            // Best-effort temporary cleanup.
+
         }
     }
 
@@ -657,7 +620,6 @@ public final class UmbraVerifier {
         }
     }
 
-    /** Per-layout verification result. */
     public static final class Report {
         private JarLayout layout = JarLayout.flat();
         private String layoutKind = "flat";
@@ -675,7 +637,6 @@ public final class UmbraVerifier {
             return layout;
         }
 
-        /** Layout id: flat, spring-boot, spring-boot-war, war or multi-release. */
         public String layoutKind() {
             return layoutKind;
         }
@@ -688,7 +649,6 @@ public final class UmbraVerifier {
             return classesVerified;
         }
 
-        /** Classes with a class-file version newer than the running JVM (not linked). */
         public int skippedByVersion() {
             return skippedByVersion;
         }
@@ -705,12 +665,10 @@ public final class UmbraVerifier {
             return nestedLibraries;
         }
 
-        /** Verification failures; empty when the archive is acceptable. */
         public List<String> errors() {
             return Collections.unmodifiableList(errors);
         }
 
-        /** Informational notes (layout summary, preserved entries, ignored versions). */
         public List<String> notes() {
             return Collections.unmodifiableList(notes);
         }
@@ -719,12 +677,10 @@ public final class UmbraVerifier {
             return errors.isEmpty();
         }
 
-        /** Expected class entry paths observed in the archive (layout-aware). */
         public List<String> expectedClassEntries() {
             return Collections.unmodifiableList(expectedClassEntries);
         }
 
-        /** One-line summary used by CLI inspection/reporting. */
         public String summary() {
             return "layout=" + layoutKind + (classPrefix.isEmpty() ? "" : " classes=" + classPrefix)
                     + " classes=" + classesVerified

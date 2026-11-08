@@ -34,7 +34,6 @@ public final class TextResourceRewriter {
     private TextResourceRewriter() {
     }
 
-    /** Result of rewriting one resource entry. */
     public static final class Result {
         private final String logicalName;
         private final byte[] bytes;
@@ -46,7 +45,6 @@ public final class TextResourceRewriter {
             this.changed = changed;
         }
 
-        /** Possibly renamed logical entry name (service file names follow class renames). */
         public String logicalName() {
             return logicalName;
         }
@@ -60,7 +58,6 @@ public final class TextResourceRewriter {
         }
     }
 
-    /** True when the logical (class-prefix-free) entry name is a handled text resource. */
     public static boolean handles(String logicalName) {
         if (logicalName == null) {
             return false;
@@ -77,7 +74,6 @@ public final class TextResourceRewriter {
         return logicalName.startsWith(NATIVE_IMAGE_PREFIX);
     }
 
-    /** Rewrites one handled resource; returns the original when nothing changed. */
     public static Result rewrite(String logicalName, byte[] bytes, ClassRenameMap rename) {
         if (bytes == null || rename == null || rename.isEmpty() || !handles(logicalName)) {
             return new Result(logicalName, bytes, false);
@@ -100,10 +96,6 @@ public final class TextResourceRewriter {
         return new Result(newName, rewritten.getBytes(StandardCharsets.UTF_8), true);
     }
 
-    /**
-     * Strict UTF-8 decode; returns {@code null} for binary resources so no
-     * encoded payload can be corrupted by a text rewrite.
-     */
     static String decodeUtf8(byte[] bytes) {
         if (bytes == null || bytes.length == 0) {
             return bytes == null ? null : "";

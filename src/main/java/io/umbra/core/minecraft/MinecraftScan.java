@@ -55,10 +55,6 @@ final class MinecraftScan {
         this.log = log == null ? new Log(null, false) : log;
     }
 
-    // ------------------------------------------------------------------
-    // facts
-    // ------------------------------------------------------------------
-
     void warn(String format, Object... args) {
         log.warn(format, args);
     }
@@ -115,7 +111,6 @@ final class MinecraftScan {
         }
     }
 
-    /** Hard-keeps a class: no renaming and no transformations. */
     void keepClass(String internalName) {
         String normalized = normalize(internalName);
         if (normalized == null) {
@@ -125,7 +120,6 @@ final class MinecraftScan {
         keptClasses.add(normalized);
     }
 
-    /** Keeps the name of a class member (any descriptor). */
     void keepMember(String owner, String member) {
         String normalizedOwner = normalize(owner);
         String normalizedMember = member == null ? "" : member.trim();
@@ -135,7 +129,6 @@ final class MinecraftScan {
         keepRules.add(normalizedOwner + "#" + normalizedMember);
     }
 
-    /** Keeps the name of a method including its descriptor. */
     void keepMethod(String owner, String method, String descriptor) {
         if (method == null || method.trim().isEmpty()) {
             return;
@@ -148,7 +141,6 @@ final class MinecraftScan {
         keepMember(owner, rule);
     }
 
-    /** Marks a class as body-rewrite exempt (control flow, strings, VM, ...). */
     void bodySkip(String internalName) {
         String normalized = normalize(internalName);
         if (normalized != null) {
@@ -156,7 +148,6 @@ final class MinecraftScan {
         }
     }
 
-    /** Keeps and freezes a loader plugin/coremod class. */
     void freezeClass(String internalName) {
         String normalized = normalize(internalName);
         if (normalized == null) {
@@ -167,14 +158,12 @@ final class MinecraftScan {
         frozenClasses.add(normalized);
     }
 
-    /** Keeps a mixin class name and preserves its method bodies. */
     void mixinClass(String internalName) {
         keepClass(internalName);
         bodySkip(internalName);
         mixin = true;
     }
 
-    /** Keeps a mixin target class name and preserves its method bodies. */
     void targetClass(String internalName) {
         String normalized = normalize(internalName);
         if (normalized == null) {
@@ -186,7 +175,6 @@ final class MinecraftScan {
         mixin = true;
     }
 
-    /** Adds a raw rule discovered elsewhere (for example mixin analysis). */
     void rawKeepRule(String raw) {
         if (raw == null) {
             return;
@@ -248,10 +236,6 @@ final class MinecraftScan {
         }
     }
 
-    // ------------------------------------------------------------------
-    // pending mixin/access resources
-    // ------------------------------------------------------------------
-
     void declareMixinConfig(String path) {
         String normalized = normalizeResource(path);
         if (normalized == null) {
@@ -290,7 +274,6 @@ final class MinecraftScan {
         }
     }
 
-    /** Removes a pending path once it was consumed (present or not). */
     void consumedMixinConfig(String path) {
         parsedMixinConfigs.add(path);
         pendingMixinConfigs.remove(path);
@@ -329,10 +312,6 @@ final class MinecraftScan {
     List<String> pendingAccessTransformers() {
         return new ArrayList<String>(pendingAccessTransformers);
     }
-
-    // ------------------------------------------------------------------
-    // result
-    // ------------------------------------------------------------------
 
     boolean detected() {
         return fabric || quilt || forge || neoforge || mixin
@@ -430,11 +409,6 @@ final class MinecraftScan {
                 keptClasses.size(), targetClasses.size());
     }
 
-    // ------------------------------------------------------------------
-    // normalization
-    // ------------------------------------------------------------------
-
-    /** Normalizes a dotted or slash-separated class name to internal form. */
     static String normalize(String name) {
         if (name == null) {
             return null;
@@ -452,7 +426,6 @@ final class MinecraftScan {
         return trimmed.replace('.', '/');
     }
 
-    /** Normalizes a resource path (forward slashes, no leading slash). */
     static String normalizeResource(String path) {
         if (path == null) {
             return null;

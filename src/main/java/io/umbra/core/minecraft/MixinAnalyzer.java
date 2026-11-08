@@ -52,13 +52,11 @@ import java.util.List;
  */
 public final class MixinAnalyzer {
 
-    /** Prefix Mixin accepts on shadow members ("shadow$name" shadows "name"). */
     private static final String SHADOW_PREFIX = "shadow$";
 
     private MixinAnalyzer() {
     }
 
-    /** Scans every class in {@code pool}; never returns {@code null}. */
     public static MixinAnalysis analyze(ClassPool pool) {
         if (pool == null) {
             return MixinAnalysis.EMPTY;
@@ -71,7 +69,7 @@ public final class MixinAnalyzer {
             try {
                 analyzeClass(node, collector);
             } catch (RuntimeException e) {
-                // A corrupt annotation tree must never abort the scan.
+
                 collector.note("skipped class " + node.name
                         + " after malformed mixin annotation data ("
                         + e.getClass().getSimpleName() + ")");
@@ -112,8 +110,6 @@ public final class MixinAnalyzer {
         }
     }
 
-    // ------------------------------------------------------------------ fields
-
     private static boolean scanFields(ClassNode node, List<String> targets, MixinCollector collector) {
         boolean aliasUsed = false;
         for (FieldNode field : safeFields(node)) {
@@ -127,9 +123,7 @@ public final class MixinAnalyzer {
                 continue;
             }
             for (String owner : targets) {
-                // Field descriptors are not expressible in a keep rule
-                // (DefaultRuleSet matches "name(desc)" only) and field names are
-                // unique per class, so a descriptor-less rule is equivalent.
+
                 collector.keepMember(owner, field.name, null);
                 String alias = shadowAlias(field.name);
                 if (alias != null) {
@@ -140,8 +134,6 @@ public final class MixinAnalyzer {
         }
         return aliasUsed;
     }
-
-    // ----------------------------------------------------------------- methods
 
     private static boolean scanMethods(ClassNode node, List<String> targets, MixinCollector collector) {
         boolean aliasUsed = false;
@@ -210,8 +202,7 @@ public final class MixinAnalyzer {
             if (ref.hasOwner()) {
                 String owner = ref.owner();
                 collector.keepMember(owner, ref.name(), ref.desc());
-                // The annotation string spells the owner out, so its class name
-                // and bytecode shape have to survive as well.
+
                 collector.keepClass(owner);
                 collector.bodySkip(owner);
                 if (!targets.contains(owner)) {
@@ -259,8 +250,6 @@ public final class MixinAnalyzer {
         }
     }
 
-    // ------------------------------------------------------------------ shared
-
     private static void keepMemberOnTargets(ClassNode node, String memberName, String memberDesc,
                                             List<String> targets, MixinCollector collector,
                                             String annotationName) {
@@ -274,7 +263,6 @@ public final class MixinAnalyzer {
         }
     }
 
-    /** Returns the de-prefixed name for {@code shadow$foo}, else {@code null}. */
     private static String shadowAlias(String memberName) {
         if (memberName == null || !memberName.startsWith(SHADOW_PREFIX)) {
             return null;
@@ -283,7 +271,6 @@ public final class MixinAnalyzer {
         return alias.isEmpty() ? null : alias;
     }
 
-    /** Mixin derives {@code @Accessor} targets from get/set/is method names. */
     private static String deriveAccessorTarget(String methodName) {
         String[] prefixes = { "get", "set", "is" };
         for (String prefix : prefixes) {
@@ -297,7 +284,6 @@ public final class MixinAnalyzer {
         return null;
     }
 
-    /** Mixin derives {@code @Invoker} targets by stripping the {@code call} prefix. */
     private static String deriveInvokerTarget(String methodName) {
         if (methodName.length() > 4 && methodName.startsWith("call")) {
             String candidate = decapitalize(methodName.substring(4));

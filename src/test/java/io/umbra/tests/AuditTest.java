@@ -142,18 +142,13 @@ public final class AuditTest {
         }
     }
 
-    /* --------------------------------------------------------------- YAML */
-
     private static void testYamlParserEdges() throws Exception {
-        // BOM: the parser must strip a UTF-8 BOM itself (license files and
-        // plugins call it directly; ConfigLoader strips it separately).
+
         Map<String, Object> bom = YamlParser.parse("\uFEFFrenamer:\n  enabled: false\n");
         check(bom.containsKey("renamer"), "YamlParser strips a UTF-8 BOM from the first key");
         check(Boolean.FALSE.equals(asMap(bom.get("renamer")).get("enabled")),
                 "YamlParser BOM document keeps the first section's value");
 
-        // Tabs are one character but four indent columns; the content must not
-        // be chopped (previously "\tinput: x" parsed as key "ut").
         Map<String, Object> tabbed = YamlParser.parse("renamer:\n\tenabled: false\n\tprefix: \"t\"\n");
         Map<String, Object> tabRenamer = asMap(tabbed.get("renamer"));
         check(Boolean.FALSE.equals(tabRenamer.get("enabled")),
@@ -161,20 +156,17 @@ public final class AuditTest {
         check("t".equals(tabRenamer.get("prefix")), "tab-indented YAML keeps the renamer.prefix value");
         check(!tabbed.containsKey("amer"), "tab indentation does not chop the key name");
 
-        // Single-quoted scalars are literal in YAML: a Windows path must keep
-        // its backslashes ('C:\new\file' is not a newline).
         Map<String, Object> single = YamlParser.parse("prefix: 'C:\\new\\file'\n");
         check("C:\\new\\file".equals(single.get("prefix")),
                 "single-quoted scalar keeps backslashes literal");
         Map<String, Object> escapedQuote = YamlParser.parse("prefix: 'it''s'\n");
         check("it's".equals(escapedQuote.get("prefix")),
                 "single-quoted '' escape becomes a quote");
-        // Double-quoted scalars still decode escapes.
+
         Map<String, Object> doubleQuoted = YamlParser.parse("prefix: \"a\\nb\"\n");
         check(String.valueOf(doubleQuoted.get("prefix")).indexOf('\n') >= 0,
                 "double-quoted scalar still decodes \\n");
 
-        // Empty document and duplicate keys (documented deterministic value).
         check(YamlParser.parse("").isEmpty(), "empty YAML is an empty mapping");
         check(YamlParser.parse("# only a comment\n").isEmpty(), "comment-only YAML is empty");
         Map<String, Object> duplicate = asMap(YamlParser.parse(
@@ -182,7 +174,6 @@ public final class AuditTest {
         check(Boolean.FALSE.equals(duplicate.get("enabled")),
                 "duplicate YAML keys deterministically use the last value");
 
-        // Quoted keys with a colon, inline lists with quoted commas.
         Map<String, Object> quotedKey = YamlParser.parse("\"a: b\": 1\n");
         check(quotedKey.containsKey("a: b"), "quoted mapping key may contain ':'");
         Object listValue = YamlParser.parse("keep: [a, \"b, c\", 'd']\n").get("keep");
@@ -191,14 +182,13 @@ public final class AuditTest {
         check("b, c".equals(inline.get(1)), "inline list keeps a comma inside quotes");
         check("d".equals(inline.get(2)), "inline list keeps a single-quoted item");
 
-        // CRLF normalisation.
         Map<String, Object> crlf = YamlParser.parse("renamer:\r\n  enabled: false\r\n");
         check(Boolean.FALSE.equals(asMap(crlf.get("renamer")).get("enabled")),
                 "CRLF line endings parse like LF");
     }
 
     private static void testConfigLoadingEdges() throws Exception {
-        // Tab-indented configuration file (editors may indent with tabs).
+
         Path tabConfig = write("tabs.yml", "input: \"in.jar\"\noutput: \"out.jar\"\n"
                 + "renamer:\n\tenabled: false\n\tprefix: \"tab\"\n");
         UmbraConfig tabbedConfig = ConfigLoader.load(tabConfig);
@@ -208,13 +198,11 @@ public final class AuditTest {
         check("tab".equals(tabbedConfig.renamer().prefix()),
                 "tab-indented config applies renamer.prefix");
 
-        // BOM-prefixed config file.
         Path bomConfig = write("bom.yml", "\uFEFFinput: \"in.jar\"\noutput: \"out.jar\"\n");
         UmbraConfig bomLoaded = ConfigLoader.load(bomConfig);
         check(bomLoaded.input().getFileName().toString().equals("in.jar"),
                 "BOM-prefixed config file loads");
 
-        // A single-quoted Windows path in a typed section survives.
         Path quotedConfig = write("quoted.yml", "input: \"in.jar\"\noutput: \"out.jar\"\n"
                 + "renamer:\n  mappingFile: 'C:\\new\\mapping.txt'\n");
         check(quotedConfig != null, "quoted config fixture written");
@@ -222,13 +210,11 @@ public final class AuditTest {
         check("C:\\new\\mapping.txt".equals(quoted.renamer().mappingFile()),
                 "single-quoted Windows path keeps its backslashes");
 
-        // Unknown sections/keys are ignored, not rejected.
         Path unknown = write("unknown.yml", "input: \"in.jar\"\noutput: \"out.jar\"\n"
                 + "unknownSection:\n  foo: bar\n");
         ConfigLoader.load(unknown);
         check(true, "unknown configuration keys are ignored");
 
-        // Empty input/output values are missing keys, not the config directory.
         Path emptyInput = write("empty-input.yml", "input:\noutput: \"out.jar\"\n");
         try {
             ConfigLoader.load(emptyInput);
@@ -238,14 +224,11 @@ public final class AuditTest {
                     "empty input value reports the missing input key: " + expected.getMessage());
         }
 
-        // Integer overflow in a typed section silently falls back to the
-        // documented default (safe default, recorded as an accepted risk).
         Path overflow = write("overflow.yml", "input: \"in.jar\"\noutput: \"out.jar\"\n"
                 + "junkMembers:\n  methods: 99999999999\n");
         check(ConfigLoader.load(overflow).junk().methods() == 2,
                 "overflowing int option falls back to the safe default");
 
-        // Unknown preset is still a clear configuration error.
         try {
             Presets.apply(new UmbraConfig.Builder().input(Paths.get("in.jar"))
                     .output(Paths.get("out.jar")).build(), "not-a-preset");
@@ -254,8 +237,6 @@ public final class AuditTest {
             check(expected.getMessage().contains("Unknown preset"), "unknown preset message");
         }
     }
-
-    /* ------------------------------------------------------------- config */
 
     private static void testConfigRoundTrip() throws Exception {
         Path base = work.resolve("round-trip");
@@ -327,10 +308,6 @@ public final class AuditTest {
         check(GuiConfig.validate(app, work.resolve("not-a-jar.zip")) != null,
                 "GUI validate rejects a non-jar output");
 
-        // SpotBugs MS_MUTABLE_COLLECTION: the shared public preset-name list is
-        // read by the GUI panels and must not be mutable by callers. set() is
-        // the operation Arrays.asList allows (add/remove throw anyway), so it
-        // is the one that proves the unmodifiable contract.
         boolean mutable;
         try {
             GuiPresets.NAMES.set(0, "Injected");
@@ -347,8 +324,6 @@ public final class AuditTest {
                 "GuiPresets.NAMES keeps the six preset names in order");
     }
 
-    /* ------------------------------------------------------------- inspect */
-
     private static void testInspectEdges() throws Exception {
         Path duplicate = work.resolve("duplicate-entry.jar");
         writeDuplicateEntryJar(duplicate, "demo/Main.class", new byte[] { 1, 2, 3, 4 });
@@ -356,8 +331,7 @@ public final class AuditTest {
         check(report.duplicateEntries == 1, "duplicate archive entries are counted");
         check(report.duplicateNames.contains("demo/Main.class"),
                 "duplicate entry name is reported");
-        // Inspection counts archive entries, so the duplicated class is counted
-        // twice even though the protection writer keeps the first occurrence.
+
         check(report.transformableClasses == 2,
                 "duplicate jar reports both class entries (entry-level count)");
         check(report.warnings.toString().contains("duplicate"), "duplicate entries produce a warning");
@@ -392,8 +366,6 @@ public final class AuditTest {
             check(true, "corrupt archive throws ZipException");
         }
     }
-
-    /* ----------------------------------------------------------- CLI parse */
 
     private static void testCliParsing() throws Exception {
         Path input = work.resolve("parse-app.jar");
@@ -462,8 +434,6 @@ public final class AuditTest {
                 "input without output exits 1");
     }
 
-    /* ------------------------------------------------------ CLI paths/runs */
-
     private static void testCliPathsAndOutputs() throws Exception {
         Path input = work.resolve("run-app.jar");
         Files.copy(demo, input);
@@ -475,8 +445,6 @@ public final class AuditTest {
         Result dryRunNoOutput = cli("-i", input.toString(), "--dry-run");
         check(dryRunNoOutput.exit == 0, "--dry-run works without -o");
 
-        // A filesystem-root input has no file name: the dry-run placeholder
-        // output must not NPE, the run must fail cleanly as a non-regular file.
         Path rootPath = Paths.get("").toAbsolutePath().getRoot();
         if (rootPath != null) {
             Result rootInput = cli("-i", rootPath.toString(), "--dry-run");
@@ -484,7 +452,6 @@ public final class AuditTest {
                     "dry-run with a filesystem-root input exits 1 with a clear message");
         }
 
-        // Input == output is rejected unless --allow-in-place is explicit.
         Path source = work.resolve("source.jar");
         Files.copy(demo, source);
         byte[] sourceHash = hash(source);
@@ -496,26 +463,22 @@ public final class AuditTest {
         check(inPlaceDry.exit == 0, "--allow-in-place permits an in-place dry run");
         check(Arrays.equals(sourceHash, hash(source)), "in-place dry run leaves the input untouched");
 
-        // Paths with spaces and non-ASCII names.
         Path spaced = work.resolve("app with space \u00fc \u6d4b\u8bd5.jar");
         Files.copy(demo, spaced);
         Path spacedOut = work.resolve("out with space \u00fc.jar");
         Result spacedRun = cli("--dry-run", "-i", spaced.toString(), "-o", spacedOut.toString());
         check(spacedRun.exit == 0, "input/output paths with spaces and non-ASCII characters work");
 
-        // Relative paths resolve against the process working directory.
         Result relativeRun = cli("--dry-run", "-i", "demo/demo.jar",
                 "-o", "build-qa/audit/relative-dry-run-out.jar");
         check(relativeRun.exit == 0, "relative input/output paths work");
 
-        // Config without input fails clearly when loaded strictly.
         Path noInput = write("no-input.yml", "renamer:\n  enabled: true\n");
         Result noInputRun = cli("--dry-run", "-c", noInput.toString());
         check(noInputRun.exit == 1
                         && noInputRun.output.contains("Missing required configuration key: input"),
                 "config without input exits 1 with a clear message");
 
-        // Real protection run (light preset) with all report artifacts.
         Path output = work.resolve("protected.jar");
         Path mapping = work.resolve("mapping.txt");
         Path reportHtml = work.resolve("report.html");
@@ -539,21 +502,20 @@ public final class AuditTest {
                         && read(compatJson).contains("\"kind\": \"compat-report\""),
                 "protection run writes the compatibility report");
 
-        // The mapping diff tool reads two mapping files.
         Result diff = cli("--diff-mapping",
                 root.resolve("demo").resolve("umbra-mapping.txt").toString(), mapping.toString());
         check(diff.exit == 0 && diff.output.contains("mapping diff"),
                 "--diff-mapping compares two mapping files");
 
-        // The watermark tracer finds the mark embedded by the run.
         Result watermark = cli("--trace-watermark", output.toString());
-        check(watermark.exit == 0 && watermark.output.contains("UMBRA|"),
-                "--trace-watermark finds the Umbra watermark");
+        check(watermark.exit == 0 && watermark.output.contains("wm1|"),
+                "--trace-watermark finds the watermark marker");
+        check(!watermark.output.contains("UMBRA|"),
+                "watermark marker does not advertise the tool name");
         Result noWatermark = cli("--trace-watermark", input.toString());
-        check(noWatermark.exit == 0 && noWatermark.output.contains("No Umbra watermark found"),
+        check(noWatermark.exit == 0 && noWatermark.output.contains("No watermark found"),
                 "--trace-watermark reports an unmarked JAR");
 
-        // Corrupt / empty inputs are reported without a stack trace.
         Path corrupt = write("bad.jar", "not a zip");
         Result corruptRun = cli("-i", corrupt.toString(), "-o", work.resolve("bad-out.jar").toString());
         check(corruptRun.exit == 1 && corruptRun.output.contains("not a readable JAR"),
@@ -565,7 +527,6 @@ public final class AuditTest {
         check(inspectNoInput.exit == 1 && inspectNoInput.output.contains("--inspect requires -i"),
                 "--inspect without an input exits 1");
 
-        // Inspection JSON is valid JSON and is written to a missing directory.
         Path inspectJson = work.resolve("inspect-dir").resolve("sub").resolve("inspect.json");
         Result inspect = cli("--inspect", "-i", input.toString(),
                 "--inspect-json", inspectJson.toString());
@@ -575,8 +536,6 @@ public final class AuditTest {
         check(inspectText.trim().startsWith("{") && inspectText.contains("\"layout\""),
                 "--inspect-json writes a JSON document with the layout field");
     }
-
-    /* ------------------------------------------------------- license gate */
 
     private static void testCliLicenseGate() throws Exception {
         Licenses licenses = makeLicenses(work.resolve("licenses"));
@@ -618,8 +577,6 @@ public final class AuditTest {
         check(featureNoLicense.exit == 3,
                 "--require-feature without any license exits 3 (was: silently ignored)");
 
-        // A license supplied by the configuration file must be enforced when
-        // --require-license is passed on the command line.
         Path configWithLicense = write("license-config.yml",
                 "input: \"" + escape(input) + "\"\noutput: \"" + escape(output) + "\"\n"
                         + "license:\n  enabled: true\n  file: \"" + escape(licenses.audit) + "\"\n"
@@ -629,8 +586,6 @@ public final class AuditTest {
         check(configLicense.exit == 0 && configLicense.output.contains("License:"),
                 "config-supplied license satisfies --require-license (was: exit 3 before reading config)");
 
-        // The public key and require flag from the config survive a --license
-        // override on the command line.
         Result override = cli("--dry-run", "-c", configWithLicense.toString(),
                 "--license", licenses.audit.toString());
         check(override.exit == 0, "config public key survives a --license override");
@@ -644,8 +599,6 @@ public final class AuditTest {
                 "config license.require is preserved when --license overrides the file");
     }
 
-    /* ----------------------------------------------------------- artifacts */
-
     private static void testCliArtifacts() throws Exception {
         Path input = work.resolve("artifact-app.jar");
         Files.copy(demo, input);
@@ -656,7 +609,6 @@ public final class AuditTest {
                         && inspectResources.output.contains("nothing to transform"),
                 "--inspect reports a resources-only archive");
 
-        // In-place protection is explicit and produces a valid protected JAR.
         Path inPlace = work.resolve("in-place.jar");
         Files.copy(demo, inPlace);
         Result inPlaceRun = cli("-i", inPlace.toString(), "-o", inPlace.toString(),
@@ -667,15 +619,12 @@ public final class AuditTest {
         }
         check(!Arrays.equals(hash(inPlace), hash(demo)), "in-place output actually replaced the input");
 
-        // dry-run never writes the mapping file either.
         Path dryMapping = work.resolve("dry-mapping.txt");
         Result dryRun = cli("--dry-run", "-i", input.toString(), "-o", output.toString(),
                 "--mapping", dryMapping.toString());
         check(dryRun.exit == 0 && !Files.exists(dryMapping),
                 "--dry-run writes no mapping file");
 
-        // A report path that cannot be written is a warning after a successful
-        // run, not a failure of the protection run itself.
         Result compatFailure = cli("--dry-run", "-i", input.toString(), "-o", output.toString(),
                 "--compat-report", work.toString());
         check(compatFailure.exit == 0
@@ -683,14 +632,6 @@ public final class AuditTest {
                 "unwritable --compat-report path is a warning after a successful run");
     }
 
-    /* ------------------------------------------------------------ GUI exit */
-
-    /**
-     * The desktop console is a separate JavaFX jar now, so the engine jar only
-     * reports the missing console and prints the help. Running from a class
-     * directory (as this test does) means there is no jar next to the classes, so
-     * the console cannot be started and the exit code has to be non-zero.
-     */
     private static void testGuiEntry() throws Exception {
         Result headlessMain = runChild("io.umbra.cli.Main", true);
         check(headlessMain.exit == 1
@@ -706,8 +647,6 @@ public final class AuditTest {
         check(help.exit == 0 && help.output.contains("java -jar umbra-all.jar -i <input.jar>"),
                 "--help still prints the command line reference");
     }
-
-    /* ------------------------------------------------------------- helpers */
 
     private interface TestCase {
         void run() throws Exception;
@@ -805,9 +744,7 @@ public final class AuditTest {
         builder.directory(root.toFile());
         builder.redirectErrorStream(true);
         final Process process = builder.start();
-        // Drain the child's output on a separate thread: waiting for the
-        // process first would deadlock as soon as the child fills the pipe
-        // buffer (the usage text alone is larger than it).
+
         final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         Thread reader = new Thread(new Runnable() {
             @Override
@@ -819,7 +756,7 @@ public final class AuditTest {
                         buffer.write(chunk, 0, read);
                     }
                 } catch (IOException ignored) {
-                    // The child was killed; keep whatever was buffered.
+
                 }
             }
         }, "audit-child-reader");
@@ -879,8 +816,6 @@ public final class AuditTest {
         }
     }
 
-    /* ------------------------------------------------- raw ZIP edge fixture */
-
     private static void writeEmptyZip(Path file) throws IOException {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         writeLe32(out, 0x06054b50L);
@@ -894,7 +829,6 @@ public final class AuditTest {
         Files.write(file, out.toByteArray());
     }
 
-    /** Writes a STORED-entry ZIP containing the same name twice (ZipOutputStream rejects it). */
     private static void writeDuplicateEntryJar(Path file, String name, byte[] data)
             throws IOException {
         byte[] nameBytes = name.getBytes(StandardCharsets.UTF_8);
@@ -975,11 +909,11 @@ public final class AuditTest {
                         try {
                             Files.deleteIfExists(p);
                         } catch (Exception ignored) {
-                            // Best-effort temp cleanup.
+
                         }
                     });
         } catch (Exception ignored) {
-            // Best-effort temp cleanup.
+
         }
     }
 }

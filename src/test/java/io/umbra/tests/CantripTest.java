@@ -33,8 +33,6 @@ public final class CantripTest {
         int[] loop = UmbraCantrip.run(new String[]{"~3;[-]."});
         check(loop.length == 1 && loop[0] == 0, "interpreter loop semantics");
 
-        // P0-3: the sealed second layer substitutes the dialect syntax through a
-        // per-build opcode table and ChaCha20-encrypts the program text.
         String[] plain = new String[]{"~7;.~-3;.", "~42;."};
         String[] sealed = UmbraCantrip.seal(plain, 0x5EED1234);
         check(!sealed[0].contains("~") && !sealed[0].contains(";"),
@@ -65,6 +63,7 @@ public final class CantripTest {
             options.put("flowObfuscation.enabled", "false");
             options.put("exceptionObfuscation.enabled", "false");
             options.put("antiLlm.enabled", "false");
+            options.put("string.allowKeylessFallback", "true");
             Path output = dir.resolve("cantrip.jar");
             UmbraConfig config = GuiConfig.build(input, output, 912L, options, dir);
             EngineResult result = new UmbraEngine(Log.console(false)).run(config, null);
@@ -120,11 +119,11 @@ public final class CantripTest {
                         try {
                             Files.deleteIfExists(p);
                         } catch (Exception ignored) {
-                            // Best effort temp cleanup.
+
                         }
                     });
         } catch (Exception ignored) {
-            // Best effort temp cleanup.
+
         }
     }
 }

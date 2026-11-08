@@ -4,6 +4,7 @@ import io.umbra.core.api.ProgressListener;
 import io.umbra.core.config.UmbraConfig;
 import io.umbra.core.engine.EngineResult;
 import io.umbra.core.engine.UmbraEngine;
+import io.umbra.core.runtime.crypto.UmbraClassLoader;
 import io.umbra.core.runtime.crypto.UmbraCrypto;
 import io.umbra.core.runtime.crypto.UmbraRuntimeGuard;
 import io.umbra.core.util.Log;
@@ -84,10 +85,6 @@ public final class SecurityHardeningTest {
                 + (System.currentTimeMillis() - started) + " ms");
     }
 
-    // ------------------------------------------------------------------
-    // P2-6: guard signal units
-    // ------------------------------------------------------------------
-
     private static void testGuardSignalUnits() {
         check(UmbraRuntimeGuard.heapDumpSignal(Arrays.asList(
                 "-XX:+HeapDumpOnOutOfMemoryError", "-Xmx1g")),
@@ -104,17 +101,13 @@ public final class SecurityHardeningTest {
         check(!UmbraRuntimeGuard.attachSelfSignal(null), "absent allowAttachSelf is clean");
     }
 
-    // ------------------------------------------------------------------
-    // P2-1/P2-2/P1-4: built archive shape, build assertions, template stripping
-    // ------------------------------------------------------------------
-
     private static void testBuildShapeAndAssertions() throws Exception {
         Path dir = work.resolve("shape");
         Path input = buildProgram(dir, "SHAPE-OK", true);
         Path encrypted = encrypt(dir, input, "shape-enc.jar", null);
         ArchiveView view = ArchiveView.read(encrypted);
-        // Version 4 adds the constant-pool flag; version 3 archives are still readable.
-        check(view.version == 4, "archive index is version 4");
+
+        check(view.version == 7, "archive index is version 7");
         check(view.binding == 0, "default master binding is sample-bound");
         check(view.level >= 2, "default integrity level is at least 2");
         check(view.plaintextClasses.contains("module-info") == false,
@@ -160,10 +153,6 @@ public final class SecurityHardeningTest {
                 "plaintext class list is exactly the four injected infrastructure classes: "
                         + view.plaintextClasses);
     }
-
-    // ------------------------------------------------------------------
-    // P0-1: sample-bound master key
-    // ------------------------------------------------------------------
 
     private static void testAesCtrArchive() throws Exception {
         Path dir = work.resolve("aes");
@@ -227,7 +216,6 @@ public final class SecurityHardeningTest {
         check(!child.output.contains("ENTRY-OK"),
                 "entry-count tampered archive never runs the program");
 
-        // Removing a plaintext entry must also break the binding (entry count).
         Map<String, byte[]> removed = readZip(encrypted);
         removed.remove("META-INF/MANIFEST.MF");
         Path removedPath = dir.resolve("entry-removed.jar");
@@ -275,10 +263,6 @@ public final class SecurityHardeningTest {
         check(child.exit != 0, "adding a comment to a seed-binding archive breaks the binding");
     }
 
-    // ------------------------------------------------------------------
-    // P0-2: keyed digests and nonce-bound payload keys
-    // ------------------------------------------------------------------
-
     private static void testKeyedDigestsAndReplay() throws Exception {
         Path dir = work.resolve("digests");
         Path input = buildProgram(dir, "DIGEST-OK", false);
@@ -292,11 +276,18 @@ public final class SecurityHardeningTest {
         byte[] plainSha = UmbraCrypto.sha256(plain);
         check(!Arrays.equals(plainSha, classEntry.digest),
                 "index class digest is keyed (not a bare SHA-256 of the plaintext)");
-        byte[] keyed = UmbraCrypto.keyedDigest(view.master, "d:c:" + className, plain);
+
+        byte[] payloadKey = UmbraCrypto.entryKey(view.master, "c:" + className,
+                UmbraCrypto.nonceOf(sealed));
+        byte[] restored = plain.clone();
+        check(UmbraClassLoader.cryptConstantPool(restored, payloadKey),
+                "test restores the encrypted constant pool");
+        byte[] keyed = UmbraCrypto.keyedDigest(view.master, "d:c:" + className, restored);
         check(Arrays.equals(keyed, classEntry.digest),
-                "keyed class digest recomputes from the master key");
-        // Replay: re-seal a 1-byte-tampered plaintext with a valid HMAC but keep the
-        // original keyed digest; HMAC passes, the keyed digest must refuse it.
+                "keyed class digest recomputes from the master key over the restored class");
+        check(!Arrays.equals(keyed, UmbraCrypto.keyedDigest(view.master, "d:c:" + className, plain)),
+                "the v5 digest no longer covers the constant-pool-encrypted form");
+
         byte[] tamperedPlain = plain.clone();
         tamperedPlain[tamperedPlain.length / 2] ^= 0x01;
         byte[] nonce = UmbraCrypto.nonceOf(sealed);
@@ -312,25 +303,19 @@ public final class SecurityHardeningTest {
         check(child.output.indexOf("SecurityException") < 0
                         && child.output.indexOf("UmbraClassLoader.java") < 0,
                 "keyed-digest refusal is silent (no stack/source leak)");
-        // Nonce is part of the per-entry KDF: a different nonce yields a different key.
+
         byte[] otherNonce = nonce.clone();
         otherNonce[0] ^= 0x01;
         check(!Arrays.equals(UmbraCrypto.entryKey(view.master, "c:" + className, nonce),
                 UmbraCrypto.entryKey(view.master, "c:" + className, otherNonce)),
                 "per-entry nonce participates in the payload KDF");
 
-        // Loader digest is keyed too: replacing the plaintext loader class bytes must
-        // be detected (the stored loader digest is HMAC(master, "d:loader"||bytes)).
         String loaderName = view.mainClass.replace('.', '/') + ".class";
         byte[] loaderBytes = readZip(encrypted).get(loaderName);
         check(loaderBytes != null, "plaintext loader entry is present");
         check(Arrays.equals(UmbraCrypto.keyedDigest(view.master, "d:loader", loaderBytes),
                 view.loaderDigest), "loader digest is keyed with the master key");
     }
-
-    // ------------------------------------------------------------------
-    // P2-3: malformed index parsing fails safely
-    // ------------------------------------------------------------------
 
     private static void testMalformedIndexFailsSafely() throws Exception {
         Path dir = work.resolve("malformed");
@@ -365,8 +350,6 @@ public final class SecurityHardeningTest {
         Child negativeChild = runJar(java8(), negativePath, null);
         check(negativeChild.exit != 0, "negative index string length fails safely");
 
-        // Unsupported payload algorithm: flags bits 3..4 = 3 (XOR/dead branch) must
-        // be refused instead of silently falling back to ChaCha20.
         byte[] badAlg = view.indexPlain.clone();
         badAlg[5] = (byte) ((badAlg[5] & ~(3 << 3)) | (3 << 3));
         Path badAlgPath = dir.resolve("malformed-alg.jar");
@@ -375,10 +358,6 @@ public final class SecurityHardeningTest {
         Child algChild = runJar(java8(), badAlgPath, null);
         check(algChild.exit != 0, "unsupported payload algorithm id is refused");
     }
-
-    // ------------------------------------------------------------------
-    // Tampered payload
-    // ------------------------------------------------------------------
 
     private static void testTamperedPayloadRejected() throws Exception {
         Path dir = work.resolve("tamper");
@@ -394,10 +373,6 @@ public final class SecurityHardeningTest {
         check(child.exit != 0 && !child.output.contains("TAMPER-OK"),
                 "tampered encrypted payload is rejected");
     }
-
-    // ------------------------------------------------------------------
-    // P1-6: integrity defaults + sampled watchdog
-    // ------------------------------------------------------------------
 
     private static void testIntegrityDefaultsAndWatchdog() throws Exception {
         Path dir = work.resolve("integrity");
@@ -425,10 +400,6 @@ public final class SecurityHardeningTest {
                         + clean.output + ")");
         check(!clean.timedOut, "watchdog is a daemon and never keeps the JVM alive");
     }
-
-    // ------------------------------------------------------------------
-    // P1-4 runtime detection: silent rejection on real agent launches
-    // ------------------------------------------------------------------
 
     private static void testRuntimeDetectionSilent() throws Exception {
         Path dir = work.resolve("runtime");
@@ -458,10 +429,6 @@ public final class SecurityHardeningTest {
                 "heap-dump rejection is silent (output: " + heapDump.output + ")");
     }
 
-    // ------------------------------------------------------------------
-    // Archive reader (test-side implementation of the v3 format + KDF)
-    // ------------------------------------------------------------------
-
     private static final class ArchiveView {
         String comment;
         int entries;
@@ -485,6 +452,8 @@ public final class SecurityHardeningTest {
         static final class ClassEntry {
             String payload;
             byte[] digest;
+            boolean gateFree;
+            boolean ticked;
         }
 
         static final class ResourceEntry {
@@ -521,8 +490,6 @@ public final class SecurityHardeningTest {
                     ? UmbraCrypto.masterFromSeed(view.siteSeed)
                     : UmbraCrypto.masterFromSample(view.siteSeed, commentBytes, view.entries);
 
-            // Locate the sealed index: the first non-class entry whose envelope
-            // authenticates with the master key and carries the "UMB2" magic.
             for (Map.Entry<String, byte[]> entry : entries.entrySet()) {
                 String name = entry.getKey();
                 if (name.endsWith(".class") || name.startsWith("META-INF/")) {
@@ -538,7 +505,7 @@ public final class SecurityHardeningTest {
                         break;
                     }
                 } catch (Throwable notIndex) {
-                    // payload entry
+
                 }
             }
             if (view.indexPlain == null) {
@@ -569,6 +536,12 @@ public final class SecurityHardeningTest {
                 ClassEntry entry = new ClassEntry();
                 entry.payload = readString(buffer);
                 entry.digest = readBytes(buffer, 32);
+                if (view.version >= 6) {
+
+                    int gateFlag = buffer.get() & 0xFF;
+                    entry.gateFree = gateFlag == 1;
+                    entry.ticked = gateFlag == 2;
+                }
                 view.classes.put(name, entry);
                 if (!entries.containsKey(entry.payload)) {
                     throw new IOException("index names a missing class payload: " + entry.payload);
@@ -627,7 +600,7 @@ public final class SecurityHardeningTest {
                         return decoded;
                     }
                 } catch (Throwable notBase64) {
-                    // normal string constant
+
                 }
             }
         }
@@ -656,10 +629,6 @@ public final class SecurityHardeningTest {
         buffer[offset + 2] = (byte) (value >>> 8);
         buffer[offset + 3] = (byte) value;
     }
-
-    // ------------------------------------------------------------------
-    // Build helpers
-    // ------------------------------------------------------------------
 
     private static Path encrypt(Path dir, Path input, String name, Map<String, String> extra)
             throws Exception {
@@ -790,10 +759,6 @@ public final class SecurityHardeningTest {
         check(exit == 0, "test fixture compiles: " + sources[0]);
     }
 
-    // ------------------------------------------------------------------
-    // Process / zip helpers
-    // ------------------------------------------------------------------
-
     private static final class Child {
         int exit;
         String output;
@@ -828,7 +793,7 @@ public final class SecurityHardeningTest {
                         }
                     }
                 } catch (IOException ignored) {
-                    // closed
+
                 }
             }
         }, "security-test-pump");
@@ -905,11 +870,11 @@ public final class SecurityHardeningTest {
                         try {
                             Files.deleteIfExists(p);
                         } catch (IOException ignored) {
-                            // best effort
+
                         }
                     });
         } catch (IOException ignored) {
-            // best effort
+
         }
     }
 

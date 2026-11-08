@@ -92,10 +92,6 @@ public final class StringHardeningTest {
         System.out.println("StringHardeningTest: " + checks + " checks passed");
     }
 
-    // ------------------------------------------------------------------
-    // 1. Random per-class site ids, deterministic per seed
-    // ------------------------------------------------------------------
-
     private static void testSiteIdsRandomizedAndDeterministic(Path demo) throws Exception {
         String[] options = options("string.strength", "3", "string.engine", "chacha20",
                 "string.indy", "false");
@@ -116,9 +112,7 @@ public final class StringHardeningTest {
         long cacheSites = stat(first, "strings.cacheSites");
         check("site-ids: cache is off by default (crypto 3.2)",
                 stat(first, "strings.cache") == 0 && cacheSites == 0);
-        // Field-initialisation and other pre-passes can expose a literal through a
-        // different shape than a plain d()/e() call; the security properties below
-        // (unique random ids, no plaintext, deterministic bytes) are what matter.
+
         int ids = siteIds(first).size();
         check("site-ids: demo exposes a large random id set (" + ids + " ids, "
                 + encrypted + " encrypted)", ids >= 400 && ids <= encrypted);
@@ -131,15 +125,9 @@ public final class StringHardeningTest {
         check("site-ids: at least one sparse class id set",
                 hasSparseClass(first));
 
-        // The decryptor must not carry the old sequential counter signature:
-        // every per-class set is unique inside its own class.
         check("site-ids: ids are unique within each class", uniquePerClass(first));
         System.out.println("StringHardeningTest: site-id sample " + preview(siteIds(first)));
     }
-
-    // ------------------------------------------------------------------
-    // 2. Per-artifact domain salt
-    // ------------------------------------------------------------------
 
     private static void testArtifactSalt(Path demo) throws Exception {
         Run first = protect(demo, SEED, options("string.engine", "chacha20"));
@@ -154,14 +142,13 @@ public final class StringHardeningTest {
                 decryptorSalt(first) != decryptorSalt(otherSeed));
         check("salt: explicit string.siteSalt is embedded",
                 decryptorSalt(explicit) == 1234567890123L);
-        check("salt: payload version is 3", stat(first, "strings.payloadVersion") == 3);
+
+        check("salt: payload version is 4", stat(first, "strings.payloadVersion") == 4);
+        check("salt: native key root is not bound without a native build",
+                stat(first, "strings.nativeKey") == 0);
         verify(first, "salt");
         check("salt: protected demo runs (default cache off)", runsOk(first.jar));
     }
-
-    // ------------------------------------------------------------------
-    // 3. Plaintext cache: off by default, opt-in only
-    // ------------------------------------------------------------------
 
     private static void testCacheDefaultAndOptIn(Path demo) throws Exception {
         Run defaults = protect(demo, SEED, options("string.engine", "chacha20"));
@@ -179,10 +166,6 @@ public final class StringHardeningTest {
         check("cache: opt-in archive verifies", UmbraVerifier.verify(cached.jar).isEmpty());
         check("cache: opt-in demo runs", runsOk(cached.jar));
     }
-
-    // ------------------------------------------------------------------
-    // 4. WIPE / HIDE_TRACE flag semantics
-    // ------------------------------------------------------------------
 
     private static void testWipeAndHideFlags(Path demo) throws Exception {
         Run plain = protect(demo, SEED,
@@ -221,10 +204,6 @@ public final class StringHardeningTest {
         verify(hardened, "flags");
         check("flags: hardened demo runs", runsOk(hardened.jar));
     }
-
-    // ------------------------------------------------------------------
-    // 5. Randomized multi-engine auto selection, unsupported engine fallback
-    // ------------------------------------------------------------------
 
     private static void testMultiEngineAutoAndUnsupported(Path demo) throws Exception {
         String[] allEngines = options("string.strength", "3", "string.engine", "auto",
@@ -265,12 +244,8 @@ public final class StringHardeningTest {
         check("engine-auto: filtered order demo runs", runsOk(badOrder.jar));
     }
 
-    // ------------------------------------------------------------------
-    // 5b. Dual-engine slots chosen by the one-time state (P0-2-c)
-    // ------------------------------------------------------------------
-
     private static void testOtpEngineSlots(Path demo) throws Exception {
-        // Per-site calling convention: the dual descriptor carries the 64-bit seed.
+
         Run dual = protect(demo, SEED, options("string.strength", "3", "string.engine", "auto",
                 "otp.enabled", "true", "string.otpEngines", "true", "string.perClassKey", "false",
                 "string.indy", "false"));
@@ -278,10 +253,7 @@ public final class StringHardeningTest {
         check("otp-slots: dual-ciphertext sites are emitted (" + sites + ")", sites > 0);
         check("otp-slots: distinct engine pairs are recorded (" + stat(dual, "string.otp.engines")
                 + ")", stat(dual, "string.otp.engines") >= 1);
-        // A site emitted into dead code would not survive into the archive (the
-        // former FieldInitializationPass appended moved constants after <clinit>'s
-        // RETURN and ASM replaced that tail with NOPs), so the archive count is
-        // checked against the emitted count instead of just being positive.
+
         int dualSites = dualCallSites(dual);
         check("otp-slots: every emitted dual slot survives in the archive (" + dualSites + " of "
                 + sites + ")", dualSites == (int) sites);
@@ -291,7 +263,6 @@ public final class StringHardeningTest {
         verify(dual, "otp-slots");
         check("otp-slots: dual demo runs", runsOk(dual.jar));
 
-        // Per-class key convention: the other dual descriptor, same runtime path.
         Run perClass = protect(demo, SEED, options("string.strength", "3", "string.engine", "auto",
                 "otp.enabled", "true", "string.otpEngines", "true", "string.perClassKey", "true",
                 "string.indy", "false"));
@@ -301,14 +272,12 @@ public final class StringHardeningTest {
                 dualCallSites(perClass) == (int) perClassSites);
         check("otp-slots: per-class dual demo runs", runsOk(perClass.jar));
 
-        // OTP off: the selector has no source, so the old call shape must come back.
         Run otpOff = protect(demo, SEED, options("string.strength", "3", "string.engine", "auto",
                 "otp.enabled", "false", "string.otpEngines", "true", "string.indy", "false"));
         check("otp-slots: OTP off falls back to single-engine sites",
                 stat(otpOff, "string.otp.sites") == 0 && dualCallSites(otpOff) == 0);
         check("otp-slots: OTP-off fallback demo runs", runsOk(otpOff.jar));
 
-        // Option off: no doubled payload at all.
         Run disabled = protect(demo, SEED, options("string.strength", "3", "string.engine", "auto",
                 "otp.enabled", "true", "string.otpEngines", "false", "string.indy", "false"));
         check("otp-slots: string.otpEngines=false disables dual sites",
@@ -316,7 +285,6 @@ public final class StringHardeningTest {
         verify(disabled, "otp-slots off");
         check("otp-slots: option-off demo runs", runsOk(disabled.jar));
 
-        // invokedynamic sites keep the packed single-engine payload.
         Run indy = protect(demo, SEED, options("string.strength", "3", "string.engine", "auto",
                 "otp.enabled", "true", "string.otpEngines", "true", "string.indy", "true"));
         check("otp-slots: indy sites stay single-engine",
@@ -325,7 +293,6 @@ public final class StringHardeningTest {
         check("otp-slots: indy demo runs", runsOk(indy.jar));
     }
 
-    /** One dual call site lifted out of the produced bytecode. */
     private static final class DualSite {
         String[] parts;
         long seed;
@@ -366,7 +333,6 @@ public final class StringHardeningTest {
         return dualCallSiteNodes(run).size();
     }
 
-    /** Counts dual sites whose selector argument is {@code invokestatic <otp>.carrier()I}. */
     private static int dualSitesWithCarrier(Run run) {
         String otpClass = otpClassOf(run);
         int count = 0;
@@ -378,12 +344,6 @@ public final class StringHardeningTest {
         return count;
     }
 
-    /**
-     * True when the site's selector comes from the injected one-time state. The
-     * carrier call is emitted right before the decrypt call; the flow pass may
-     * insert a stack-neutral junk block in between, so the scan looks through a
-     * small window of real instructions instead of demanding adjacency.
-     */
     private static boolean hasCarrierSelector(AbstractInsnNode call, String otpClass) {
         AbstractInsnNode cursor = previousReal(call);
         for (int window = 0; cursor != null && window < 12; window++) {
@@ -399,11 +359,6 @@ public final class StringHardeningTest {
         return false;
     }
 
-    /**
-     * Previous real instruction: later passes insert labels (exception-table
-     * boundaries, line numbers) between the selector call and the decrypt call,
-     * and those nodes carry no opcode.
-     */
     private static AbstractInsnNode previousReal(AbstractInsnNode insn) {
         AbstractInsnNode cursor = insn.getPrevious();
         while (cursor != null && cursor.getOpcode() < 0) {
@@ -412,7 +367,6 @@ public final class StringHardeningTest {
         return cursor;
     }
 
-    /** The injected one-time state class: static {@code long next()} plus {@code int carrier()}. */
     private static String otpClassOf(Run run) {
         for (ClassNode node : run.classes.values()) {
             boolean next = false;
@@ -434,10 +388,6 @@ public final class StringHardeningTest {
         return "";
     }
 
-    /**
-     * Lifts the first per-site dual call site: parts array, seed, site id, engine
-     * pair and the state class whose {@code carrier()} supplies the selector.
-     */
     private static DualSite firstDualSite(Run run) {
         for (MethodInsnNode call : dualCallSiteNodes(run)) {
             if (!StringEncryptionPass.DUAL_PER_SITE_DESC.equals(call.desc)) {
@@ -490,11 +440,6 @@ public final class StringHardeningTest {
         return null;
     }
 
-    /**
-     * Calls one dual site twice with the selectors the injected state hands out
-     * (its low bit strictly alternates) and checks that the decryptor used a
-     * different engine on the second call while returning the same value.
-     */
     private static boolean engineSwitches(Run run) throws Exception {
         DualSite site = firstDualSite(run);
         if (site == null) {
@@ -537,9 +482,6 @@ public final class StringHardeningTest {
         }
     }
 
-    // ------------------------------------------------------------------
-    // 6. Plaintext leaks and demo runs on JDK 8 / 21
-    // ------------------------------------------------------------------
     private static void testPlaintextAndDemoRuns(Path demo) throws Exception {
         Run hardened = protect(demo, SEED,
                 options("string.strength", "3", "string.engine", "auto",
@@ -549,16 +491,22 @@ public final class StringHardeningTest {
         check("demo: default JDK prints OK", runsOk(hardened.jar));
         verify(hardened, "demo");
         Path jdk21 = Paths.get("C:\\Program Files\\Java\\jdk-21.0.10\\bin\\java.exe");
-        if (Files.isRegularFile(jdk21)) {
+        // A truncated install leaves a zero-byte java.exe behind: it is a regular file
+        // but cannot be executed, so treat it as absent.
+        if (Files.isRegularFile(jdk21) && fileSize(jdk21) > 0L) {
             check("demo: JDK 21 prints OK", runsOk(hardened.jar, jdk21.toString()));
         } else {
-            System.out.println("StringHardeningTest: JDK 21 not found, skipped cross-JDK run");
+            System.out.println("StringHardeningTest: JDK 21 not runnable, skipped cross-JDK run");
         }
     }
 
-    // ------------------------------------------------------------------
-    // Engine harness
-    // ------------------------------------------------------------------
+    private static long fileSize(Path path) {
+        try {
+            return Files.size(path);
+        } catch (java.io.IOException unreadable) {
+            return 0L;
+        }
+    }
 
     private static final class Run {
         Path jar;
@@ -574,7 +522,6 @@ public final class StringHardeningTest {
         void apply(UmbraConfig.Builder builder);
     }
 
-    /** Flow and integer passes rewrite adjacent int constants; disable them for byte-shape checks. */
     private static Tweak byteShapeTweak() {
         return new Tweak() {
             @Override
@@ -597,6 +544,16 @@ public final class StringHardeningTest {
                 .input(input).output(output).seed(seed);
         for (int i = 0; i + 1 < options.length; i += 2) {
             builder.option(options[i], options[i + 1]);
+        }
+
+        boolean stringKeyConfigured = false;
+        for (int i = 0; i + 1 < options.length; i += 2) {
+            if ("string.key".equals(options[i]) || "string.allowKeylessFallback".equals(options[i])) {
+                stringKeyConfigured = true;
+            }
+        }
+        if (!stringKeyConfigured) {
+            builder.option("string.allowKeylessFallback", "true");
         }
         if (tweak != null) {
             tweak.apply(builder);
@@ -661,10 +618,6 @@ public final class StringHardeningTest {
         throw new IllegalStateException("FLAGS_SPEC missing");
     }
 
-    // ------------------------------------------------------------------
-    // Call-site inspection
-    // ------------------------------------------------------------------
-
     private static List<Integer> siteIds(Run run) {
         List<Integer> ids = new ArrayList<Integer>();
         for (ClassNode node : run.classes.values()) {
@@ -690,15 +643,13 @@ public final class StringHardeningTest {
                             && call.desc.endsWith(")Ljava/lang/String;")) {
                         if (StringEncryptionPass.DUAL_PER_SITE_DESC.equals(call.desc)
                                 || StringEncryptionPass.DUAL_PER_CLASS_DESC.equals(call.desc)) {
-                            // Dual shape: parts..., (GETSTATIC key | LDC seed), siteId,
-                            // engineA, engineB, selector; the selector is a call, so the
-                            // nearest three int constants are engineB, engineA, siteId.
+
                             List<Integer> ints = precedingIntConstants(insn, 3);
                             if (ints.size() == 3) {
                                 ids.add(ints.get(2));
                             }
                         } else {
-                            // Exact call shape: parts..., (GETSTATIC key | LDC seed), siteId, engine.
+
                             AbstractInsnNode engineInsn = insn.getPrevious();
                             Integer engine = engineInsn == null ? null : intConstant(engineInsn);
                             AbstractInsnNode siteInsn = engineInsn == null ? null : engineInsn.getPrevious();
@@ -730,7 +681,6 @@ public final class StringHardeningTest {
         return ids;
     }
 
-    /** Collects the last {@code count} integer constants before the instruction, nearest first. */
     private static List<Integer> precedingIntConstants(AbstractInsnNode insn, int count) {
         List<Integer> found = new ArrayList<Integer>();
         AbstractInsnNode cursor = insn.getPrevious();
@@ -838,10 +788,6 @@ public final class StringHardeningTest {
         return out.toString();
     }
 
-    // ------------------------------------------------------------------
-    // Reflection on the injected decryptor
-    // ------------------------------------------------------------------
-
     private static Throwable callDecryptorPerClass(Run run, String[] parts, String classKey,
                                                    int siteId, int engine) throws Exception {
         URLClassLoader loader = new URLClassLoader(new URL[] { run.jar.toUri().toURL() },
@@ -878,10 +824,6 @@ public final class StringHardeningTest {
             loader.close();
         }
     }
-
-    // ------------------------------------------------------------------
-    // Archive helpers
-    // ------------------------------------------------------------------
 
     private static void readClasses(Path jar, Map<String, ClassNode> target) throws Exception {
         try (ZipInputStream zip = new ZipInputStream(new FileInputStream(jar.toFile()))) {
@@ -1020,10 +962,6 @@ public final class StringHardeningTest {
     private static String[] options(String... pairs) {
         return pairs;
     }
-
-    // ------------------------------------------------------------------
-    // Environment
-    // ------------------------------------------------------------------
 
     private static Path demoJar() {
         Path candidate = Paths.get(System.getProperty("user.dir")).toAbsolutePath();

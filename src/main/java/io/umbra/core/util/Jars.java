@@ -60,35 +60,23 @@ import java.util.zip.ZipOutputStream;
  */
 public final class Jars {
 
-    private static final long FIXED_TIME = 315532800000L; // 1980-01-01, minimum valid ZIP time
+    private static final long FIXED_TIME = 315532800000L;
     private static final String VERSIONS_PREFIX = "META-INF/versions/";
     private static final String MANIFEST_ENTRY = "META-INF/MANIFEST.MF";
 
     private Jars() {
     }
 
-    // ------------------------------------------------------------------
-    // Reading
-    // ------------------------------------------------------------------
-
-    /** Reads a JAR into the pool using the default layout options. */
     public static void read(Path input, ClassPool pool, Log log) throws IOException {
         readInternal(input, pool, log, LayoutOptions.defaults(), null);
     }
 
-    /**
-     * Reads a JAR into the pool.
-     *
-     * @return the detected layout, also attached to the pool through
-     *         {@link LayoutRegistry}
-     */
     public static JarLayout read(Path input, ClassPool pool, Log log, LayoutOptions options)
             throws IOException {
         return readInternal(input, pool, log,
                 options == null ? LayoutOptions.defaults() : options, null);
     }
 
-    /** Reads a JAR into the pool, parsing layout options from the advanced option map. */
     public static JarLayout read(Path input, ClassPool pool, Log log, Map<String, String> options)
             throws IOException {
         LayoutOptions parsed = LayoutOptions.from(options);
@@ -152,7 +140,7 @@ public final class Jars {
                     continue;
                 }
                 if ("META-INF/INDEX.LIST".equalsIgnoreCase(name)) {
-                    // JarIndex is stale after renaming; dropping it is safe.
+
                     continue;
                 }
                 if (upper.startsWith("META-INF/VERSIONS/")) {
@@ -217,8 +205,6 @@ public final class Jars {
             }
         }
 
-        // Flatten mode: promote versioned-only classes to base paths, preferring
-        // the highest version; base classes always win.
         int promoted = 0;
         if (!flattened.isEmpty()) {
             Collections.sort(flattened, new Comparator<FlattenedClass>() {
@@ -239,7 +225,7 @@ public final class Jars {
                     pool.putClass(source, candidate.bytes, node);
                     promoted++;
                 } catch (RuntimeException ignored) {
-                    // Cannot define this versioned copy; skip it.
+
                 }
             }
         }
@@ -308,8 +294,7 @@ public final class Jars {
             return false;
         }
         if (layout.isFlat()) {
-            // Legacy behaviour: everything outside META-INF that parses as a
-            // class is transformable; META-INF hosts resources and module-info.
+
             return !name.startsWith("META-INF/");
         }
         return name.startsWith(layout.classPrefix());
@@ -328,7 +313,6 @@ public final class Jars {
         }
     }
 
-    /** Entry name relative to the layout class root (used for logical resource paths). */
     static String logicalName(String entryName, JarLayout layout) {
         String prefix = layout.classPrefix();
         if (prefix.length() > 0 && entryName.startsWith(prefix)) {
@@ -342,7 +326,7 @@ public final class Jars {
                                                       List<FlattenedClass> flattened,
                                                       LayoutContext context, Log log) {
         if (!name.toLowerCase(Locale.ROOT).endsWith(".class")) {
-            // Versioned resources cannot survive flattening.
+
             return;
         }
         String relative = name.substring(VERSIONS_PREFIX.length());
@@ -456,18 +440,12 @@ public final class Jars {
         return out.toByteArray();
     }
 
-    // ------------------------------------------------------------------
-    // Writing
-    // ------------------------------------------------------------------
-
-    /** Writes the pool to a JAR with the layout detected at read time. */
     public static void write(Path output, ClassPool pool, Hierarchy hierarchy,
                              boolean preserveTimestamps, Log log) throws IOException {
         writeInternal(output, pool, hierarchy, preserveTimestamps, log, null,
                 null, null, null);
     }
 
-    /** Writes the pool with explicit layout options and naming mapping. */
     public static LayoutReport write(Path output, ClassPool pool, Hierarchy hierarchy,
                                      boolean preserveTimestamps, Log log, LayoutOptions options,
                                      Map<String, String> classMap, Map<String, String> methodMap,
@@ -477,7 +455,6 @@ public final class Jars {
                 classMap, methodMap, fieldMap);
     }
 
-    /** Writes the pool with layout options parsed from the advanced option map. */
     public static LayoutReport write(Path output, ClassPool pool, Hierarchy hierarchy,
                                      boolean preserveTimestamps, Log log, Map<String, String> options,
                                      Map<String, String> classMap, Map<String, String> methodMap,
@@ -525,9 +502,6 @@ public final class Jars {
         List<PlannedEntry> versionEntries = planVersionedClasses(pool, rename, context,
                 preserveTimestamps, log);
 
-        // Write to a sibling temp file and publish atomically: a failure while
-        // serializing (I/O error, disk full, unwritable target) must never
-        // leave a truncated archive in place of the previous output.
         Path temp = absoluteOutput.resolveSibling(absoluteOutput.getFileName().toString() + ".umbra-tmp");
         boolean published = false;
         try {
@@ -558,7 +532,7 @@ public final class Jars {
                 try {
                     Files.deleteIfExists(temp);
                 } catch (IOException ignored) {
-                    // Best-effort cleanup of the temporary archive.
+
                 }
             }
         }
@@ -593,14 +567,7 @@ public final class Jars {
             if (node == null) {
                 continue;
             }
-            // Classes keep their original entry prefix. Pass-injected runtime
-            // helpers have an empty prefix and therefore stay at the archive
-            // root: container launchers put the archive itself on the system
-            // class path (executable JAR/WAR), container class loaders delegate
-            // to the parent loader, and archive post-processors plus the
-            // integrity guard resolve helper entries by their root name.
-            // External servlet-container deployment of a WAR cannot load
-            // root-level helpers (documented limitation).
+
             String prefix = pool.entryPrefix(className);
             String entryName = prefix + node.name + ".class";
             byte[] bytes = pool.rawOutput(className);
@@ -608,8 +575,7 @@ public final class Jars {
                 try {
                     bytes = UmbraClassWriter.toBytes(node, hierarchy);
                 } catch (RuntimeException failure) {
-                    // Writing original bytes of a renamed class would produce a
-                    // jar whose references no longer match. Fail loudly.
+
                     throw new IOException("Failed to serialize " + className + ": "
                             + failure.getMessage(), failure);
                 }
@@ -653,12 +619,7 @@ public final class Jars {
             }
             if (bytes != null
                     && context.options().moduleInfo() != LayoutOptions.ModuleInfoMode.KEEP) {
-                // Runtime helpers injected at the archive root (umbra/runtime)
-                // introduce a package that the original descriptor never listed.
-                // A named module must include every package it contains in
-                // ModulePackages, otherwise the module loader refuses those
-                // classes (java --module-path ... -m module). "keep" mode is a
-                // byte-stable escape hatch and therefore not adjusted.
+
                 bytes = withModulePackages(bytes, modulePackages);
             }
             context.addModuleInfoKept(1);
@@ -672,7 +633,6 @@ public final class Jars {
         return entries;
     }
 
-    /** Packages of all classes that will be written into the archive. */
     private static Set<String> modulePackages(ClassPool pool) {
         Set<String> packages = new java.util.TreeSet<String>();
         for (String className : pool.classes().keySet()) {
@@ -684,7 +644,6 @@ public final class Jars {
         return packages;
     }
 
-    /** Adds every output package to the module descriptor's ModulePackages set. */
     private static byte[] withModulePackages(byte[] moduleBytes, Set<String> packages) {
         try {
             ClassReader reader = new ClassReader(moduleBytes);
@@ -717,7 +676,7 @@ public final class Jars {
                                                     boolean versionedEntries, Log log) {
         List<String> resourceNames = new ArrayList<String>(pool.resources().keySet());
         Collections.sort(resourceNames);
-        // Write the manifest first for tooling compatibility.
+
         String manifestName = null;
         for (String name : resourceNames) {
             if (MANIFEST_ENTRY.equalsIgnoreCase(name)) {
@@ -743,7 +702,7 @@ public final class Jars {
                 continue;
             }
             if (isModuleInfoEntry(name, layout) && !name.startsWith(VERSIONS_PREFIX)) {
-                continue; // handled by planModuleInfo
+                continue;
             }
             byte[] bytes = resource.bytes();
             long time = preserveTimestamps ? resource.time() : FIXED_TIME;
@@ -789,14 +748,6 @@ public final class Jars {
         return entries;
     }
 
-    /**
-     * Installs a pass-provided entry point into the manifest for flat archives.
-     *
-     * <p>Anti-debug/class-encryption style passes register a launcher class and
-     * point {@code pool.mainClass()} at it. That only works for flat archives:
-     * nested layouts are booted by their container loader, so the original
-     * {@code Main-Class} is kept and a warning is recorded instead.</p>
-     */
     private static byte[] applyEntryPointFallback(byte[] manifestBytes, ClassPool pool,
                                                   JarLayout layout, LayoutContext context, Log log) {
         if (pool.mainClass() == null || pool.mainClass().isEmpty()) {
@@ -900,15 +851,6 @@ public final class Jars {
         return writer.toByteArray();
     }
 
-    /**
-     * Writes one planned entry, preserving its ZIP compression method.
-     *
-     * <p>{@code STORED} entries (notably nested JARs in Spring Boot
-     * {@code BOOT-INF/lib/} and some framework resources) must stay stored:
-     * recompressing them makes the nested archive unreadable through
-     * {@code JarFile} and breaks the container loader. Stored entries need size
-     * and CRC supplied up front.</p>
-     */
     private static void writeEntry(ZipOutputStream zos, PlannedEntry entry, Set<String> directories)
             throws IOException {
         ensureDirectories(zos, entry.name, directories, entry.time);
@@ -944,11 +886,6 @@ public final class Jars {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Manifest helpers (kept for compatibility with existing callers)
-    // ------------------------------------------------------------------
-
-    /** Removes {@code Multi-Release} from a manifest (flattened output). */
     private static byte[] stripMultiReleaseAttribute(byte[] manifestBytes) {
         Map<String, String> attributes = parseManifest(manifestBytes);
         boolean changed = false;
@@ -962,10 +899,6 @@ public final class Jars {
         return changed ? writeManifest(attributes) : null;
     }
 
-    /**
-     * Removes signature metadata from a manifest. Returns {@code null} when the
-     * manifest carried no signature data (callers keep the original bytes).
-     */
     private static byte[] stripSignatureAttributes(byte[] manifestBytes) {
         Map<String, String> attributes = parseManifest(manifestBytes);
         boolean changed = false;
@@ -993,14 +926,6 @@ public final class Jars {
                 || upperName.endsWith(".EC") || upperName.endsWith(".SIG");
     }
 
-    /**
-     * Removes a UTF-8 byte-order mark before the first manifest header.
-     *
-     * <p>The JAR manifest format has no BOM; a BOM makes
-     * {@code java.util.jar.Manifest} (and therefore JarFile/URLClassLoader)
-     * reject the whole manifest, so tools either ignore the first attribute or
-     * refuse the archive. Stripping it keeps the archive consumable.</p>
-     */
     private static byte[] stripUtf8Bom(byte[] bytes) {
         if (bytes == null || bytes.length < 3) {
             return bytes;
@@ -1013,13 +938,11 @@ public final class Jars {
         return bytes;
     }
 
-    /** Parses the {@code Main-Class} manifest attribute (continuation lines included). */
     public static String parseMainClass(byte[] manifest) {
         Map<String, String> attributes = parseManifest(manifest);
         return attributes.get("Main-Class");
     }
 
-    /** Parses a manifest into case-sensitive attribute names. */
     public static Map<String, String> parseManifest(byte[] manifest) {
         Map<String, String> attributes = new LinkedHashMap<String, String>();
         String text = new String(manifest, StandardCharsets.UTF_8);
@@ -1058,7 +981,6 @@ public final class Jars {
         return attributes;
     }
 
-    /** Serializes manifest attributes with proper 72-byte line wrapping. */
     public static byte[] writeManifest(Map<String, String> attributes) {
         java.util.jar.Manifest manifest = new java.util.jar.Manifest();
         if (!attributes.containsKey("Manifest-Version")) {
@@ -1076,15 +998,11 @@ public final class Jars {
         return out.toByteArray();
     }
 
-    // ------------------------------------------------------------------
-    // Small value types
-    // ------------------------------------------------------------------
-
     private static final class PlannedEntry {
         final String name;
         final byte[] bytes;
         final long time;
-        /** Original ZIP compression method ({@code Stored}/{@code Deflated}); -1 for the default. */
+
         final int method;
 
         PlannedEntry(String name, byte[] bytes, long time, int method) {

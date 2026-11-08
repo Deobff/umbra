@@ -32,7 +32,6 @@ public final class IncrementalCache {
     private IncrementalCache() {
     }
 
-    /** Loads a reuse plan, or {@code null} when incremental reuse is not possible. */
     public static Plan load(UmbraConfig config, Map<String, String> inputHashes, Log log) throws IOException {
         UmbraConfig.IncrementalOptions options = config.incremental();
         if (!options.enabled()) {
@@ -107,7 +106,6 @@ public final class IncrementalCache {
         return new Plan(entries);
     }
 
-    /** Writes metadata for the next incremental run. */
     public static void write(UmbraConfig config, Map<String, String> inputHashes,
                              MappingSet mappings, Log log) throws IOException {
         if (!config.incremental().enabled()) {
@@ -128,7 +126,6 @@ public final class IncrementalCache {
         log.info("incremental: metadata written to %s", metadata);
     }
 
-    /** SHA-256 hex digest of class bytes. */
     public static String hash(byte[] bytes) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
@@ -162,7 +159,6 @@ public final class IncrementalCache {
         return out.toByteArray();
     }
 
-    /** Reuse plan for one run. */
     public static final class Plan {
         private final Map<String, Entry> entries;
 
@@ -170,7 +166,6 @@ public final class IncrementalCache {
             this.entries = entries;
         }
 
-        /** Applies reusable bytes to the pool, tracking statistics. */
         public void apply(ClassPool pool, MappingSet mappings, Stats stats) {
             int reused = 0;
             for (Map.Entry<String, Entry> e : entries.entrySet()) {

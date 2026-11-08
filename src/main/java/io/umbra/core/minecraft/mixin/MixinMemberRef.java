@@ -20,7 +20,6 @@ public final class MixinMemberRef {
         this.desc = desc;
     }
 
-    /** Explicit target owner (internal name) or {@code null}. */
     public String owner() {
         return owner;
     }
@@ -29,7 +28,6 @@ public final class MixinMemberRef {
         return name;
     }
 
-    /** Explicit descriptor or {@code null}. */
     public String desc() {
         return desc;
     }

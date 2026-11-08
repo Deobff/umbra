@@ -29,7 +29,6 @@ public final class Hierarchy {
 
     private final Map<String, ClassInfo> infos = new LinkedHashMap<String, ClassInfo>();
 
-    /** Registers an input class. */
     public ClassInfo addInput(ClassNode node) {
         ClassInfo info = new ClassInfo(node.name, node.superName, node.interfaces.toArray(new String[0]),
                 node.access, ClassInfo.Source.INPUT, node.version);
@@ -38,7 +37,6 @@ public final class Hierarchy {
         return info;
     }
 
-    /** Registers a library class from raw bytes. */
     public ClassInfo addLibrary(byte[] bytes) {
         ClassReader reader = new ClassReader(bytes);
         ClassNode node = new ClassNode();
@@ -50,7 +48,6 @@ public final class Hierarchy {
         return info;
     }
 
-    /** Loads all class entries from a jar/zip/jmod. */
     public void addLibraryJar(Path path) throws IOException {
         try (ZipFile zip = new ZipFile(path.toFile())) {
             java.util.Enumeration<? extends ZipEntry> entries = zip.entries();
@@ -64,14 +61,13 @@ public final class Hierarchy {
                     try {
                         addLibrary(bytes);
                     } catch (RuntimeException ignored) {
-                        // Malformed or unsupported class file: ignore library entry.
+
                     }
                 }
             }
         }
     }
 
-    /** Returns hierarchy information, loading JDK classes on demand. */
     public ClassInfo resolve(String name) {
         ClassInfo info = infos.get(name);
         if (info != null) {
@@ -95,7 +91,6 @@ public final class Hierarchy {
         return info != null && info.source() != ClassInfo.Source.UNKNOWN;
     }
 
-    /** True when {@code a} is {@code b}, a superclass of {@code b}, or an interface of {@code b}. */
     public boolean isAssignableFrom(String a, String b) {
         if (a.equals(b)) {
             return true;
@@ -122,7 +117,6 @@ public final class Hierarchy {
         return false;
     }
 
-    /** ASM-compatible common-superclass computation. */
     public String getCommonSuperClass(String a, String b) {
         if (a.equals(b)) {
             return a;
@@ -147,20 +141,10 @@ public final class Hierarchy {
         return "java/lang/Object";
     }
 
-    /**
-     * Resolves a method declaration starting at {@code owner}.
-     *
-     * @return declaring class info, or {@code null} when it cannot be resolved
-     */
     public ClassInfo resolveMethod(String owner, String name, String desc) {
         return resolveMember(owner, name + desc, true, new HashSet<String>());
     }
 
-    /**
-     * Resolves a field declaration starting at {@code owner}.
-     *
-     * @return declaring class info, or {@code null} when it cannot be resolved
-     */
     public ClassInfo resolveField(String owner, String name, String desc) {
         return resolveMember(owner, name + ":" + desc, false, new HashSet<String>());
     }
@@ -226,7 +210,6 @@ public final class Hierarchy {
         return out.toByteArray();
     }
 
-    /** Snapshot of all known input class names, in insertion order. */
     public List<String> inputClassNames() {
         List<String> out = new ArrayList<String>();
         for (Map.Entry<String, ClassInfo> e : infos.entrySet()) {
@@ -237,7 +220,6 @@ public final class Hierarchy {
         return out;
     }
 
-    /** Test/debug helper. */
     public Map<String, ClassInfo> snapshot() {
         return new HashMap<String, ClassInfo>(infos);
     }

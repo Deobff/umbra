@@ -30,16 +30,11 @@ import io.umbra.core.util.RuntimeNames;
  */
 public final class CryptoSupport {
 
-    /** Internal name of the compile-time crypto template. */
     private static final String CRYPTO_TEMPLATE = "io/umbra/core/runtime/crypto/UmbraCrypto";
 
     private CryptoSupport() {
     }
 
-    /**
-     * Ensures the shared {@link UmbraCrypto} template exists in the pool and
-     * returns its injected internal name.
-     */
     public static synchronized String ensureCrypto(ClassPool pool, long seed) {
         Random random = new Random(seed ^ 0x5EEDC0DEL);
         NameGenerator names = new NameGenerator(random, "u");
@@ -57,26 +52,11 @@ public final class CryptoSupport {
         throw new IllegalStateException("Unable to allocate a name for the crypto helper");
     }
 
-    /**
-     * Injects {@code template} under {@code targetName}, remapping its own
-     * references and its calls to {@link UmbraCrypto}.
-     *
-     * @param pool          program pool
-     * @param template      compiled template class
-     * @param targetName    internal name of the injected class
-     * @param cryptoName    injected internal name of the crypto helper
-     * @param replacements  exact string-constant replacements (may be null)
-     */
     public static void injectWithCrypto(ClassPool pool, Class<?> template, String targetName,
                                         String cryptoName, Map<String, String> replacements) {
         injectWithCrypto(pool, template, targetName, cryptoName, replacements, null);
     }
 
-    /**
-     * Same as {@link #injectWithCrypto(ClassPool, Class, String, String, Map)}
-     * with additional type-reference remappings (for example wiring a guard to
-     * a separately injected watchdog class).
-     */
     public static void injectWithCrypto(ClassPool pool, Class<?> template, String targetName,
                                         String cryptoName, Map<String, String> replacements,
                                         Map<String, String> extraRemap) {
@@ -94,9 +74,7 @@ public final class CryptoSupport {
         remapped.name = targetName;
         remapped.access |= Opcodes.ACC_SYNTHETIC;
         remapped.version = Math.min(remapped.version, Opcodes.V1_8);
-        // Per-build domain separators must reach every injected template, or the
-        // runtime would derive keys from the literal labels while the build side uses
-        // the randomized ones (see DomainTags).
+
         Map<String, String> constants = DomainTags.replacements();
         if (replacements != null) {
             constants.putAll(replacements);
@@ -108,16 +86,6 @@ public final class CryptoSupport {
         pool.addGenerated(remapped);
     }
 
-    /**
-     * Deterministically chooses an unused internal name for an injected
-     * template.
-     *
-     * @param pool     program pool
-     * @param seed     run seed
-     * @param salt     distinguishes templates
-     * @param prefix   internal-name prefix, interpreted as a package path
-     *                 relative to the root when it contains no {@code /}
-     */
     public static String randomName(ClassPool pool, long seed, String salt, String prefix) {
         Random random = new Random(seed ^ salt.hashCode() * 0x9E3779B97F4A7C15L);
         NameGenerator names = new NameGenerator(random, "");
@@ -130,7 +98,6 @@ public final class CryptoSupport {
         throw new IllegalStateException("Unable to allocate an injected class name for " + salt);
     }
 
-    /** Replaces exact string constants in LDC instructions and ConstantValue attributes. */
     public static int replaceConstants(ClassNode node, Map<String, String> replacements) {
         if (replacements == null || replacements.isEmpty()) {
             return 0;

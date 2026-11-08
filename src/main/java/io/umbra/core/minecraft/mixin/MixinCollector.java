@@ -22,35 +22,24 @@ public final class MixinCollector {
     private final TreeSet<String> bodySkipGlobs = new TreeSet<String>();
     private final TreeSet<String> notes = new TreeSet<String>();
 
-    /** Records a class carrying {@code @Mixin}. */
     public void addMixin(String internalName) {
         if (internalName != null && !internalName.isEmpty()) {
             mixinClasses.add(internalName);
         }
     }
 
-    /** Records a class referenced as a {@code @Mixin} target. */
     public void addTarget(String internalName) {
         if (internalName != null && !internalName.isEmpty()) {
             targetClasses.add(internalName);
         }
     }
 
-    /**
-     * Adds a keep rule for a whole class. The internal name is an exact
-     * (wildcard-free) Ant glob, so only that class is preserved.
-     */
     public void keepClass(String internalName) {
         if (internalName != null && !internalName.isEmpty()) {
             keepRules.add(internalName);
         }
     }
 
-    /**
-     * Adds a member keep rule. {@code owner} is the internal class name,
-     * {@code desc} may be {@code null} to keep every descriptor of
-     * {@code name}.
-     */
     public void keepMember(String owner, String name, String desc) {
         if (owner == null || owner.isEmpty() || name == null || name.isEmpty()) {
             return;
@@ -63,21 +52,18 @@ public final class MixinCollector {
         keepRules.add(rule.toString());
     }
 
-    /** Exempts a class from method-body rewriting. */
     public void bodySkip(String internalName) {
         if (internalName != null && !internalName.isEmpty()) {
             bodySkipGlobs.add(internalName);
         }
     }
 
-    /** Adds a short diagnostic note; duplicates collapse. */
     public void note(String note) {
         if (note != null && !note.isEmpty()) {
             notes.add(note);
         }
     }
 
-    /** True when nothing was found, so {@link MixinAnalysis#EMPTY} can be reused. */
     public boolean isEmpty() {
         return mixinClasses.isEmpty() && targetClasses.isEmpty()
                 && keepRules.isEmpty() && bodySkipGlobs.isEmpty() && notes.isEmpty();

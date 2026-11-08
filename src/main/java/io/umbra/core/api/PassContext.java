@@ -54,6 +54,38 @@ public final class PassContext {
     public Random random() { return random; }
     public ProgressListener progress() { return progress; }
 
-    /** Post-write archive processors registered by passes (mutable, order of registration). */
     public List<OutputPostProcessor> postProcessors() { return postProcessors; }
+
+    private final java.util.Map<String, byte[]> secrets =
+            new java.util.LinkedHashMap<String, byte[]>();
+
+    public static final String NATIVE_KEY_ROOT = "native.keyRoot";
+
+    public void putSecret(String name, byte[] value) {
+        if (name != null && value != null) {
+            secrets.put(name, value.clone());
+        }
+    }
+
+    public byte[] secret(String name) {
+        byte[] value = secrets.get(name);
+        return value == null ? null : value.clone();
+    }
+
+    public boolean hasSecret(String name) {
+        return secrets.containsKey(name);
+    }
+
+    public byte[] keyRoot() {
+        byte[] existing = secret(NATIVE_KEY_ROOT);
+        if (existing != null) {
+            return existing;
+        }
+        byte[] root = new byte[32];
+        new java.security.SecureRandom().nextBytes(root);
+        putSecret(NATIVE_KEY_ROOT, root);
+        byte[] copy = root.clone();
+        java.util.Arrays.fill(root, (byte) 0);
+        return copy;
+    }
 }

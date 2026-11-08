@@ -71,17 +71,6 @@ public final class FieldInitializationPass implements Pass {
         context.log().info("field-initialization: moved %d static constants into <clinit>", moved);
     }
 
-    /**
-     * Inserts the moved assignments before the terminal {@code RETURN} of the
-     * class initializer.
-     *
-     * <p>Appending them to the instruction list (the previous behaviour) put every
-     * assignment behind that return, i.e. into dead code: the JVM never executed
-     * them, so the field kept its default value instead of the original constant
-     * while the {@code ConstantValue} attribute had already been removed. Classes
-     * that had no initializer at all were hit hardest, because the pass creates one
-     * that is nothing but a {@code RETURN}.</p>
-     */
     private static void install(ClassNode node, InsnList pending) {
         MethodNode clinit = findClinit(node);
         if (clinit == null) {
@@ -97,7 +86,7 @@ public final class FieldInitializationPass implements Pass {
             clinit.instructions.add(pending);
             clinit.instructions.add(new InsnNode(Opcodes.RETURN));
         }
-        // Moved constants can be long/double values (2 stack slots).
+
         clinit.maxStack = Math.max(clinit.maxStack, 2);
     }
 

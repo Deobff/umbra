@@ -17,23 +17,16 @@ import java.util.List;
  */
 public final class MixinAnnotations {
 
-    /** References a target class annotated on the mixin class. */
     public static final String MIXIN = "Lorg/spongepowered/asm/mixin/Mixin;";
-    /** Marks a mixin member that shadows a target member. */
+
     public static final String SHADOW = "Lorg/spongepowered/asm/mixin/Shadow;";
-    /** Replaces a target method with the annotated mixin method. */
+
     public static final String OVERWRITE = "Lorg/spongepowered/asm/mixin/Overwrite;";
-    /** Generated field getter/setter; the value names the target field. */
+
     public static final String ACCESSOR = "Lorg/spongepowered/asm/mixin/gen/Accessor;";
-    /** Generated proxy method; the value names the target method. */
+
     public static final String INVOKER = "Lorg/spongepowered/asm/mixin/gen/Invoker;";
 
-    /**
-     * Injection annotations whose {@code method} element references a target
-     * member. The MixinExtras annotations are listed under their own package and
-     * (defensively) under the Mixin package as well; comparing descriptors is
-     * free, so an extra entry only makes the scan more forgiving.
-     */
     public static final String[] INJECTIONS = {
             "Lorg/spongepowered/asm/mixin/injection/Inject;",
             "Lorg/spongepowered/asm/mixin/injection/Redirect;",
@@ -56,7 +49,6 @@ public final class MixinAnnotations {
     private MixinAnnotations() {
     }
 
-    /** Finds an annotation by descriptor in the visible or invisible list. */
     public static AnnotationNode find(List<AnnotationNode> visible, List<AnnotationNode> invisible,
                                       String desc) {
         AnnotationNode found = findIn(visible, desc);
@@ -80,7 +72,6 @@ public final class MixinAnnotations {
         return null;
     }
 
-    /** Returns the raw value of an annotation element, or {@code null}. */
     public static Object value(AnnotationNode annotation, String key) {
         if (annotation == null || annotation.values == null || key == null) {
             return null;
@@ -95,10 +86,6 @@ public final class MixinAnnotations {
         return null;
     }
 
-    /**
-     * Reads a class-valued annotation element ({@code Type[]} for {@code @Mixin}
-     * {@code value}) and returns internal names.
-     */
     public static List<String> classNames(AnnotationNode annotation, String key,
                                           MixinCollector collector, String where) {
         List<String> out = new ArrayList<String>();
@@ -145,11 +132,6 @@ public final class MixinAnnotations {
                 + raw.getClass().getSimpleName() + " in " + where);
     }
 
-    /**
-     * Reads a string-valued annotation element. Handles a single string, an
-     * array ({@code List} in the ASM tree) and nested arrays; empty entries are
-     * dropped.
-     */
     public static List<String> strings(AnnotationNode annotation, String key) {
         List<String> out = new ArrayList<String>();
         collectStrings(value(annotation, key), out);
@@ -188,12 +170,6 @@ public final class MixinAnnotations {
         return name != null && !name.isEmpty() ? name : null;
     }
 
-    /**
-     * Normalizes a class name from an annotation into an internal name.
-     * Accepts binary names ({@code net.minecraft.Foo}), internal names
-     * ({@code net/minecraft/Foo}), descriptors ({@code Lnet/minecraft/Foo;}) and
-     * array descriptors ({@code [Lnet/minecraft/Foo;}).
-     */
     public static String normalizeClassName(String raw) {
         if (raw == null) {
             return null;

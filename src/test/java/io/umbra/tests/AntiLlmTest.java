@@ -103,8 +103,7 @@ public final class AntiLlmTest {
             }
         }
         check(referenced > 0, "at least one decoy is referenced from program code");
-        // The static initializer anchors a reference even when the ordinary call
-        // sites are later moved into a VM payload by virtualization.
+
         MethodNode clinit = findMethod(node, "<clinit>");
         check(clinit != null, "class has a static initializer");
         boolean anchored = false;
@@ -137,8 +136,7 @@ public final class AntiLlmTest {
 
     private static void testCallSitePredicateIsRuntimeOnly() throws Exception {
         ClassNode node = runPass();
-        // No constant in the class may make the guard foldable: the seed has to come
-        // from a runtime-only source.
+
         boolean nanoTime = false;
         for (MethodNode method : node.methods) {
             if (method.instructions == null) {
@@ -155,7 +153,7 @@ public final class AntiLlmTest {
             }
         }
         check(nanoTime, "guard seed is derived from System.nanoTime");
-        // The seed must branch on a field load, not on a compiler constant.
+
         MethodNode clinit = findMethod(node, "<clinit>");
         boolean loadsSeed = false;
         for (AbstractInsnNode insn = clinit.instructions.getFirst(); insn != null;
@@ -214,7 +212,6 @@ public final class AntiLlmTest {
         return false;
     }
 
-    /** Builds one probe class, runs the pass on it and returns it. */
     private static ClassNode runPass() throws Exception {
         ClassNode node = new ClassNode();
         node.version = Opcodes.V1_8;
@@ -232,7 +229,6 @@ public final class AntiLlmTest {
         clinit.maxLocals = 0;
         node.methods.add(clinit);
 
-        // Two ordinary methods with a literal so the decoys reuse program constants.
         for (int i = 0; i < 2; i++) {
             MethodNode method = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
                     "work" + i, "(Ljava/lang/String;)I", null, null);
@@ -271,8 +267,7 @@ public final class AntiLlmTest {
     private static List<MethodNode> decoysOf(ClassNode node) {
         List<MethodNode> decoys = new ArrayList<MethodNode>();
         for (MethodNode method : node.methods) {
-            // Decoys are private unless a cross-class call site references them;
-            // those are promoted to package access so the call site links.
+
             if ((method.access & Opcodes.ACC_STATIC) == 0
                     || (method.access & (Opcodes.ACC_PUBLIC | Opcodes.ACC_PROTECTED)) != 0) {
                 continue;

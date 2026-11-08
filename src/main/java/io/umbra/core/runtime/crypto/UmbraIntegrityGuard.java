@@ -44,7 +44,6 @@ import java.util.jar.JarFile;
  */
 public final class UmbraIntegrityGuard {
 
-    // Substituted at injection time.
     private static final String DIGEST_ENTRY = "@@DIGEST@@";
     private static final String KEY_PART_0 = "@@P0@@";
     private static final String KEY_PART_1 = "@@P1@@";
@@ -57,6 +56,10 @@ public final class UmbraIntegrityGuard {
     private static final String WATCHDOG = "@@WATCHDOG@@";
     private static final String RUNTIME_GUARD = "@@RUNTIMEGUARD@@";
 
+    private static final String NATIVE_LOADER = "@@NATIVE@@";
+
+    private static final String NATIVE_BOUND_TEXT = "@@NATIVEBOUND@@";
+
     private static final int MAGIC = 0x554D4932;
     private static final int DEFAULT_LEVEL = 1;
 
@@ -66,7 +69,6 @@ public final class UmbraIntegrityGuard {
     private UmbraIntegrityGuard() {
     }
 
-    /** Called at the start of every program entry point. */
     public static void check() {
         if (checked) {
             return;
@@ -83,12 +85,10 @@ public final class UmbraIntegrityGuard {
         } catch (SecurityException failure) {
             throw failure;
         } catch (Throwable ignored) {
-            // Unknown environment (no management API, custom loader, ...):
-            // never break a legitimate run.
+
         }
     }
 
-    /** Re-verification entry point used by the background watchdog. */
     public static void watch() {
         runRuntimeGuard();
         try {
@@ -96,16 +96,10 @@ public final class UmbraIntegrityGuard {
         } catch (SecurityException failure) {
             throw failure;
         } catch (Throwable ignored) {
-            // See check().
+
         }
     }
 
-    /**
-     * Reuses the injected unified runtime guard (placeholder {@code @@RUNTIMEGUARD@@}):
-     * the integrity pass and the anti-debug pass share one detector, so an
-     * instrumented process is refused before the archive digests are trusted.
-     * An absent/old guard class is ignored instead of breaking a legitimate run.
-     */
     private static void runRuntimeGuard() {
         if (RUNTIME_GUARD == null || RUNTIME_GUARD.isEmpty()
                 || RUNTIME_GUARD.charAt(0) == '@') {
@@ -128,13 +122,9 @@ public final class UmbraIntegrityGuard {
                 throw (RuntimeException) cause;
             }
         } catch (Throwable unavailable) {
-            // The guard is best effort; the digest checks still run.
+
         }
     }
-
-    // ------------------------------------------------------------------
-    // Verification
-    // ------------------------------------------------------------------
 
     private static void verify() throws Exception {
         URL location = locateOwnArchive();
@@ -159,8 +149,7 @@ public final class UmbraIntegrityGuard {
             if (sealed == null) {
                 fail("Integrity manifest is missing");
             }
-            byte[] master = UmbraCrypto.masterKey(
-                    new String[] { KEY_PART_0, KEY_PART_1, KEY_PART_2, KEY_PART_3 }, KEY_SALT);
+            byte[] master = manifestKey();
             byte[] manifest = UmbraCrypto.unseal(sealed, master, UmbraCrypto.ALG_CHACHA20);
             UmbraCrypto.wipe(sealed);
             UmbraCrypto.wipe(master);
@@ -219,9 +208,55 @@ public final class UmbraIntegrityGuard {
             try {
                 jar.close();
             } catch (IOException ignored) {
-                // best effort
+
             }
         }
+    }
+
+    private static byte[] manifestKey() {
+        String[] parts = { KEY_PART_0, KEY_PART_1, KEY_PART_2, KEY_PART_3 };
+        if (!isNativeBound()) {
+            return UmbraCrypto.masterKey(parts, KEY_SALT);
+        }
+        byte[] root = nativeKeyRoot();
+        if (root == null) {
+            fail("Integrity key root is unavailable");
+        }
+        try {
+            byte[] master = UmbraCrypto.masterKeyRooted(parts, KEY_SALT, root);
+            if (master == null) {
+                fail("Integrity key derivation failed");
+            }
+            return master;
+        } finally {
+            UmbraCrypto.wipe(root);
+        }
+    }
+
+    private static byte[] nativeKeyRoot() {
+        if (NATIVE_LOADER == null || NATIVE_LOADER.isEmpty() || NATIVE_LOADER.charAt(0) == '@') {
+            return null;
+        }
+        try {
+            Class<?> type = Class.forName(NATIVE_LOADER, true,
+                    UmbraIntegrityGuard.class.getClassLoader());
+            java.lang.reflect.Method derive = type.getMethod("deriveKey", int.class, int.class);
+            Object value = derive.invoke(null, Integer.valueOf(UmbraCrypto.SLOT_CLASS_MASTER),
+                    Integer.valueOf(0));
+            if (value instanceof byte[]) {
+                byte[] root = (byte[]) value;
+                if (root.length == UmbraCrypto.ROOT_BYTES) {
+                    return root;
+                }
+            }
+        } catch (Throwable unavailable) {
+            return null;
+        }
+        return null;
+    }
+
+    private static boolean isNativeBound() {
+        return "true".equalsIgnoreCase(NATIVE_BOUND_TEXT);
     }
 
     private static void startWatchdog() {
@@ -238,7 +273,7 @@ public final class UmbraIntegrityGuard {
                             Long.valueOf(4000L), Integer.valueOf(0));
             ((Thread) watchdog).start();
         } catch (Throwable ignored) {
-            // No watchdog: startup verification already happened.
+
         }
     }
 
@@ -297,7 +332,7 @@ public final class UmbraIntegrityGuard {
         } catch (SecurityException e) {
             throw e;
         } catch (Throwable ignored) {
-            // management API unavailable
+
         }
     }
 
@@ -314,10 +349,6 @@ public final class UmbraIntegrityGuard {
             }
         }
     }
-
-    // ------------------------------------------------------------------
-    // Helpers
-    // ------------------------------------------------------------------
 
     private static URL locateOwnArchive() {
         ProtectionDomain domain = UmbraIntegrityGuard.class.getProtectionDomain();

@@ -2,6 +2,7 @@ package io.umbra.core.pass.impl;
 
 import io.umbra.core.api.Pass;
 import io.umbra.core.api.PassContext;
+import io.umbra.core.pass.impl.flow.KeyRootMask;
 import io.umbra.core.runtime.TemplateInjector;
 import io.umbra.core.runtime.UmbraCantrip;
 import io.umbra.core.runtime.vm2.UmbraVM2;
@@ -35,10 +36,13 @@ import org.objectweb.asm.tree.VarInsnNode;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import io.umbra.core.util.RuntimeNames;
 
 /**
@@ -72,23 +76,23 @@ public final class VirtualizationPass implements Pass {
     private static final String ANNOTATION = "Lio/umbra/annotations/MethodVirtualization;";
     private static final int MAX_LOCALS = 4096;
     private static final int MAX_PAYLOAD_SLOTS = 4000;
-    /** Prefix of synthetic invokedynamic bridges created per owner class. */
+
     private static final String INDY_BRIDGE_PREFIX = "umbra$i";
-    /** Prefix of synthetic constructor-body helpers created per owner class. */
+
     private static final String CONSTRUCTOR_BODY_PREFIX = "umbra$c";
     private static final String VM_DESC =
             "([I[Ljava/lang/Object;[Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;";
     private static final String VM2_DESC =
             "([I[I[[I[Ljava/lang/Object;)Ljava/lang/Object;";
-    /** Call-site descriptor of a virtualized method: boxed locals in, boxed result out. */
+
     private static final String VM2_LOCALS_DESC = "([Ljava/lang/Object;)Ljava/lang/Object;";
-    /** Descriptor of the payload dispatcher generated inside the interpreter. */
+
     private static final String VM2_DISPATCH_DESC = "(I[Ljava/lang/Object;)Ljava/lang/Object;";
-    /** Bootstrap descriptor of a virtualized call site (payload id as static argument). */
+
     private static final String VM2_BOOTSTRAP_DESC =
             "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;"
                     + "Ljava/lang/invoke/MethodType;I)Ljava/lang/invoke/CallSite;";
-    /** Interpreter template method names, randomized after injection. */
+
     private static final String VM2_ENTRY_TEMPLATE = "run";
     private static final String VM2_BOOTSTRAP_TEMPLATE = "bootstrap";
 
@@ -113,20 +117,15 @@ public final class VirtualizationPass implements Pass {
 
     @Override
     public int order() {
-        // Runs after every pass that rewrites member descriptors or call sites
-        // (reference obfuscation at 65, type confusion at 67): a payload keeps
-        // reflective field/method references, so the names and descriptors it
-        // stores must be final before a method is translated. Type confusion
-        // re-types non-final fields to Object; translating first would leave the
-        // payload looking for the pre-retyping descriptor and the interpreter
-        // could not resolve the field at runtime. Native code generation (105)
-        // and Nocturne (106) still run after this pass.
+
         return 68;
     }
 
     @Override
     public boolean enabled(PassContext context) {
-        return context.config().methodVirtualization().enabled();
+
+        return context.config().methodVirtualization().enabled()
+                || context.config().optionBool("vm2.enabled", false);
     }
 
     @Override
@@ -167,7 +166,6 @@ public final class VirtualizationPass implements Pass {
         }
     }
 
-    /** The original, deliberately conservative engine. */
     private void runClassic(PassContext context) {
         int maxInstructions = context.config().methodVirtualization().maxInstructions();
         int maxMethods = context.config().methodVirtualization().maxMethods();
@@ -187,8 +185,7 @@ public final class VirtualizationPass implements Pass {
                 continue;
             }
             if ((node.access & (Opcodes.ACC_INTERFACE | Opcodes.ACC_ANNOTATION)) != 0) {
-                // Interfaces have unusual invocation shapes (default/super calls);
-                // keep them out of the safe subset.
+
                 continue;
             }
             if (!context.rules().transformClass(node)) {
@@ -297,11 +294,10 @@ public final class VirtualizationPass implements Pass {
                 if (call.getOpcode() == Opcodes.INVOKESPECIAL
                         && !"<init>".equals(call.name)
                         && !owner.name.equals(call.owner)) {
-                    // super.foo() would dispatch to the override through reflection.
+
                     return false;
                 }
-                // Reflection inside interpreted code sees the interpreter as its
-                // caller, so caller-sensitive APIs must keep the real bytecode.
+
                 if (isCallerSensitive(call.owner, call.name)) {
                     return false;
                 }
@@ -511,7 +507,7 @@ public final class VirtualizationPass implements Pass {
             context.stats().add("antiLlm.shieldedPayloads", 1);
         }
         code.add(new InsnNode(Opcodes.RETURN));
-        // Deepest path: decrypt loop (array, index, array, index, key, mask) = 6.
+
         clinit.maxStack = 6;
         node.methods.add(clinit);
 
@@ -520,12 +516,6 @@ public final class VirtualizationPass implements Pass {
         return holder;
     }
 
-    /**
-     * Generates a separate key-holder class. The payload holder stores the
-     * code array XORed with this key and decrypts it in its own {@code <clinit>}.
-     * A static analyzer must locate and execute both initializers instead of
-     * reading a literal instruction array.
-     */
     private Shield createShield(PassContext context) {
         String holderName;
         do {
@@ -584,7 +574,7 @@ public final class VirtualizationPass implements Pass {
         code.add(end);
         code.add(new InsnNode(Opcodes.RETURN));
         clinit.maxLocals = 2;
-        // Stack: key array + loop index + state + index + constant = 5.
+
         clinit.maxStack = 5;
         node.methods.add(clinit);
 
@@ -640,13 +630,7 @@ public final class VirtualizationPass implements Pass {
             code.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Double", "valueOf",
                     "(D)Ljava/lang/Double;", false));
         } else if (value instanceof Type) {
-            // Lazy class constant: the holder class is injected at the archive
-            // ROOT, while program classes may live in a nested container
-            // (BOOT-INF/classes, WEB-INF/classes). Emitting `ldc class <appClass>`
-            // here would resolve it with the root class loader while the holder's
-            // <clinit> runs and fail on such layouts. The interpreter therefore
-            // receives a {tag, descriptor} marker and resolves the class on first
-            // use through the context/helper/system class-loader chain.
+
             AsmUtil.pushInt(code, 2);
             code.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/String"));
             code.add(new InsnNode(Opcodes.DUP));
@@ -683,8 +667,7 @@ public final class VirtualizationPass implements Pass {
     }
 
     private void rewrite(ClassNode owner, MethodNode method, Payload payload, Holder holder) {
-        // Argument slots are part of the calling convention and must never be
-        // reused: the interpreter array starts right after them.
+
         int localsSlot = Math.max(1, Math.max(method.maxLocals, argumentSlots(method)));
         int resultSlot = localsSlot + 1;
         InsnList out = new InsnList();
@@ -723,8 +706,7 @@ public final class VirtualizationPass implements Pass {
             out.add(new VarInsnNode(Opcodes.ALOAD, resultSlot));
             switch (returns.getSort()) {
                 case Type.BOOLEAN: {
-                    // Accept both representations: Integer 0/1 (normalized VM)
-                    // and java.lang.Boolean (older payloads / reflection).
+
                     LabelNode numberPath = new LabelNode();
                     out.add(new InsnNode(Opcodes.DUP));
                     out.add(new TypeInsnNode(Opcodes.INSTANCEOF, "java/lang/Boolean"));
@@ -777,8 +759,7 @@ public final class VirtualizationPass implements Pass {
 
         method.instructions = out;
         method.maxLocals = localsSlot + 2;
-        // Deepest path builds one boxed argument: array + index + widest load
-        // (2 slots) = 4; the dispatch call site peaks at four references too.
+
         method.maxStack = 4;
         method.tryCatchBlocks = new ArrayList<org.objectweb.asm.tree.TryCatchBlockNode>();
         method.localVariables = null;
@@ -797,10 +778,7 @@ public final class VirtualizationPass implements Pass {
     private static void box(InsnList out, Type type) {
         switch (type.getSort()) {
                 case Type.BOOLEAN:
-                    // A JVM boolean operand is an int (0/1) on the stack. Store it
-                    // as an Integer so the interpreter never has to unbox a
-                    // java.lang.Boolean while executing virtualized bytecode
-                    // (if/if_icmp/iand/... all use the int representation).
+
                     out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf",
                             "(I)Ljava/lang/Integer;", false));
                     break;
@@ -837,13 +815,6 @@ public final class VirtualizationPass implements Pass {
         }
     }
 
-    /**
-     * Hardened engine driver. Parses the vm2.* options, applies the optional
-     * invokedynamic-bridge and constructor-body pre-transformations, translates
-     * eligible methods into {@link Vm2Format.Program}s, encrypts and splits the
-     * payload and rewrites each method body into a call to the injected
-     * interpreter.
-     */
     private void runVm2(PassContext context) {
         vm2Engine = null;
         vm2EntryName = null;
@@ -862,6 +833,17 @@ public final class VirtualizationPass implements Pass {
         counters.constructors = context.config().optionBool("vm2.constructors", false);
         counters.nested = counters.encrypt
                 && context.config().optionBool("vm2.nested", true);
+
+        counters.keyedPerm = counters.opcodeMap
+                && context.config().optionBool("vm2.perPayloadOpcodes", true);
+        counters.callShadow = context.config().optionBool("vm2.callShadow", true);
+        counters.callShadowAll = context.config().optionBool("vm2.callShadowAll", false);
+        counters.forwarderQuota = Math.max(0,
+                context.config().optionInt("vm2.forwarderQuota", 0));
+        counters.smallPayloadInts = Math.max(0,
+                context.config().optionInt("vm2.smallPayloadInts", 512));
+        counters.semanticCodes = context.config().optionBool("vm2.semanticCodes", true);
+        counters.localCallIds = context.config().optionBool("vm2.localCallIds", true);
         counters.maxInstructions = Math.max(16,
                 context.config().optionInt("vm2.maxInstructions", Math.max(4000, typedMax)));
         counters.holderCount = context.config().optionInt("vm2.holders", 2);
@@ -884,9 +866,18 @@ public final class VirtualizationPass implements Pass {
         if (counters.trys) {
             counters.flags |= Vm2Format.FLAG_TRYS;
         }
-        int[] encodedByReal = counters.opcodeMap
+        if (counters.keyedPerm) {
+            counters.flags |= Vm2Format.FLAG_KEYED_PERM;
+        }
+        if (counters.semanticCodes) {
+            counters.flags |= Vm2Format.FLAG_SEMANTIC;
+        }
+
+        int[] sharedEncodedByReal = counters.opcodeMap && !counters.keyedPerm
                 ? Vm2Format.opcodePermutation(context.random()) : null;
-        int[] mapValues = encodedByReal == null ? null : Vm2Format.decoderTable(encodedByReal);
+        int[] mapValues = sharedEncodedByReal == null
+                ? null : Vm2Format.decoderTable(sharedEncodedByReal);
+        FusionPlan fusion = counters.fusion ? FusionPlan.create(context) : null;
 
         List<ClassNode> snapshot = new ArrayList<ClassNode>(context.classes().classes().values());
         for (ClassNode node : snapshot) {
@@ -915,9 +906,21 @@ public final class VirtualizationPass implements Pass {
             List<MethodNode> snapshotMethods = new ArrayList<MethodNode>(node.methods);
             List<MethodNode> constructorBodies = new ArrayList<MethodNode>();
             int perClass = 0;
-            for (MethodNode method : snapshotMethods) {
-                if (maxMethods > 0 && perClass >= maxMethods) {
-                    break;
+            int forwarders = 0;
+
+            for (MethodNode method : rankVm2Candidates(snapshotMethods)) {
+                boolean forwarder = isPureForwarder(method);
+
+                boolean overQuota = maxMethods > 0 && perClass >= maxMethods;
+                if (overQuota) {
+                    if (!forwarder) {
+                        break;
+                    }
+                    if (counters.forwarderQuota <= 0
+                            || forwarders >= counters.forwarderQuota) {
+                        counters.forwardersSkipped++;
+                        continue;
+                    }
                 }
                 if (isIndyBridge(method) || isConstructorBody(method)) {
                     continue;
@@ -940,15 +943,20 @@ public final class VirtualizationPass implements Pass {
                 if (!eligibleVm2(context, node, method, counters)) {
                     continue;
                 }
-                if (virtualizeVm2(context, node, method, counters, encodedByReal, mapValues)) {
+                if (virtualizeVm2(context, node, method, counters, sharedEncodedByReal,
+                        mapValues, fusion, forwarder)) {
                     perClass++;
+                    if (forwarder) {
+                        forwarders++;
+                    }
                 }
             }
             for (MethodNode body : constructorBodies) {
                 if (maxMethods > 0 && perClass >= maxMethods) {
                     break;
                 }
-                if (virtualizeVm2(context, node, body, counters, encodedByReal, mapValues)) {
+                if (virtualizeVm2(context, node, body, counters, sharedEncodedByReal,
+                        mapValues, fusion, false)) {
                     perClass++;
                     counters.constructorBodies++;
                 }
@@ -973,19 +981,46 @@ public final class VirtualizationPass implements Pass {
         context.stats().add("virtualization.vm2.fusion", counters.fusion ? 1 : 0);
         context.stats().add("virtualization.vm2.fused", counters.fused);
         context.stats().add("virtualization.vm2.format", Vm2Format.ROLLING_FORMAT);
+        context.stats().add("virtualization.vm2.opcodeTables", mapValues == null ? 0 : 1);
+        context.stats().add("virtualization.vm2.keyedPayloads", counters.keyedPayloads);
+        int patterns = 0;
+        for (int opcode = 0; opcode < counters.superUsed.length; opcode++) {
+            if (counters.superUsed[opcode]) {
+                patterns++;
+            }
+        }
+        context.stats().add("virtualization.vm2.fusionFamilies",
+                fusion == null ? 0 : fusion.enabledFamilies);
+        context.stats().add("virtualization.vm2.fusionPatterns", patterns);
+        context.stats().add("virtualization.vm2.semanticPayloads", counters.semanticPayloads);
+        context.stats().add("virtualization.vm2.localIdCalls", counters.localIdCalls);
+        context.stats().add("virtualization.vm2.callSites", counters.callSites);
+        context.stats().add("virtualization.vm2.shadowedCalls", counters.shadowedCalls);
+        context.stats().add("virtualization.vm2.forwarders", counters.forwarders);
+        context.stats().add("virtualization.vm2.forwarders.constTarget",
+                counters.forwarderConstTargets);
+        context.stats().add("virtualization.vm2.forwarders.skipped", counters.forwardersSkipped);
         context.log().info("method-virtualization[vm2]: virtualized %d methods (%d instructions, "
                         + "%d handlers, %d indy bridges, %d constructor bodies, %d fused "
                         + "instructions), %d skipped",
                 counters.methods, counters.instructions, counters.handlers, counters.indyBridges,
                 counters.constructorBodies, counters.fused, counters.skipped);
+        context.log().info("method-virtualization[vm2]: opcodes=%s (%d keyed payloads, %d shared "
+                        + "tables), semantics=%d payloads, localIds=%d, fusion=%s (%d/%d families, "
+                        + "%d patterns), calls=%d shadowed=%d, "
+                        + "forwarders=%d (const target=%d, skipped=%d)",
+                counters.keyedPerm ? "per-payload" : "shared", Integer.valueOf(counters.keyedPayloads),
+                Integer.valueOf(mapValues == null ? 0 : 1),
+                Integer.valueOf(counters.semanticPayloads), Integer.valueOf(counters.localIdCalls),
+                fusion == null ? "off" : "random",
+                Integer.valueOf(fusion == null ? 0 : fusion.enabledFamilies),
+                Integer.valueOf(FAMILY_COUNT), Integer.valueOf(patterns),
+                Integer.valueOf(counters.callSites), Integer.valueOf(counters.shadowedCalls),
+                Integer.valueOf(counters.forwarders),
+                Integer.valueOf(counters.forwarderConstTargets),
+                Integer.valueOf(counters.forwardersSkipped));
     }
 
-    /**
-     * Injects the interpreter template and randomizes its two public entry
-     * points. The call sites are {@code invokedynamic} instructions whose target
-     * is resolved by signature, so neither the entry name nor the bootstrap name
-     * is ever referenced as a string in the protected program.
-     */
     private void prepareVm2Engine(PassContext context) {
         String name = TemplateInjector.inject(context.classes(), UmbraVM2.class,
                 RuntimeNames.path("V"), context.config().seed());
@@ -999,7 +1034,6 @@ public final class VirtualizationPass implements Pass {
         vm2Engine = name;
     }
 
-    /** Renames one method of an injected template and returns the new name. */
     private static String renameTemplate(ClassNode node, String method, String desc,
                                          String replacement) {
         if (node != null) {
@@ -1013,21 +1047,6 @@ public final class VirtualizationPass implements Pass {
         throw new IllegalStateException("VM2 interpreter template is missing " + method + desc);
     }
 
-    /**
-     * Generates the payload dispatchers. Every call site carries one payload id;
-     * the entry method inside the interpreter forwards it to the holder entry
-     * that assembles the payload, so a business class never touches a holder
-     * itself. The bootstrap finds the entry through its signature, which keeps
-     * the name out of the constant pool.
-     *
-     * <p>A single dispatch method grows by roughly thirteen bytes per payload
-     * (one {@code lookupswitch} case plus one {@code invokestatic}), so it hits
-     * the 64 KiB JVM method limit at a few thousand virtualized methods. The
-     * dispatcher is therefore split: every {@code vm2.dispatchShardSize} payloads
-     * get their own generated class, and the interpreter entry maps the payload
-     * id to its shard with one arithmetic step. Small programs keep the single
-     * method layout, so their bytecode is unchanged.</p>
-     */
     private void addVm2Dispatchers(PassContext context) {
         ClassNode node = context.classes().getClass(vm2Engine);
         if (node == null) {
@@ -1066,8 +1085,6 @@ public final class VirtualizationPass implements Pass {
             shardEntries.add(entryName);
         }
 
-        // Entry: shard = (id - 1) / shardSize, so the payload ids stay ascending
-        // across shards and no table entry is needed.
         MethodNode entry = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC
                 | Opcodes.ACC_SYNTHETIC, freeDispatchName(node, names), VM2_DISPATCH_DESC, null, null);
         InsnList code = entry.instructions;
@@ -1098,10 +1115,6 @@ public final class VirtualizationPass implements Pass {
         context.stats().add("virtualization.vm2.dispatchers", shards);
     }
 
-    /**
-     * Builds one dispatch method: a {@code lookupswitch} over payload ids
-     * {@code [from, to)} that forwards to the holder entry of each payload.
-     */
     private MethodNode dispatchMethod(String name, int from, int to) {
         MethodNode method = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC
                 | Opcodes.ACC_SYNTHETIC, name, VM2_DISPATCH_DESC, null, null);
@@ -1139,7 +1152,6 @@ public final class VirtualizationPass implements Pass {
         code.add(new InsnNode(Opcodes.ATHROW));
     }
 
-    /** Picks a dispatch method name that is not taken yet inside the interpreter class. */
     private static String freeDispatchName(ClassNode node, NameGenerator names) {
         for (int attempt = 0; attempt < 512; attempt++) {
             String candidate = names.random(6);
@@ -1157,7 +1169,6 @@ public final class VirtualizationPass implements Pass {
         throw new IllegalStateException("cannot allocate a VM2 dispatcher name");
     }
 
-    /** Generates an unused {@code <runtime>/<prefix>鈥 class name. */
     private static String randomRuntimeName(PassContext context, String prefix) {
         String candidate;
         do {
@@ -1166,7 +1177,6 @@ public final class VirtualizationPass implements Pass {
         return candidate;
     }
 
-    /** Mutable statistics of one VM2 run (avoids long parameter lists). */
     private static final class Vm2Counters {
         boolean encrypt;
         boolean opcodeMap;
@@ -1176,6 +1186,22 @@ public final class VirtualizationPass implements Pass {
         boolean fusion;
         boolean constructors;
         boolean nested;
+
+        boolean keyedPerm;
+
+        boolean callShadow;
+
+        boolean callShadowAll;
+
+        int forwarderQuota;
+
+        boolean semanticCodes;
+
+        boolean localCallIds;
+        int semanticPayloads;
+        int localIdCalls;
+
+        int smallPayloadInts;
         int flags;
         int maxInstructions;
         int holderCount;
@@ -1189,14 +1215,19 @@ public final class VirtualizationPass implements Pass {
         int constructorsExtracted;
         int constructorBodies;
         int fused;
+        int keyedPayloads;
+        int sharedTables;
+        int forwarders;
+        int forwarderConstTargets;
+        int forwardersSkipped;
+        int callSites;
+        int shadowedCalls;
+        final boolean[] superUsed = new boolean[256];
     }
 
-    /**
-     * Translates, encodes and rewrites one method. Returns true when the method
-     * (or constructor body helper) was virtualized.
-     */
     private boolean virtualizeVm2(PassContext context, ClassNode node, MethodNode method,
-                                  Vm2Counters counters, int[] encodedByReal, int[] mapValues) {
+                                  Vm2Counters counters, int[] sharedEncodedByReal, int[] mapValues,
+                                  FusionPlan fusion, boolean forwarder) {
         try {
             Map<AbstractInsnNode, String> indyBridges = null;
             if (containsInvokeDynamic(method)) {
@@ -1205,23 +1236,8 @@ public final class VirtualizationPass implements Pass {
                 }
                 indyBridges = createIndyBridges(context, node, method, counters);
             }
-            Vm2Format.Program program = translateVm2(context, node, method, counters,
-                    encodedByReal, indyBridges);
-            if (program.code.length > 200000) {
-                counters.skipped++;
-                context.log().debug("vm2 skipped %s.%s: payload too large", node.name, method.name);
-                return false;
-            }
             int payloadId = counters.methods + 1;
-            context.log().debug("vm2 #%d %s.%s: %s", payloadId, node.name, method.name,
-                    Vm2Format.describe(program));
-            if (vm2Engine == null) {
-                prepareVm2Engine(context);
-            }
-            if (mapValues != null && vm2MapHolder == null) {
-                vm2MapHolder = createVm2Chunk(context, mapValues, RuntimeNames.path("M"),
-                        "virtualization.holders");
-            }
+
             long key = context.random().nextLong();
             if (key == 0L) {
                 key = 0x51ED270B1F2A3C4DL;
@@ -1233,9 +1249,31 @@ public final class VirtualizationPass implements Pass {
             };
             long stage1 = Vm2Format.metaKey(meta);
             meta[0] = Vm2Format.magicFor(meta);
+            int[] encodedByReal = counters.keyedPerm
+                    ? Vm2Format.keyedPermutation(stage1) : sharedEncodedByReal;
+            boolean shadowCalls = counters.callShadow && (forwarder || counters.callShadowAll);
+            Vm2Format.Program program = translateVm2(context, node, method, counters,
+                    encodedByReal, indyBridges, fusion, shadowCalls);
+            if (program.code.length > 200000) {
+                counters.skipped++;
+                context.log().debug("vm2 skipped %s.%s: payload too large", node.name, method.name);
+                return false;
+            }
+            context.log().debug("vm2 #%d %s.%s: %s", payloadId, node.name, method.name,
+                    Vm2Format.describe(program));
+            if (vm2Engine == null) {
+                prepareVm2Engine(context);
+            }
+            if (mapValues != null && vm2MapHolder == null) {
+                vm2MapHolder = createVm2Chunk(context, mapValues, RuntimeNames.path("M"),
+                        "virtualization.holders");
+            }
             Vm2Format.Encoded encoded = Vm2Format.serialize(program, stage1);
+
+            int requestedBlocks = encoded.payload.length < counters.smallPayloadInts
+                    ? 1 : counters.holderCount;
             int payloadBlockCount = Vm2Format.blockCount(encoded.payload.length,
-                    counters.holderCount);
+                    requestedBlocks);
             List<int[]> blocks = new ArrayList<int[]>();
             if (counters.nested) {
                 int[] outer = Vm2Format.generateOuterProgram(context.random());
@@ -1264,6 +1302,18 @@ public final class VirtualizationPass implements Pass {
             counters.instructions += program.code.length;
             counters.handlers += program.handlers.length / 4;
             counters.chunks += blocks.size();
+            if (counters.keyedPerm) {
+                counters.keyedPayloads++;
+            }
+            if (counters.semanticCodes) {
+                counters.semanticPayloads++;
+            }
+            if (forwarder) {
+                counters.forwarders++;
+                if (!shadowCalls) {
+                    counters.forwarderConstTargets++;
+                }
+            }
             return true;
         } catch (SkipMethod e) {
             counters.skipped++;
@@ -1296,14 +1346,66 @@ public final class VirtualizationPass implements Pass {
         return method.name.startsWith(CONSTRUCTOR_BODY_PREFIX);
     }
 
-    /**
-     * Extracts every invokedynamic of a method into a synthetic bridge in the
-     * same owner class. The bootstrap keeps its original lookup class and
-     * package/private access (LambdaMetafactory semantics), and the payload
-     * replaces the indy with a plain static call to the bridge.
-     *
-     * @return map from the original instruction to the bridge reference string
-     */
+    private static boolean isPureForwarder(MethodNode method) {
+        if ((method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE
+                | Opcodes.ACC_SYNCHRONIZED)) != 0) {
+            return false;
+        }
+        if (method.tryCatchBlocks != null && !method.tryCatchBlocks.isEmpty()) {
+            return false;
+        }
+        if (method.instructions == null) {
+            return false;
+        }
+        int real = 0;
+        boolean call = false;
+        boolean returned = false;
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null;
+             insn = insn.getNext()) {
+            int opcode = insn.getOpcode();
+            if (opcode < 0) {
+                continue;
+            }
+            real++;
+            if (returned) {
+                return false;
+            }
+            if (insn instanceof VarInsnNode && opcode >= Opcodes.ILOAD && opcode <= Opcodes.ALOAD) {
+                continue;
+            }
+
+            if (!call && (insn instanceof InvokeDynamicInsnNode
+                    || (insn instanceof MethodInsnNode && opcode == Opcodes.INVOKESTATIC))) {
+                call = true;
+                continue;
+            }
+            if (opcode >= Opcodes.IRETURN && opcode <= Opcodes.RETURN) {
+                returned = true;
+                continue;
+            }
+            return false;
+        }
+        return call && returned && real >= 3;
+    }
+
+    private static List<MethodNode> rankVm2Candidates(List<MethodNode> methods) {
+        List<MethodNode> ranked = new ArrayList<MethodNode>(methods);
+        Collections.sort(ranked, new Comparator<MethodNode>() {
+            @Override
+            public int compare(MethodNode left, MethodNode right) {
+                return score(right) - score(left);
+            }
+
+            private int score(MethodNode method) {
+                if (isPureForwarder(method)) {
+                    return 0;
+                }
+                return method.instructions == null ? 1 : method.instructions.size() + 1;
+            }
+        });
+        return ranked;
+    }
+
     private Map<AbstractInsnNode, String> createIndyBridges(PassContext context, ClassNode owner,
                                                             MethodNode method, Vm2Counters counters) {
         Map<AbstractInsnNode, String> bridges = new IdentityHashMap<AbstractInsnNode, String>();
@@ -1342,15 +1444,6 @@ public final class VirtualizationPass implements Pass {
         return bridges;
     }
 
-    /**
-     * Moves the constructor body after the mandatory super()/this() call into a
-     * private synthetic helper that can be virtualized. Conservative: skips
-     * unusual prologues, constructors whose handlers cover the prologue, and
-     * constructors writing final fields (the JVM only allows that in the
-     * declaring {@code <init>}).
-     *
-     * @return the extracted helper, or {@code null} when the shape is unsafe
-     */
     private MethodNode extractConstructorBody(PassContext context, ClassNode owner,
                                               MethodNode constructor) {
         if ((owner.access & Opcodes.ACC_INTERFACE) != 0) {
@@ -1384,8 +1477,7 @@ public final class VirtualizationPass implements Pass {
         if (initializer == null || initializerIndex < 0) {
             return null;
         }
-        // The prologue must stay straight line so nothing can branch across the
-        // split point and the uninitialized-this rules stay untouched.
+
         index = 0;
         boolean sawInitializer = false;
         for (AbstractInsnNode insn = constructor.instructions.getFirst(); insn != null;
@@ -1405,7 +1497,7 @@ public final class VirtualizationPass implements Pass {
         if (!sawInitializer) {
             return null;
         }
-        // Body instructions and their labels must start after the initializer.
+
         Map<LabelNode, Integer> labelIndex = new IdentityHashMap<LabelNode, Integer>();
         index = 0;
         List<AbstractInsnNode> instructions = new ArrayList<AbstractInsnNode>();
@@ -1430,7 +1522,7 @@ public final class VirtualizationPass implements Pass {
                 }
             }
         }
-        // Final fields may only be written inside the declaring class's <init>.
+
         for (int i = initializerIndex + 1; i < instructions.size(); i++) {
             AbstractInsnNode insn = instructions.get(i);
             if (insn instanceof FieldInsnNode) {
@@ -1511,18 +1603,18 @@ public final class VirtualizationPass implements Pass {
         }
         return false;
     }
-    /** Eligibility rules for the hardened engine. */
+
     private boolean eligibleVm2(PassContext context, ClassNode owner, MethodNode method,
                                 Vm2Counters counters) {
         if ((method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) {
             return false;
         }
         if (method.name.startsWith("<")) {
-            // Constructors and class initializers stay in the class file.
+
             return false;
         }
         if (isIndyBridge(method)) {
-            // Bridges intentionally keep the original invokedynamic.
+
             return false;
         }
         if (method.instructions == null || method.instructions.size() < 3
@@ -1580,7 +1672,7 @@ public final class VirtualizationPass implements Pass {
                             return false;
                         }
                     } else if (!owner.name.equals(call.owner) || call.itf) {
-                        // super/default-super calls dispatch differently under reflection.
+
                         return false;
                     }
                 }
@@ -1592,11 +1684,6 @@ public final class VirtualizationPass implements Pass {
         return true;
     }
 
-    /**
-     * Reflection performed inside a virtualized method sees the interpreter as
-     * its caller, which changes access control checks. Methods that rely on
-     * caller-sensitive APIs are therefore kept as ordinary bytecode.
-     */
     private static boolean isCallerSensitive(String owner, String name) {
         if (owner.startsWith("java/lang/reflect/") || owner.startsWith("java/lang/invoke/")
                 || owner.startsWith("sun/misc/") || owner.startsWith("jdk/internal/")) {
@@ -1616,7 +1703,6 @@ public final class VirtualizationPass implements Pass {
         return false;
     }
 
-    /** One fused superinstruction selected by {@link #matchFusion}. */
     private static final class Fusion {
         final int opcode;
         final int[] operands;
@@ -1631,41 +1717,111 @@ public final class VirtualizationPass implements Pass {
         }
     }
 
-    /** Superinstruction number for the six int arithmetic opcodes, in opcode order. */
     private static final int[] SUPER_INT_ARITH = {
             Vm2Format.SUPER_IADD_LL, Vm2Format.SUPER_ISUB_LL, Vm2Format.SUPER_IMUL_LL,
             Vm2Format.SUPER_IAND_LL, Vm2Format.SUPER_IOR_LL, Vm2Format.SUPER_IXOR_LL
     };
-    /** Superinstruction number for the six "load + constant + arithmetic" opcodes. */
+
     private static final int[] SUPER_INT_ARITH_CONST = {
             Vm2Format.SUPER_ILOAD_CONST_ADD, Vm2Format.SUPER_ILOAD_CONST_SUB,
             Vm2Format.SUPER_ILOAD_CONST_MUL, Vm2Format.SUPER_ILOAD_CONST_AND,
             Vm2Format.SUPER_ILOAD_CONST_OR, Vm2Format.SUPER_ILOAD_CONST_XOR
     };
-    /** Superinstruction number for the six long arithmetic opcodes. */
+
     private static final int[] SUPER_LONG_ARITH = {
             Vm2Format.SUPER_LADD_LL, Vm2Format.SUPER_LSUB_LL, Vm2Format.SUPER_LMUL_LL,
             Vm2Format.SUPER_LAND_LL, Vm2Format.SUPER_LOR_LL, Vm2Format.SUPER_LXOR_LL
     };
-    /** Superinstruction number for the six int compare/branch opcodes. */
+
     private static final int[] SUPER_INT_COMPARE = {
             Vm2Format.SUPER_IF_ICMPEQ_LL, Vm2Format.SUPER_IF_ICMPNE_LL,
             Vm2Format.SUPER_IF_ICMPLT_LL, Vm2Format.SUPER_IF_ICMPGE_LL,
             Vm2Format.SUPER_IF_ICMPGT_LL, Vm2Format.SUPER_IF_ICMPLE_LL
     };
 
-    /**
-     * Translates one method body into a {@link Vm2Format.Program}.
-     *
-     * <p>When {@code vm2.fusion} is enabled, runs of two or three adjacent
-     * instructions with a single fused equivalent are replaced by one
-     * superinstruction (see {@link #matchFusion}). Fusion never crosses a
-     * {@link LabelNode}, so branch targets and exception-handler boundaries
-     * always stay on instruction starts.</p>
-     */
+    private static final int[] SWAPPED_COMPARE = { 0, 1, 4, 5, 2, 3 };
+
+    private static final int INT_ADD = 0;
+    private static final int INT_SUB = 1;
+
+    private static final int FAMILY_INT_ARITH = 0;
+    private static final int FAMILY_INT_CONST = 1;
+    private static final int FAMILY_INT_COMPARE = 2;
+    private static final int FAMILY_LONG_ARITH = 3;
+    private static final int FAMILY_ALOAD_GETFIELD = 4;
+    private static final int FAMILY_CONST_ISTORE = 5;
+    private static final int FAMILY_COUNT = 6;
+
+    private static final class FusionPlan {
+        final boolean[] families = new boolean[FAMILY_COUNT];
+        final boolean variants;
+        final int skipRate;
+        final int enabledFamilies;
+        final Random random;
+
+        private FusionPlan(boolean[] families, boolean variants, int skipRate, Random random) {
+            System.arraycopy(families, 0, this.families, 0, FAMILY_COUNT);
+            this.variants = variants;
+            this.skipRate = skipRate;
+            this.random = random;
+            int enabled = 0;
+            for (int i = 0; i < FAMILY_COUNT; i++) {
+                if (this.families[i]) {
+                    enabled++;
+                }
+            }
+            this.enabledFamilies = enabled;
+        }
+
+        static FusionPlan create(PassContext context) {
+
+            Random random = new Random(context.random().nextLong());
+            boolean[] families = new boolean[FAMILY_COUNT];
+            int enabled = 0;
+            for (int i = 0; i < FAMILY_COUNT; i++) {
+                if (random.nextInt(100) < 90) {
+                    families[i] = true;
+                    enabled++;
+                }
+            }
+            while (enabled < 3) {
+                int pick = random.nextInt(FAMILY_COUNT);
+                if (!families[pick]) {
+                    families[pick] = true;
+                    enabled++;
+                }
+            }
+            boolean variants = context.config().optionBool("vm2.fusion.variants", true);
+
+            int skipRate = context.config().optionInt("vm2.fusion.skipRate", 5);
+            if (skipRate < 0) {
+                skipRate = 0;
+            }
+            if (skipRate > 90) {
+                skipRate = 90;
+            }
+            return new FusionPlan(families, variants, skipRate, random);
+        }
+
+        boolean family(int index) {
+            return families[index];
+        }
+    }
+
     private Vm2Format.Program translateVm2(PassContext context, ClassNode owner, MethodNode method,
                                            Vm2Counters counters, int[] encodedByReal,
-                                           Map<AbstractInsnNode, String> indyBridges) {
+                                           Map<AbstractInsnNode, String> indyBridges,
+                                           FusionPlan fusion, boolean shadowCalls) {
+        Random shadowRandom = shadowCalls ? context.random() : null;
+        boolean earlyStatic = (method.access & Opcodes.ACC_STATIC) != 0;
+        int earlyArgSlots = earlyStatic ? 0 : 1;
+        for (Type argument : Type.getArgumentTypes(method.desc)) {
+            earlyArgSlots += argument.getSize();
+        }
+
+        int callSlot = shadowRandom == null ? -1
+                : Math.max(method.maxLocals, earlyArgSlots);
+        boolean[] localCallUsed = new boolean[1];
         IntList code = new IntList();
         IntList opcodeSlots = new IntList();
         Map<LabelNode, Integer> labels = new IdentityHashMap<LabelNode, Integer>();
@@ -1687,25 +1843,36 @@ public final class VirtualizationPass implements Pass {
                 cursor = cursor.getNext();
                 continue;
             }
-            if (counters.fusion) {
-                Fusion fusion = matchFusion(cursor, refs, refIndex);
-                if (fusion != null) {
-                    emitVm2Opcode(code, opcodeSlots, fusion.opcode, encodedByReal);
-                    for (int i = 0; i < fusion.operands.length; i++) {
-                        code.add(fusion.operands[i]);
+            if (fusion != null) {
+                Fusion matched = matchFusion(fusion, cursor, refs, refIndex);
+                if (matched != null) {
+                    emitVm2Opcode(code, opcodeSlots, matched.opcode, encodedByReal);
+                    for (int i = 0; i < matched.operands.length; i++) {
+                        code.add(matched.operands[i]);
                     }
-                    if (fusion.target != null) {
+                    if (matched.target != null) {
                         patchSlots.add(Integer.valueOf(code.size()));
-                        patchLabels.add(fusion.target);
+                        patchLabels.add(matched.target);
                         code.add(0);
                     }
                     counters.fused++;
-                    cursor = fusion.last.getNext();
+                    counters.superUsed[matched.opcode] = true;
+                    cursor = matched.last.getNext();
                     continue;
                 }
             }
-            emitVm2Instruction(method, cursor, code, opcodeSlots, patchSlots, patchLabels,
-                    constants, constantIndex, refs, refIndex, encodedByReal, indyBridges);
+            if (cursor instanceof MethodInsnNode || cursor instanceof InvokeDynamicInsnNode) {
+                counters.callSites++;
+                if (shadowCalls) {
+                    counters.shadowedCalls++;
+                }
+            }
+            if (emitVm2Instruction(method, cursor, code, opcodeSlots, patchSlots, patchLabels,
+                    constants, constantIndex, refs, refIndex, encodedByReal, indyBridges,
+                    shadowRandom, callSlot, counters.localCallIds)) {
+                localCallUsed[0] = true;
+                counters.localIdCalls++;
+            }
             cursor = cursor.getNext();
         }
 
@@ -1766,7 +1933,8 @@ public final class VirtualizationPass implements Pass {
             }
             slot += argument.getSize();
         }
-        int maxLocals = Math.max(method.maxLocals, argSlots);
+        int maxLocals = Math.max(method.maxLocals, argSlots)
+                + (localCallUsed[0] ? 1 : 0);
         int stackHint = Math.max(32, method.maxStack + 16);
         Vm2Format.Program program = new Vm2Format.Program(codeArray,
                 constants.toArray(new Object[0]), refs.toArray(new String[0]), handlerTable,
@@ -1775,17 +1943,16 @@ public final class VirtualizationPass implements Pass {
         return program;
     }
 
-    /**
-     * Emits one un-fused VM2 instruction. Kept separate from the translation
-     * loop so the fusion fast path above stays readable.
-     */
-    private static void emitVm2Instruction(MethodNode method, AbstractInsnNode insn,
+    private static boolean emitVm2Instruction(MethodNode method, AbstractInsnNode insn,
                                            IntList code, IntList opcodeSlots,
                                            List<Integer> patchSlots, List<LabelNode> patchLabels,
                                            List<Object> constants, Map<Object, Integer> constantIndex,
                                            List<String> refs, Map<String, Integer> refIndex,
                                            int[] encodedByReal,
-                                           Map<AbstractInsnNode, String> indyBridges) {
+                                           Map<AbstractInsnNode, String> indyBridges,
+                                           Random shadowRandom, int callSlot,
+                                           boolean localCallIds) {
+        boolean localCall = false;
         int opcode = insn.getOpcode();
         if (insn instanceof LdcInsnNode) {
             emitVm2Opcode(code, opcodeSlots, Opcodes.LDC, encodedByReal);
@@ -1812,8 +1979,10 @@ public final class VirtualizationPass implements Pass {
             code.add(vm2Ref(refs, refIndex, "F|" + field.owner + "|" + field.name + "|" + field.desc));
         } else if (insn instanceof MethodInsnNode) {
             MethodInsnNode call = (MethodInsnNode) insn;
-            emitVm2Opcode(code, opcodeSlots, opcode, encodedByReal);
-            code.add(vm2Ref(refs, refIndex, "M|" + call.owner + "|" + call.name + "|" + call.desc));
+            localCall = emitVm2Call(code, opcodeSlots,
+                    vm2Ref(refs, refIndex, "M|" + call.owner + "|" + call.name + "|" + call.desc),
+                    opcode, encodedByReal, shadowRandom, constants, constantIndex,
+                    callSlot, localCallIds);
         } else if (insn instanceof TypeInsnNode) {
             TypeInsnNode type = (TypeInsnNode) insn;
             emitVm2Opcode(code, opcodeSlots, opcode, encodedByReal);
@@ -1859,26 +2028,54 @@ public final class VirtualizationPass implements Pass {
             if (bridge == null) {
                 throw new SkipMethod("invokedynamic without bridge");
             }
-            emitVm2Opcode(code, opcodeSlots, Opcodes.INVOKESTATIC, encodedByReal);
-            code.add(vm2Ref(refs, refIndex, bridge));
+            localCall = emitVm2Call(code, opcodeSlots, vm2Ref(refs, refIndex, bridge),
+                    Opcodes.INVOKESTATIC, encodedByReal, shadowRandom, constants, constantIndex,
+                    callSlot, localCallIds);
         } else if (insn instanceof InsnNode) {
             emitVm2Opcode(code, opcodeSlots, opcode, encodedByReal);
         } else {
             throw new SkipMethod("unsupported instruction " + insn.getClass().getSimpleName());
         }
+        return localCall;
     }
 
-    /**
-     * Matches a superinstruction starting at {@code first}; returns {@code null}
-     * when the instruction is not the start of a fusable run.
-     *
-     * <p>Every step is verified to be adjacent (only line-number/frame pseudo
-     * nodes in between) and no label may sit inside the run, so a branch target
-     * or an exception-handler boundary can never end up in the middle of a
-     * fused instruction.</p>
-     */
-    private static Fusion matchFusion(AbstractInsnNode first, List<String> refs,
+    private static boolean emitVm2Call(IntList code, IntList opcodeSlots, int refSlot, int opcode,
+                                       int[] encodedByReal, Random shadowRandom,
+                                       List<Object> constants, Map<Object, Integer> constantIndex,
+                                       int callSlot, boolean localCallIds) {
+        if (shadowRandom == null) {
+            emitVm2Opcode(code, opcodeSlots, opcode, encodedByReal);
+            code.add(refSlot);
+            return false;
+        }
+        int first = shadowRandom.nextInt();
+        int second = first ^ refSlot;
+
+        boolean local = localCallIds && callSlot >= 0 && shadowRandom.nextBoolean();
+        emitVm2Opcode(code, opcodeSlots, Opcodes.LDC, encodedByReal);
+        code.add(vm2Constant(constants, constantIndex, Integer.valueOf(first)));
+        emitVm2Opcode(code, opcodeSlots, Opcodes.LDC, encodedByReal);
+        code.add(vm2Constant(constants, constantIndex, Integer.valueOf(second)));
+        emitVm2Opcode(code, opcodeSlots, Opcodes.IXOR, encodedByReal);
+        if (local) {
+            emitVm2Opcode(code, opcodeSlots, Opcodes.ISTORE, encodedByReal);
+            code.add(callSlot);
+            emitVm2Opcode(code, opcodeSlots, Vm2Format.SUPER_CALL_LOCAL, encodedByReal);
+            code.add(opcode);
+            code.add(callSlot);
+            return true;
+        }
+        emitVm2Opcode(code, opcodeSlots, Vm2Format.SUPER_CALL, encodedByReal);
+        code.add(opcode);
+        return false;
+    }
+
+    private static Fusion matchFusion(FusionPlan plan, AbstractInsnNode first, List<String> refs,
                                       Map<String, Integer> refIndex) {
+
+        if (plan.skipRate > 0 && plan.random.nextInt(100) < plan.skipRate) {
+            return null;
+        }
         int opcode = first.getOpcode();
         AbstractInsnNode second = nextFusable(first);
         if (second == null) {
@@ -1891,33 +2088,57 @@ public final class VirtualizationPass implements Pass {
                 if (third == null) {
                     return null;
                 }
+                int other = ((VarInsnNode) second).var;
                 int compare = compareIndex(third.getOpcode());
-                if (compare >= 0 && third instanceof JumpInsnNode) {
-                    int[] operands = { variable, ((VarInsnNode) second).var };
+                if (compare >= 0 && third instanceof JumpInsnNode
+                        && plan.family(FAMILY_INT_COMPARE)) {
+                    int a = variable;
+                    int b = other;
+
+                    if (plan.variants && plan.random.nextBoolean()) {
+                        a = other;
+                        b = variable;
+                        compare = SWAPPED_COMPARE[compare];
+                    }
+                    int[] operands = { a, b };
                     return new Fusion(SUPER_INT_COMPARE[compare], operands,
                             ((JumpInsnNode) third).label, third);
                 }
                 int arithmetic = intArithmeticIndex(third.getOpcode());
-                if (arithmetic >= 0) {
-                    int[] operands = { variable, ((VarInsnNode) second).var };
+                if (arithmetic >= 0 && plan.family(FAMILY_INT_ARITH)) {
+                    int a = variable;
+                    int b = other;
+                    if (plan.variants && isCommutative(arithmetic) && plan.random.nextBoolean()) {
+                        a = other;
+                        b = variable;
+                    }
+                    int[] operands = { a, b };
                     return new Fusion(SUPER_INT_ARITH[arithmetic], operands, null, third);
                 }
                 return null;
             }
             Integer constant = constantValue(second);
-            if (constant != null) {
+            if (constant != null && plan.family(FAMILY_INT_CONST)) {
                 AbstractInsnNode third = nextFusable(second);
                 if (third == null) {
                     return null;
                 }
                 int arithmetic = intArithmeticIndex(third.getOpcode());
                 if (arithmetic >= 0) {
-                    int[] operands = { variable, constant.intValue() };
+                    int constantValue = constant.intValue();
+
+                    if (plan.variants && (arithmetic == INT_ADD || arithmetic == INT_SUB)
+                            && plan.random.nextBoolean()) {
+                        arithmetic = arithmetic == INT_ADD ? INT_SUB : INT_ADD;
+                        constantValue = -constantValue;
+                    }
+                    int[] operands = { variable, constantValue };
                     return new Fusion(SUPER_INT_ARITH_CONST[arithmetic], operands, null, third);
                 }
                 return null;
             }
-            if (second instanceof FieldInsnNode && second.getOpcode() == Opcodes.GETFIELD) {
+            if (second instanceof FieldInsnNode && second.getOpcode() == Opcodes.GETFIELD
+                    && plan.family(FAMILY_ALOAD_GETFIELD)) {
                 FieldInsnNode field = (FieldInsnNode) second;
                 int[] operands = { variable,
                         vm2Ref(refs, refIndex, "F|" + field.owner + "|" + field.name + "|" + field.desc) };
@@ -1925,7 +2146,7 @@ public final class VirtualizationPass implements Pass {
             }
             return null;
         }
-        if (opcode == Opcodes.LLOAD) {
+        if (opcode == Opcodes.LLOAD && plan.family(FAMILY_LONG_ARITH)) {
             if (second.getOpcode() == Opcodes.LLOAD) {
                 AbstractInsnNode third = nextFusable(second);
                 if (third == null) {
@@ -1933,7 +2154,13 @@ public final class VirtualizationPass implements Pass {
                 }
                 int arithmetic = longArithmeticIndex(third.getOpcode());
                 if (arithmetic >= 0) {
-                    int[] operands = { ((VarInsnNode) first).var, ((VarInsnNode) second).var };
+                    int a = ((VarInsnNode) first).var;
+                    int b = ((VarInsnNode) second).var;
+                    if (plan.variants && isCommutative(arithmetic) && plan.random.nextBoolean()) {
+                        a = b;
+                        b = ((VarInsnNode) first).var;
+                    }
+                    int[] operands = { a, b };
                     return new Fusion(SUPER_LONG_ARITH[arithmetic], operands, null, third);
                 }
             }
@@ -1941,14 +2168,17 @@ public final class VirtualizationPass implements Pass {
         }
         Integer constant = constantValue(first);
         if (constant != null && second instanceof VarInsnNode
-                && second.getOpcode() == Opcodes.ISTORE) {
+                && second.getOpcode() == Opcodes.ISTORE && plan.family(FAMILY_CONST_ISTORE)) {
             int[] operands = { constant.intValue(), ((VarInsnNode) second).var };
             return new Fusion(Vm2Format.SUPER_CONST_ISTORE, operands, null, second);
         }
         return null;
     }
 
-    /** Next real instruction when no label interrupts the run, {@code null} otherwise. */
+    private static boolean isCommutative(int index) {
+        return index == 0 || index >= 2;
+    }
+
     private static AbstractInsnNode nextFusable(AbstractInsnNode node) {
         for (AbstractInsnNode next = node.getNext(); next != null; next = next.getNext()) {
             if (next instanceof LabelNode) {
@@ -1961,7 +2191,6 @@ public final class VirtualizationPass implements Pass {
         return null;
     }
 
-    /** Integer value pushed by a constant instruction, or {@code null}. */
     private static Integer constantValue(AbstractInsnNode insn) {
         int opcode = insn.getOpcode();
         if (opcode >= Opcodes.ICONST_M1 && opcode <= Opcodes.ICONST_5) {
@@ -2010,13 +2239,6 @@ public final class VirtualizationPass implements Pass {
         }
     }
 
-    /**
-     * Walks the translated stream exactly like the interpreter does and asserts
-     * that every decoded instruction starts on a recorded opcode slot. This
-     * catches translation/decoder drift (for example a wrong operand count)
-     * before the payload is emitted; on mismatch the method is skipped instead
-     * of producing a broken virtualized body.
-     */
     private static void validateVm2Program(Vm2Format.Program program, int[] opcodePositions,
                                            MethodNode method, int[] encodedByReal) {
         int[] decoder = null;
@@ -2060,7 +2282,6 @@ public final class VirtualizationPass implements Pass {
         code.add(encodedByReal == null ? opcode : encodedByReal[opcode]);
     }
 
-    /** Binary search in the sorted opcode slot list. */
     private static boolean vm2InstructionBoundary(int[] positions, int value) {
         int low = 0;
         int high = positions.length - 1;
@@ -2120,7 +2341,6 @@ public final class VirtualizationPass implements Pass {
         }
     }
 
-    /** Builds the synthetic holder classes and returns the call-site handles. */
     private Vm2Holder createVm2Holders(PassContext context, int[] meta, List<int[]> blocks,
                                        boolean hasOpcodeMap) {
         List<Vm2Chunk> chunkHolders = new ArrayList<Vm2Chunk>(blocks.size());
@@ -2148,16 +2368,24 @@ public final class VirtualizationPass implements Pass {
         AsmUtil.pushInt(code, meta.length);
         code.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_INT));
         code.add(new FieldInsnNode(Opcodes.PUTSTATIC, name, metaField, "[I"));
+
+        KeyRootMask mask = KeyRootMask.create(context, false);
         for (int i = 0; i < meta.length; i++) {
             code.add(new FieldInsnNode(Opcodes.GETSTATIC, name, metaField, "[I"));
             AsmUtil.pushInt(code, i);
-            pushOpaqueInt(context, code, meta[i]);
+            if (mask == null) {
+                pushOpaqueInt(context, code, meta[i]);
+            } else {
+                AsmUtil.pushInt(code, meta[i] ^ mask.value(i));
+                mask.emit(code, i);
+                code.add(new InsnNode(Opcodes.IXOR));
+            }
             code.add(new InsnNode(Opcodes.IASTORE));
         }
         code.add(new InsnNode(Opcodes.RETURN));
         clinit.maxLocals = 0;
-        // array + index + two literal halves of an opaque value
-        clinit.maxStack = 4;
+
+        clinit.maxStack = 5;
         node.methods.add(clinit);
         node.methods.add(holderEntry(name, metaField, entryName, chunkHolders, hasOpcodeMap));
         context.classes().addGenerated(node);
@@ -2165,12 +2393,6 @@ public final class VirtualizationPass implements Pass {
         return new Vm2Holder(name, entryName);
     }
 
-    /**
-     * Creates the payload entry of a meta holder: it assembles the block array
-     * from the per-block holders and calls the interpreter. Everything a call
-     * site used to do happens here, so a business class only needs one
-     * {@code invokedynamic}.
-     */
     private MethodNode holderEntry(String owner, String metaField, String entry,
                                    List<Vm2Chunk> chunks, boolean hasOpcodeMap) {
         MethodNode method = new MethodNode(
@@ -2199,16 +2421,11 @@ public final class VirtualizationPass implements Pass {
                 VM2_DESC, false));
         code.add(new InsnNode(Opcodes.ARETURN));
         method.maxLocals = 1;
-        // meta + opcode map + array + index + block accessor result
+
         method.maxStack = 5;
         return method;
     }
 
-    /**
-     * Creates the public static accessor of a private payload array. The blocks
-     * are never aggregated in one class, so every cross-class read goes through
-     * one of these accessors.
-     */
     private static MethodNode holderAccessor(String owner, String field, String accessor) {
         MethodNode method = new MethodNode(
                 Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
@@ -2220,24 +2437,6 @@ public final class VirtualizationPass implements Pass {
         return method;
     }
 
-    /**
-     * Creates a synthetic class exposing one {@code int[]} payload block.
-     *
-     * <p>The values are stored as a printable-ASCII string constant and decoded
-     * by a constant-size {@code <clinit>} loop (see
-     * {@link Vm2Format#encodeBlock(int[])}). This keeps the class file cost near
-     * six bytes per payload int instead of a constant-pool entry plus store
-     * bytecode for every element.</p>
-     *
-     * @param prefix internal-name prefix (for example {@code <runtime>/X})
-     * @param statKey statistics counter incremented for the new holder
-     */
-    /**
-     * Cantrip variant of a VM2 payload chunk: the encrypted values are
-     * reconstructed by the injected Cantrip dialect interpreter instead of a
-     * plain decode loop. The program is split into class-file-safe chunks
-     * (each far below the 65535-byte UTF-8 constant limit).
-     */
     private Vm2Chunk createCantripChunk(PassContext context, int[] values, String name,
                                           String field, String accessor, ClassNode node,
                                           String statKey) {
@@ -2246,11 +2445,7 @@ public final class VirtualizationPass implements Pass {
                     RuntimeNames.path("B"), context.config().seed());
         }
         List<String> plain = encodeCantripChunks(values);
-        // Second layer, part 2 (P0-3): the dialect program is substituted through a
-        // per-build opcode table and ChaCha20-encrypted, so the artifact carries
-        // opaque base64 blobs instead of `~value;.` programs. The build-side sealer
-        // and the injected interpreter are the same class, so the two can never
-        // drift apart.
+
         boolean sealed = context.config().optionBool("cantrip.seal", true);
         int dialectKey = (int) (context.config().seed() ^ 0x43414E54524950L);
         List<String> chunks = sealed
@@ -2289,7 +2484,6 @@ public final class VirtualizationPass implements Pass {
         return new Vm2Chunk(name, accessor);
     }
 
-    /** Encodes integer values as {@code ~value;.} Cantrip dialect chunks. */
     private static List<String> encodeCantripChunks(int[] values) {
         List<String> chunks = new ArrayList<String>();
         StringBuilder current = new StringBuilder();
@@ -2345,7 +2539,7 @@ public final class VirtualizationPass implements Pass {
         code.add(new FieldInsnNode(Opcodes.GETSTATIC, name, field, "[I"));
         code.add(new InsnNode(Opcodes.ARRAYLENGTH));
         code.add(new JumpInsnNode(Opcodes.IF_ICMPGE, end));
-        // decode six chars: ((c0) | c1<<6 | c2<<12 | c3<<18 | c4<<24 | c5<<30)
+
         AsmUtil.pushInt(code, 0);
         code.add(new VarInsnNode(Opcodes.ISTORE, 3));
         for (int group = 0; group < Vm2Format.CHARS_PER_INT; group++) {
@@ -2384,7 +2578,6 @@ public final class VirtualizationPass implements Pass {
         return new Vm2Chunk(name, accessor);
     }
 
-    /** Pushes an int through a degenerate XOR expression to hide the literal. */
     private static void pushOpaqueInt(PassContext context, InsnList code, int value) {
         if ((context.random().nextInt() & 3) == 0) {
             AsmUtil.pushInt(code, value);
@@ -2409,7 +2602,6 @@ public final class VirtualizationPass implements Pass {
         return candidate;
     }
 
-    /** Rewrites the method body into "build locals, call interpreter, unbox". */
     private void rewriteVm2(PassContext context, ClassNode owner, MethodNode method,
                             int payloadId) {
         int argumentSlots = argumentSlots(method);
@@ -2438,9 +2630,7 @@ public final class VirtualizationPass implements Pass {
         }
 
         out.add(new VarInsnNode(Opcodes.ALOAD, localsSlot));
-        // One invokedynamic per virtualized method: the bootstrap binds the
-        // payload id, so the business class holds no static call, no accessor
-        // and no readable interpreter name.
+
         out.add(new InvokeDynamicInsnNode(new NameGenerator(context.random(), "").random(6),
                 VM2_LOCALS_DESC, new Handle(Opcodes.H_INVOKESTATIC, vm2Engine, vm2BootstrapName,
                         VM2_BOOTSTRAP_DESC, false), Integer.valueOf(payloadId)));
@@ -2565,7 +2755,6 @@ public final class VirtualizationPass implements Pass {
         }
     }
 
-    /** Growable int array used while translating one method. */
     private static final class IntList {
         private int[] values = new int[64];
         private int size;
@@ -2655,7 +2844,6 @@ public final class VirtualizationPass implements Pass {
         }
     }
 
-    /** One translated exception handler, still referencing ASM label nodes. */
     private static final class HandlerEntry {
         final LabelNode start;
         final LabelNode end;
@@ -2670,7 +2858,6 @@ public final class VirtualizationPass implements Pass {
         }
     }
 
-    /** A VM2 payload holder: its class name and the entry the dispatcher calls. */
     private static final class Vm2Holder {
         final String name;
         final String entryName;
@@ -2681,7 +2868,6 @@ public final class VirtualizationPass implements Pass {
         }
     }
 
-    /** One payload-id binding of the interpreter dispatcher. */
     private static final class Vm2Dispatch {
         final int payloadId;
         final String holder;
@@ -2694,7 +2880,6 @@ public final class VirtualizationPass implements Pass {
         }
     }
 
-    /** One encrypted payload block holder class. */
     private static final class Vm2Chunk {
         final String className;
         final String accessorName;

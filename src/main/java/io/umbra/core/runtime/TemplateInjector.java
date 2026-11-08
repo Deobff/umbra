@@ -36,7 +36,6 @@ public final class TemplateInjector {
     private TemplateInjector() {
     }
 
-    /** Loads a template as a {@link ClassNode} without modifying it. */
     public static ClassNode read(Class<?> template) {
         try {
             byte[] bytes = readBytes(template);
@@ -48,24 +47,10 @@ public final class TemplateInjector {
         }
     }
 
-    /** Injects a template under a fresh random name and returns its internal name. */
     public static String inject(ClassPool pool, Class<?> template, String prefix, long seed) {
         return inject(pool, template, prefix, seed, null);
     }
 
-    /**
-     * Injects a template under a fresh random name, substituting string
-     * constants.
-     *
-     * @param pool         program pool
-     * @param template     compiled runtime class
-     * @param prefix       internal-name prefix, for example {@code <runtime>/V}
-     * @param seed         deterministic seed
-     * @param replacements map of exact string constants to replacements (may be
-     *                     {@code null}); every occurrence is rewritten in LDC
-     *                     instructions and ConstantValue attributes
-     * @return internal name of the injected class
-     */
     public static String inject(ClassPool pool, Class<?> template, String prefix, long seed,
                                 Map<String, String> replacements) {
         ClassNode node = read(template);
@@ -83,8 +68,7 @@ public final class TemplateInjector {
         ClassNode remapped = new ClassNode();
         node.accept(new ClassRemapper(remapped, new SimpleRemapper(node.name, candidate)));
         remapped.access |= Opcodes.ACC_SYNTHETIC;
-        // Every injected template gets the per-build domain separators, so a template
-        // cannot keep the literal KDF labels while the build side uses derived ones.
+
         Map<String, String> constants = DomainTags.replacements();
         if (replacements != null && !replacements.isEmpty()) {
             constants.putAll(replacements);
@@ -92,20 +76,13 @@ public final class TemplateInjector {
         if (!constants.isEmpty()) {
             replaceConstants(remapped, constants);
         }
-        // The injected helper must run on every supported JVM; keep it at the
-        // class file version the obfuscator itself is compiled for.
+
         remapped.version = Math.min(remapped.version, Opcodes.V1_8);
         stripDebugInfo(remapped);
         pool.addGenerated(remapped);
         return candidate;
     }
 
-    /**
-     * Removes source-file/line-number/local-variable metadata from an injected
-     * runtime template, so {@code javap} on the protected archive cannot reveal
-     * {@code UmbraClassLoader.java}/{@code UmbraRuntimeGuard.java} names or the
-     * exact line numbers of the guard checks.
-     */
     public static void stripDebugInfo(ClassNode node) {
         if (node == null) {
             return;
@@ -158,7 +135,6 @@ public final class TemplateInjector {
         }
     }
 
-    /** Builds a placeholder map from alternating key/value pairs. */
     public static Map<String, String> placeholders(String... pairs) {
         if (pairs == null || pairs.length == 0) {
             return new LinkedHashMap<String, String>();

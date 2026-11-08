@@ -112,11 +112,11 @@ public final class NocturneCompatibleTest {
                         try {
                             Files.deleteIfExists(p);
                         } catch (IOException ignored) {
-                            // Best effort temp cleanup.
+
                         }
                     });
         } catch (IOException ignored) {
-            // Best effort temp cleanup.
+
         }
     }
 }

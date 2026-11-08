@@ -34,13 +34,6 @@ public final class MinecraftAdapter {
     private MinecraftAdapter() {
     }
 
-    /**
-     * Analyses the container. Never returns {@code null}.
-     *
-     * @param pool   loaded classes and resources
-     * @param config effective configuration (reads {@code minecraft.*} options)
-     * @param log    logger for detection/diagnostic lines
-     */
     public static MinecraftProfile detect(ClassPool pool, UmbraConfig config, Log log) {
         Log safeLog = log == null ? new Log(null, false) : log;
         if (pool == null) {
@@ -77,10 +70,6 @@ public final class MinecraftAdapter {
                 profile.bodySkipGlobs().size(), profile.targetCount());
         return profile;
     }
-
-    // ------------------------------------------------------------------
-    // resource dispatch
-    // ------------------------------------------------------------------
 
     private static void scanResource(String rawName, byte[] bytes, ClassPool pool,
                                      MinecraftScan scan) {
@@ -126,10 +115,6 @@ public final class MinecraftAdapter {
             MixinConfigDetector.maybeScan(name, bytes, scan);
         }
     }
-
-    // ------------------------------------------------------------------
-    // manifest
-    // ------------------------------------------------------------------
 
     private static void scanManifest(byte[] bytes, MinecraftScan scan) {
         Map<String, String> attributes;
@@ -209,10 +194,6 @@ public final class MinecraftAdapter {
         return value.trim().split("[,\\s]+");
     }
 
-    // ------------------------------------------------------------------
-    // deferred resource parsing
-    // ------------------------------------------------------------------
-
     private static void resolvePending(ClassPool pool, MinecraftScan scan) {
         for (String path : scan.pendingMixinConfigs()) {
             try {
@@ -236,10 +217,6 @@ public final class MinecraftAdapter {
             }
         }
     }
-
-    // ------------------------------------------------------------------
-    // mixin annotation analysis (owned by the mixin analyzer)
-    // ------------------------------------------------------------------
 
     private static void mergeMixinAnalysis(ClassPool pool, MinecraftScan scan) {
         MixinAnalysis analysis;

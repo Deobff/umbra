@@ -44,16 +44,10 @@ public final class DefaultRuleSet implements RuleSet {
         }
     }
 
-    /** Adds a keep rule discovered at analysis time (reflection, service loading, ...). */
     public void addKeepRule(String raw) {
         addKeep(raw);
     }
 
-    /**
-     * Marks classes matching {@code pattern} as body-transform-free (for
-     * example Minecraft Mixin target classes). Accepts the same Ant-style globs
-     * as keep rules.
-     */
     public void addBodySkipGlob(String pattern) {
         if (pattern == null || pattern.trim().isEmpty()) {
             return;
@@ -169,9 +163,7 @@ public final class DefaultRuleSet implements RuleSet {
         if ("main".equals(method.name) && "([Ljava/lang/String;)V".equals(method.desc)) {
             return true;
         }
-        // Java agent entry points are resolved by exact method name from the
-        // manifest Premain-Class/Agent-Class, so they must never be renamed
-        // (the class itself is remapped and the manifest rewritten later).
+
         if (("premain".equals(method.name) || "agentmain".equals(method.name))
                 && ("(Ljava/lang/String;Ljava/lang/instrument/Instrumentation;)V".equals(method.desc)
                 || "(Ljava/lang/String;)V".equals(method.desc))) {
@@ -198,7 +190,7 @@ public final class DefaultRuleSet implements RuleSet {
             return true;
         }
         if (hasForeignAnnotation(method.visibleAnnotations) || hasForeignAnnotation(method.invisibleAnnotations)) {
-            // Framework-visible annotations frequently imply reflective lookup.
+
             return true;
         }
         for (MemberRule rule : keepMembers) {

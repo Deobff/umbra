@@ -13,3 +13,14 @@
 *.iml
 .DS_Store
 Thumbs.db
+# JVM crash dumps
+hs_err_pid*.log
+replay_pid*.log
+# QA harness: test-only material, not part of the tool
+qa/
+plugins/qa/
+# Local scratch
+*.bak-silence
+*.orig
+build-check/
+build-tmp/

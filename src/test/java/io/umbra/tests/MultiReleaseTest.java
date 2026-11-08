@@ -55,8 +55,7 @@ public final class MultiReleaseTest {
 
     private static void buildFixture(Path jar) throws Exception {
         JarOutputStream out = new JarOutputStream(Files.newOutputStream(jar));
-        // Versioned entries deliberately come first so the reader cannot rely
-        // on the base class being seen first.
+
         add(out, "META-INF/versions/11/mr/Base.class", classBytes("mr/Base", 11, Opcodes.V11));
         add(out, "META-INF/versions/9/mr/Base.class", classBytes("mr/Base", 9, Opcodes.V9));
         add(out, "META-INF/versions/9/mr/Only.class", classBytes("mr/Only", 9, Opcodes.V9));
@@ -143,8 +142,7 @@ public final class MultiReleaseTest {
     private static void testPreserveRename(Path dir, Path jar) throws Exception {
         ClassPool pool = new ClassPool();
         Jars.read(jar, pool, Log.console(false), LayoutOptions.defaults());
-        // Simulate the renamer: rename the base class and its member (global
-        // method map) so every versioned copy must follow the same mapping.
+
         Map<String, String> classes = new LinkedHashMap<String, String>();
         classes.put("mr/Base", "pkg/R");
         Map<String, String> methods = new LinkedHashMap<String, String>();
@@ -285,11 +283,11 @@ public final class MultiReleaseTest {
                         try {
                             Files.deleteIfExists(p);
                         } catch (Exception ignored) {
-                            // Best effort temp cleanup.
+
                         }
                     });
         } catch (Exception ignored) {
-            // Best effort temp cleanup.
+
         }
     }
 }

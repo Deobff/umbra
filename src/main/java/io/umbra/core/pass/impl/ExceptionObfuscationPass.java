@@ -2,11 +2,14 @@ package io.umbra.core.pass.impl;
 
 import io.umbra.core.api.Pass;
 import io.umbra.core.api.PassContext;
+import io.umbra.core.pass.impl.flow.KeyRootMask;
 import io.umbra.core.pass.impl.flow.MethodGate;
+import io.umbra.core.pass.impl.flow.RuntimeTable;
 import io.umbra.core.util.AsmUtil;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.IincInsnNode;
@@ -70,8 +73,13 @@ public final class ExceptionObfuscationPass implements Pass {
         int handlers = 0;
         int fakeThrows = 0;
         int fakeHandlers = 0;
+        int runtimeCarriers = 0;
+        int runtimeTables = 0;
         int skipped = 0;
         int max = context.config().flow().maxInstructions();
+        int pairBudget = Math.max(2, context.config().optionInt("exceptions.tablePairs", 16));
+        KeyRootMask tableMask = KeyRootMask.create(context, true);
+        String tableMode = tableMask == null ? "static" : "native";
         MethodGate gate = new MethodGate(context);
         for (ClassNode node : context.classes().classes().values()) {
             if (context.classes().isGenerated(node.name) || context.classes().isFrozen(node.name)) {
@@ -91,10 +99,15 @@ public final class ExceptionObfuscationPass implements Pass {
             for (MethodNode method : node.methods) {
                 savedMethods.add(MethodGate.copy(method));
             }
+            List<FieldNode> savedFields = new ArrayList<FieldNode>(node.fields);
+
+            RuntimeTable table = RuntimeTable.create(context, node, pairBudget, tableMask);
+            RuntimeTable.Pair carrierMask = table.pair(nonZero(context.random().nextInt()));
             int classMethods = 0;
             int classHandlers = 0;
             int classThrows = 0;
             int classFakeHandlers = 0;
+            int classCarriers = 0;
             try {
                 for (MethodNode method : node.methods) {
                     if (!eligible(context, method, max)) {
@@ -102,7 +115,7 @@ public final class ExceptionObfuscationPass implements Pass {
                     }
                     try {
                         MethodNode work = MethodGate.copy(method);
-                        int[] result = wrap(context, work, level);
+                        int[] result = wrap(context, work, level, table, carrierMask);
                         if (!gate.verify(node, work)) {
                             skipped++;
                             context.log().debug("exception-obfuscation: verification rejected %s.%s",
@@ -114,17 +127,25 @@ public final class ExceptionObfuscationPass implements Pass {
                         classHandlers += result[0];
                         classThrows += result[1];
                         classFakeHandlers += result[2];
+                        classCarriers += result[3];
                     } catch (RuntimeException e) {
                         skipped++;
                         context.log().debug("exception-obfuscation: skipped %s.%s: %s",
                                 node.name, method.name, e.toString());
                     }
                 }
-                if (classMethods > 0 && !gate.writes(node)) {
-                    throw new IllegalStateException("class does not serialize");
+                if (classMethods > 0) {
+                    if (!table.isEmpty()) {
+                        table.materialize(node);
+                        runtimeTables += table.chunkCount();
+                    }
+                    if (!gate.writes(node)) {
+                        throw new IllegalStateException("class does not serialize");
+                    }
                 }
             } catch (RuntimeException e) {
                 node.methods = new ArrayList<MethodNode>(savedMethods);
+                node.fields = new ArrayList<FieldNode>(savedFields);
                 skipped += classMethods;
                 context.log().debug("exception-obfuscation: rolled back class %s: %s",
                         node.name, e.toString());
@@ -132,20 +153,27 @@ public final class ExceptionObfuscationPass implements Pass {
                 classHandlers = 0;
                 classThrows = 0;
                 classFakeHandlers = 0;
+                classCarriers = 0;
             }
             methods += classMethods;
             handlers += classHandlers;
             fakeThrows += classThrows;
             fakeHandlers += classFakeHandlers;
+            runtimeCarriers += classCarriers;
         }
         context.stats().add("exceptions.wrapped", methods);
         context.stats().add("exceptions.handlers", handlers);
         context.stats().add("exceptions.fakeThrows", fakeThrows);
         context.stats().add("exceptions.fakeHandlers", fakeHandlers);
         context.stats().add("exceptions.skipped", skipped);
+        context.stats().add("exceptions.runtimeCarriers", runtimeCarriers);
+        context.stats().add("exceptions.runtimeTables", runtimeTables);
+        context.stats().text("exceptions.tableMode", tableMode);
         context.log().info("exception-obfuscation[level=%d]: wrapped %d methods, %d synthetic handlers, "
-                        + "%d dead throw paths, %d fake handler entries (%d verification skips)",
-                level, methods, handlers, fakeThrows, fakeHandlers, skipped);
+                        + "%d dead throw paths, %d fake handler entries, %d table-keyed carriers "
+                        + "(table=%s, %d verification skips)",
+                level, methods, handlers, fakeThrows, fakeHandlers, runtimeCarriers, tableMode,
+                skipped);
     }
 
     private static boolean eligible(PassContext context, MethodNode method, int max) {
@@ -165,14 +193,11 @@ public final class ExceptionObfuscationPass implements Pass {
         return !context.rules().hasKeepAnnotation(method);
     }
 
-    /**
-     * @return {@code [syntheticHandlers, deadThrowPaths, fakeHandlerEntries]}
-     */
-    private static int[] wrap(PassContext context, MethodNode method, int level) {
+    private static int[] wrap(PassContext context, MethodNode method, int level,
+                              RuntimeTable table, RuntimeTable.Pair carrierMask) {
         int rangeCount = level == 1 ? 1 : (level == 2 ? 3 : 5);
         int deadThrowPaths = level;
-        // Pick range boundaries among the original instructions before any
-        // prologue or handler code is inserted.
+
         List<AbstractInsnNode> sites = boundarySites(method, rangeCount);
         int next = nextFreeLocal(method);
         int carrier = next++;
@@ -180,7 +205,7 @@ public final class ExceptionObfuscationPass implements Pass {
         method.maxLocals = Math.max(method.maxLocals, next);
 
         InsnList prologue = new InsnList();
-        emitCarrierInit(context, prologue, carrier);
+        boolean tableKeyed = emitCarrierInit(context, prologue, carrier, table, carrierMask);
         for (int i = 0; i < deadThrowPaths; i++) {
             emitDeadThrowPath(context, prologue, carrier);
         }
@@ -204,10 +229,6 @@ public final class ExceptionObfuscationPass implements Pass {
             method.tryCatchBlocks = new ArrayList<TryCatchBlockNode>();
         }
 
-        // Split the body into registered ranges. Boundary labels are inserted
-        // before original instructions only (never inside the prologue), and
-        // duplicate / zero-length ranges are skipped. Original entries stay in
-        // front of the table, so behaviour is unaffected by the exact split.
         List<LabelNode> boundaries = new ArrayList<LabelNode>();
         boundaries.add(start);
         for (AbstractInsnNode site : sites) {
@@ -238,14 +259,11 @@ public final class ExceptionObfuscationPass implements Pass {
             handlerCount++;
         }
 
-        // Append the handler bodies after the protected ranges so they are never
-        // themselves protected by the synthetic entries.
         for (int i = 0; i < handlerLabels.size(); i++) {
             boolean fake = i == handlerLabels.size() - 1 && level >= 3;
             method.instructions.add(handlerLabels.get(i));
             if (fake) {
-                // A fake handler over a NOP range: unreachable at run time, yet
-                // a valid exception-table target for the verifier.
+
                 method.instructions.add(new InsnNode(Opcodes.ATHROW));
                 continue;
             }
@@ -257,33 +275,33 @@ public final class ExceptionObfuscationPass implements Pass {
             method.instructions.add(new InsnNode(Opcodes.ATHROW));
         }
         method.maxStack = Math.max(method.maxStack, 4);
-        return new int[] {handlerCount, deadThrowPaths, level >= 3 ? 1 : 0};
+        return new int[] {handlerCount, deadThrowPaths, level >= 3 ? 1 : 0, tableKeyed ? 1 : 0};
     }
 
-    /** {@code int carrier = (int) (System.nanoTime() ^ seed);} */
-    private static void emitCarrierInit(PassContext context, InsnList out, int carrier) {
+    private static boolean emitCarrierInit(PassContext context, InsnList out, int carrier,
+                                           RuntimeTable table, RuntimeTable.Pair carrierMask) {
+        out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/System",
+                "nanoTime", "()J", false));
+        out.add(new InsnNode(Opcodes.L2I));
+        if (carrierMask != null) {
+            table.emitInt(out, carrierMask);
+            out.add(new InsnNode(Opcodes.IXOR));
+            out.add(new VarInsnNode(Opcodes.ISTORE, carrier));
+            return true;
+        }
         int seed = context.random().nextInt();
         if (seed == 0) {
             seed = 0x7E37;
         }
-        out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/System",
-                "nanoTime", "()J", false));
-        out.add(new InsnNode(Opcodes.L2I));
         AsmUtil.pushInt(out, seed);
         out.add(new InsnNode(Opcodes.IXOR));
         out.add(new VarInsnNode(Opcodes.ISTORE, carrier));
+        return false;
     }
 
-    /**
-     * {@code (carrier | 1) != 0} is provably true, so the thrown path after the
-     * branch is dead at run time but forms an appealing fake CFG edge.
-     */
     private static void emitDeadThrowPath(PassContext context, InsnList out, int carrier) {
         LabelNode after = new LabelNode();
-        out.add(new VarInsnNode(Opcodes.ILOAD, carrier));
-        out.add(new InsnNode(Opcodes.ICONST_1));
-        out.add(new InsnNode(Opcodes.IOR));
-        out.add(new JumpInsnNode(Opcodes.IFNE, after));
+        emitIntervalAlwaysTrue(out, carrier, after);
         out.add(new TypeInsnNode(Opcodes.NEW, "java/lang/IllegalStateException"));
         out.add(new InsnNode(Opcodes.DUP));
         out.add(new LdcInsnNode(Integer.valueOf(context.random().nextInt())));
@@ -293,26 +311,29 @@ public final class ExceptionObfuscationPass implements Pass {
         out.add(after);
     }
 
-    /** Opaque always-true branch with dead junk around the rethrow. */
+    private static void emitIntervalAlwaysTrue(InsnList out, int carrier, LabelNode target) {
+        out.add(new VarInsnNode(Opcodes.ILOAD, carrier));
+        AsmUtil.pushInt(out, 0x7FFFFFFF);
+        out.add(new InsnNode(Opcodes.IAND));
+        out.add(new InsnNode(Opcodes.DUP));
+        AsmUtil.pushInt(out, 8);
+        out.add(new InsnNode(Opcodes.IOR));
+        out.add(new InsnNode(Opcodes.SWAP));
+        AsmUtil.pushInt(out, 7);
+        out.add(new InsnNode(Opcodes.IAND));
+        out.add(new JumpInsnNode(Opcodes.IF_ICMPGT, target));
+    }
+
     private static void emitGuard(PassContext context, InsnList out, int carrier,
                                   int throwableLocal, int level) {
         LabelNode after = new LabelNode();
-        // (x * (x + 1)) & 1 == 0
-        out.add(new VarInsnNode(Opcodes.ILOAD, carrier));
-        out.add(new InsnNode(Opcodes.DUP));
-        out.add(new InsnNode(Opcodes.ICONST_1));
-        out.add(new InsnNode(Opcodes.IADD));
-        out.add(new InsnNode(Opcodes.IMUL));
-        out.add(new InsnNode(Opcodes.ICONST_1));
-        out.add(new InsnNode(Opcodes.IAND));
-        out.add(new JumpInsnNode(Opcodes.IFEQ, after));
+        emitIntervalAlwaysTrue(out, carrier, after);
         if (level >= 3) {
             AsmUtil.pushInt(out, context.random().nextInt());
             AsmUtil.pushInt(out, context.random().nextInt());
             out.add(new InsnNode(Opcodes.IADD));
             out.add(new InsnNode(Opcodes.POP));
-            // Confusing guard: a second nested opaque branch over a throw that
-            // can never execute (condition above is always true).
+
             out.add(new VarInsnNode(Opcodes.ALOAD, throwableLocal));
             out.add(new InsnNode(Opcodes.ATHROW));
         } else {
@@ -322,10 +343,6 @@ public final class ExceptionObfuscationPass implements Pass {
         out.add(after);
     }
 
-    /**
-     * Chooses distinct original instructions to place range boundaries before
-     * (always strictly inside the body, so no zero-length range is produced).
-     */
     private static List<AbstractInsnNode> boundarySites(MethodNode method, int rangeCount) {
         List<AbstractInsnNode> real = new ArrayList<AbstractInsnNode>();
         for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
@@ -346,6 +363,10 @@ public final class ExceptionObfuscationPass implements Pass {
             }
         }
         return sites;
+    }
+
+    private static int nonZero(int value) {
+        return value == 0 ? 0x7E37 : value;
     }
 
     private static int nextFreeLocal(MethodNode method) {

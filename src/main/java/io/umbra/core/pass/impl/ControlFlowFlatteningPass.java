@@ -2,7 +2,9 @@ package io.umbra.core.pass.impl;
 
 import io.umbra.core.api.Pass;
 import io.umbra.core.api.PassContext;
+import io.umbra.core.pass.impl.flow.KeyRootMask;
 import io.umbra.core.pass.impl.flow.MethodGate;
+import io.umbra.core.pass.impl.flow.RuntimeTable;
 import io.umbra.core.rules.Glob;
 import io.umbra.core.util.AsmUtil;
 import org.objectweb.asm.ClassReader;
@@ -11,6 +13,7 @@ import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.FrameNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
@@ -104,6 +107,12 @@ public final class ControlFlowFlatteningPass implements Pass {
         int blocks = 0;
         int tryCatchMethods = 0;
         int switchMethods = 0;
+        int runtimeStates = 0;
+        int runtimeTables = 0;
+        int fallbackStates = 0;
+        int pairBudget = Math.max(2, context.config().optionInt("cff.tablePairs", 512));
+        KeyRootMask tableMask = KeyRootMask.create(context, true);
+        String tableMode = tableMask == null ? "static" : "native";
         int max = context.config().flow().maxInstructions();
         int maxBlocks = Math.max(8, context.config().optionInt("flow.maxBlocks", 512));
         Set<String> excluded = excludedNames(context);
@@ -133,27 +142,29 @@ public final class ControlFlowFlatteningPass implements Pass {
             if (Boolean.FALSE.equals(classEnabled)) {
                 continue;
             }
-            // Transactional class transform: if the class as a whole no longer
-            // serializes with COMPUTE_FRAMES, every flattened method in it is
-            // rolled back to its original body.
+
             List<MethodNode> savedMethods = new ArrayList<MethodNode>();
             for (MethodNode method : node.methods) {
                 savedMethods.add(MethodGate.copy(method));
             }
+            List<FieldNode> savedFields = new ArrayList<FieldNode>(node.fields);
+
+            RuntimeTable table = RuntimeTable.create(context, node, pairBudget, tableMask);
             int classFlattened = 0;
             int classBlocks = 0;
             int classTryCatch = 0;
             int classSwitches = 0;
+            int classStates = 0;
+            int classFallbacks = 0;
             try {
                 for (MethodNode method : node.methods) {
                     if (!basicEligible(context, node, method, max, skipped)) {
                         continue;
                     }
                     try {
-                        // Transform a deep copy so a rejected method can be left
-                        // completely untouched.
+
                         MethodNode work = MethodGate.copy(method);
-                        FlattenResult result = flatten(context, node, work, maxBlocks);
+                        FlattenResult result = flatten(context, node, work, maxBlocks, table);
                         if (!gate.verify(node, work)) {
                             increment(skipped, "verify");
                             continue;
@@ -161,6 +172,8 @@ public final class ControlFlowFlatteningPass implements Pass {
                         MethodGate.commit(method, work);
                         classFlattened++;
                         classBlocks += result.blocks;
+                        classStates += result.states;
+                        classFallbacks += result.fallbacks;
                         if (result.tryCatch) {
                             classTryCatch++;
                         }
@@ -179,33 +192,49 @@ public final class ControlFlowFlatteningPass implements Pass {
                                 node.name, method.name, e.toString());
                     }
                 }
-                if (classFlattened > 0 && !gate.writes(node)) {
-                    throw new IllegalStateException("class does not serialize");
+                if (classFlattened > 0) {
+                    if (!table.isEmpty()) {
+                        table.materialize(node);
+                        runtimeTables += table.chunkCount();
+                    }
+                    if (!gate.writes(node)) {
+                        throw new IllegalStateException("class does not serialize");
+                    }
                 }
             } catch (RuntimeException e) {
                 node.methods = new ArrayList<MethodNode>(savedMethods);
+                node.fields = new ArrayList<FieldNode>(savedFields);
                 increment(skipped, "class_verify");
                 context.log().debug("flattening: rolled back class %s: %s", node.name, e.toString());
                 classFlattened = 0;
                 classBlocks = 0;
                 classTryCatch = 0;
                 classSwitches = 0;
+                classStates = 0;
+                classFallbacks = 0;
             }
             flattened += classFlattened;
             blocks += classBlocks;
             tryCatchMethods += classTryCatch;
             switchMethods += classSwitches;
+            runtimeStates += classStates;
+            fallbackStates += classFallbacks;
         }
         context.stats().add("flow.flattened.methods", flattened);
         context.stats().add("flow.flattened.blocks", blocks);
         context.stats().add("flow.flattened.tryCatch", tryCatchMethods);
         context.stats().add("flow.flattened.switchMethods", switchMethods);
+        context.stats().add("cff.runtimeStates", runtimeStates);
+        context.stats().add("cff.runtimeTables", runtimeTables);
+        context.stats().add("cff.fallbackStates", fallbackStates);
+        context.stats().text("cff.tableMode", tableMode);
         for (Map.Entry<String, Integer> entry : skipped.entrySet()) {
             context.stats().add("flow.flattened.skipped." + entry.getKey(), entry.getValue().intValue());
         }
         context.log().info("control-flow-flattening: flattened %d methods (%d blocks, %d with try/catch, "
-                        + "%d with switches); skipped %s",
-                flattened, blocks, tryCatchMethods, switchMethods, skipped);
+                        + "%d with switches, %d runtime states, %d tables, table=%s); skipped %s",
+                flattened, blocks, tryCatchMethods, switchMethods, runtimeStates, runtimeTables,
+                tableMode, skipped);
     }
 
     private static void increment(Map<String, Integer> map, String key) {
@@ -213,7 +242,6 @@ public final class ControlFlowFlatteningPass implements Pass {
         map.put(key, Integer.valueOf(current == null ? 1 : current.intValue() + 1));
     }
 
-    /** Resolves class-glob exclusions (written with original names) to current names. */
     private static Set<String> excludedNames(PassContext context) {
         Set<String> result = new LinkedHashSet<String>();
         List<Glob> globs = new ArrayList<Glob>();
@@ -272,10 +300,8 @@ public final class ControlFlowFlatteningPass implements Pass {
         return true;
     }
 
-    // ----------------------------------------------------------------- flatten
-
     private static FlattenResult flatten(PassContext context, ClassNode owner, MethodNode method,
-                                         int maxBlocks) throws AnalyzerException {
+                                         int maxBlocks, RuntimeTable runtime) throws AnalyzerException {
         int previousMaxStack = method.maxStack;
         int previousMaxLocals = method.maxLocals;
         Frame<BasicValue>[] frames;
@@ -309,10 +335,9 @@ public final class ControlFlowFlatteningPass implements Pass {
             block.handler = block.leader instanceof LabelNode && handlerLabels.contains((LabelNode) block.leader);
         }
         if (!hasTryCatch && handlerLabels.isEmpty()) {
-            // fast path: everything may be shuffled
+
         }
 
-        // Validate block entry frames and collect local categories.
         int parameterSlots = argumentSlots(method);
         int maxFrameLocals = 0;
         for (Block block : blocks) {
@@ -335,8 +360,7 @@ public final class ControlFlowFlatteningPass implements Pass {
         for (Block block : blocks) {
             collectCategories(frames[instructions.indexOf(block.leader)], slotCategories);
         }
-        // Every edge into the dispatcher merges the loop frame with the block
-        // end frame, so end-of-block local categories must not collide either.
+
         for (Block block : blocks) {
             if (block.handler || block.terminator == null) {
                 continue;
@@ -348,8 +372,6 @@ public final class ControlFlowFlatteningPass implements Pass {
             collectCategories(frames[index], slotCategories);
         }
 
-        // Resolve transitions for normal blocks; handler blocks keep their
-        // original control flow (they are not dispatch entries).
         Map<LabelNode, Integer> labelToBlock = new LinkedHashMap<LabelNode, Integer>();
         for (Block block : blocks) {
             if (block.leader instanceof LabelNode) {
@@ -374,11 +396,8 @@ public final class ControlFlowFlatteningPass implements Pass {
             throw new Skip("blocks");
         }
 
-        // State encoding: shuffle the slot space, pad it with junk entries and
-        // encode each block state through an invertible affine map.
         Random random = context.random();
-        // Category-2 locals merge badly with synthetic catch-all handlers that a
-        // later pass may add, so try/catch methods always use the int state.
+
         boolean useLongState = !hasTryCatch && random.nextBoolean();
         int junkEntries = Math.min(64, Math.max(2, normalCount / 3 + 2));
         int slotSpace = normalCount + junkEntries;
@@ -418,8 +437,6 @@ public final class ControlFlowFlatteningPass implements Pass {
             throw new Skip("entry");
         }
 
-        // Output order: exception table labels must keep their relative
-        // positions, so methods with handlers keep the original block order.
         List<Block> order = new ArrayList<Block>(blocks);
         if (!hasTryCatch) {
             Collections.shuffle(order, random);
@@ -431,11 +448,25 @@ public final class ControlFlowFlatteningPass implements Pass {
 
         InsnList out = new InsnList();
         emitLocalInit(out, slotCategories, parameterSlots, localSlots);
+        int runtimeStates = 0;
+        int fallbackStates = 0;
         if (useLongState) {
-            out.add(new LdcInsnNode(Long.valueOf(entry.longState)));
+            if (runtime.emitLong(out, entry.longState)) {
+                runtimeStates++;
+            } else {
+                out.add(new LdcInsnNode(Long.valueOf(entry.longState)));
+                fallbackStates++;
+            }
             out.add(new VarInsnNode(Opcodes.LSTORE, stateLocal));
         } else {
-            AsmUtil.pushInt(out, entry.intState);
+            RuntimeTable.Pair entryPair = runtime.pair(entry.intState);
+            if (entryPair != null) {
+                runtime.emitInt(out, entryPair);
+                runtimeStates++;
+            } else {
+                AsmUtil.pushInt(out, entry.intState);
+                fallbackStates++;
+            }
             out.add(new VarInsnNode(Opcodes.ISTORE, stateLocal));
         }
 
@@ -489,9 +520,7 @@ public final class ControlFlowFlatteningPass implements Pass {
                 out.add(insn);
             }
             if (block.handler) {
-                // Handlers keep their original terminator, including direct
-                // jumps into the dispatch cases: the state is only read at the
-                // loop head, so entering a case block directly is well defined.
+
                 if (block.terminator != null) {
                     out.add(block.terminator);
                 }
@@ -500,19 +529,23 @@ public final class ControlFlowFlatteningPass implements Pass {
             switch (block.kind) {
                 case KIND_GOTO:
                 case KIND_FALLTHROUGH:
-                    emitState(out, blocks, block.target, stateLocal, loop, useLongState);
+                    runtimeStates += emitState(out, blocks, block.target, stateLocal, loop,
+                            useLongState, runtime);
                     break;
                 case KIND_CONDITIONAL: {
                     JumpInsnNode jump = (JumpInsnNode) block.terminator;
                     LabelNode taken = new LabelNode();
                     out.add(new JumpInsnNode(jump.getOpcode(), taken));
-                    emitState(out, blocks, block.falseTarget, stateLocal, loop, useLongState);
+                    runtimeStates += emitState(out, blocks, block.falseTarget, stateLocal, loop,
+                            useLongState, runtime);
                     out.add(taken);
-                    emitState(out, blocks, block.trueTarget, stateLocal, loop, useLongState);
+                    runtimeStates += emitState(out, blocks, block.trueTarget, stateLocal, loop,
+                            useLongState, runtime);
                     break;
                 }
                 case KIND_SWITCH:
-                    emitSwitchTransition(out, block, blocks, stateLocal, loop, useLongState);
+                    runtimeStates += emitSwitchTransition(out, block, blocks, stateLocal, loop,
+                            useLongState, runtime);
                     switchEmits++;
                     break;
                 case KIND_RETURN:
@@ -523,17 +556,13 @@ public final class ControlFlowFlatteningPass implements Pass {
             }
         }
 
-        // Nodes moved out of the old instruction list keep their old next/prev
-        // links; every link is overwritten as the nodes are appended in order
-        // except for the very last one. A fresh trailing label guarantees the
-        // final node's next is null (otherwise the list could be cyclic).
         out.add(new LabelNode());
         method.instructions = out;
         method.maxStack = Math.max(Math.max(analyzedMaxStack, 3), 4);
         method.localVariables = null;
         method.visibleLocalVariableAnnotations = null;
         method.invisibleLocalVariableAnnotations = null;
-        // Exception tables are preserved verbatim when handlers exist.
+
         if (!hasTryCatch) {
             method.tryCatchBlocks = new ArrayList<TryCatchBlockNode>();
         }
@@ -541,10 +570,10 @@ public final class ControlFlowFlatteningPass implements Pass {
         result.blocks = normalCount;
         result.tryCatch = hasTryCatch;
         result.switchBlocks = switchEmits;
+        result.states = runtimeStates;
+        result.fallbacks = fallbackStates;
         return result;
     }
-
-    // ------------------------------------------------------------------ blocks
 
     private static List<Block> buildBlocks(MethodNode method, Frame<BasicValue>[] frames) {
         InsnList instructions = method.instructions;
@@ -672,9 +701,7 @@ public final class ControlFlowFlatteningPass implements Pass {
             throw new Skip("target");
         }
         if (blocks.get(index).handler) {
-            // A normal edge into an exception handler entry would merge a
-            // stack-0 frame with the handler's stack-1 frame: leave the method
-            // alone instead of corrupting it.
+
             throw new Skip("handler_edge");
         }
     }
@@ -712,8 +739,6 @@ public final class ControlFlowFlatteningPass implements Pass {
         return null;
     }
 
-    // ---------------------------------------------------------------- emission
-
     private static void emitLocalInit(InsnList out, String[] categories, int from, int to) {
         int slot = from;
         while (slot < to && slot < categories.length) {
@@ -746,32 +771,34 @@ public final class ControlFlowFlatteningPass implements Pass {
         }
     }
 
-    private static void emitState(InsnList out, List<Block> blocks, int target, int stateLocal,
-                                  LabelNode loop, boolean useLongState) {
+    private static int emitState(InsnList out, List<Block> blocks, int target, int stateLocal,
+                                 LabelNode loop, boolean useLongState, RuntimeTable runtime) {
         Block targetBlock = blocks.get(target);
+        int masked = 0;
         if (useLongState) {
-            out.add(new LdcInsnNode(Long.valueOf(targetBlock.longState)));
+            if (runtime.emitLong(out, targetBlock.longState)) {
+                masked = 1;
+            } else {
+                out.add(new LdcInsnNode(Long.valueOf(targetBlock.longState)));
+            }
             out.add(new VarInsnNode(Opcodes.LSTORE, stateLocal));
         } else {
-            // target + (n - n): identical value, but the decompiler no longer sees a
-            // constant per case and cannot re-emit the state machine as if/else.
-            int scratch = stateLocal + 1;
-            out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/System",
-                    "nanoTime", "()J", false));
-            out.add(new InsnNode(Opcodes.L2I));
-            out.add(new VarInsnNode(Opcodes.ISTORE, scratch));
-            AsmUtil.pushInt(out, targetBlock.intState);
-            out.add(new VarInsnNode(Opcodes.ILOAD, scratch));
-            out.add(new VarInsnNode(Opcodes.ILOAD, scratch));
-            out.add(new InsnNode(Opcodes.ISUB));
-            out.add(new InsnNode(Opcodes.IADD));
+            RuntimeTable.Pair pair = runtime.pair(targetBlock.intState);
+            if (pair != null) {
+                runtime.emitInt(out, pair);
+                masked = 1;
+            } else {
+                AsmUtil.pushInt(out, targetBlock.intState);
+            }
             out.add(new VarInsnNode(Opcodes.ISTORE, stateLocal));
         }
         out.add(new JumpInsnNode(Opcodes.GOTO, loop));
+        return masked;
     }
 
-    private static void emitSwitchTransition(InsnList out, Block block, List<Block> blocks,
-                                             int stateLocal, LabelNode loop, boolean useLongState) {
+    private static int emitSwitchTransition(InsnList out, Block block, List<Block> blocks,
+                                            int stateLocal, LabelNode loop, boolean useLongState,
+                                            RuntimeTable runtime) {
         int targetCount = block.switchTargets.length;
         LabelNode[] caseLabels = new LabelNode[targetCount];
         for (int i = 0; i < targetCount; i++) {
@@ -789,15 +816,17 @@ public final class ControlFlowFlatteningPass implements Pass {
             }
             out.add(new LookupSwitchInsnNode(defaultCase, keys, caseLabels));
         }
+        int masked = 0;
         for (int i = 0; i < targetCount; i++) {
             out.add(caseLabels[i]);
-            emitState(out, blocks, block.switchTargets[i], stateLocal, loop, useLongState);
+            masked += emitState(out, blocks, block.switchTargets[i], stateLocal, loop,
+                    useLongState, runtime);
         }
         out.add(defaultCase);
-        emitState(out, blocks, block.switchDefault, stateLocal, loop, useLongState);
+        masked += emitState(out, blocks, block.switchDefault, stateLocal, loop, useLongState,
+                runtime);
+        return masked;
     }
-
-    // ---------------------------------------------------------------- helpers
 
     private static void collectCategories(Frame<BasicValue> frame, String[] categories) {
         if (frame == null) {
@@ -933,9 +962,10 @@ public final class ControlFlowFlatteningPass implements Pass {
         int blocks;
         boolean tryCatch;
         int switchBlocks;
+        int states;
+        int fallbacks;
     }
 
-    /** Internal control-flow reason to fall back to the original method. */
     private static final class Skip extends RuntimeException {
         final String reason;
 

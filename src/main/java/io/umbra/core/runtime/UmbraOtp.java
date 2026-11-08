@@ -24,51 +24,27 @@ package io.umbra.core.runtime;
  */
 public final class UmbraOtp {
 
-    /** Serializes the advance; also the only lock the runtime helpers share. */
     private static final Object LOCK = new Object();
 
-    /** Current one-time state. */
     private static long state = seed();
 
-    /** Low bit exposed to the guards; flips on every advance. */
     private static int toggle;
 
-    /**
-     * Native advance bound by the generated guard library
-     * ({@code RegisterNatives} from its {@code JNI_OnLoad}). Unregistered when the
-     * build has no native guard, in which case the Java path is used.
-     */
     private static native long nativeNext(long state);
 
-    /** {@code 0} = not tried yet, {@code 1} = linked, {@code 2} = Java only. */
     private static int nativeState;
 
-    /** Bounded retries while the guard library has not been loaded yet. */
     private static int nativeTries;
 
     private UmbraOtp() {
     }
 
-    /**
-     * Advances the one-time state.
-     *
-     * @return the new state, never {@code 0} after the first advance
-     */
     public static long next() {
         synchronized (LOCK) {
             return advance();
         }
     }
 
-    /**
-     * Advances the one-time state and returns the carrier used by the guards.
-     *
-     * <p>Bit 0 alternates between calls, the remaining bits are the mixed state,
-     * so a method that guards on {@code carrier & 1} provably takes the other
-     * path on its next invocation.</p>
-     *
-     * @return carrier value for this call
-     */
     public static int carrier() {
         synchronized (LOCK) {
             long value = advance();
@@ -77,25 +53,18 @@ public final class UmbraOtp {
         }
     }
 
-    /** Current state without advancing (used by the self-test). */
     public static long peek() {
         synchronized (LOCK) {
             return state;
         }
     }
 
-    /** Low bit of the last advance without advancing again (used by the self-test). */
     public static int bit() {
         synchronized (LOCK) {
             return toggle;
         }
     }
 
-    /**
-     * Whether the advance is currently computed by the native guard
-     * ({@code 1}) or by the Java fallback ({@code 0}). Self-test hook only: the
-     * value says nothing about the state itself.
-     */
     public static int nativeBound() {
         synchronized (LOCK) {
             return nativeState == 1 ? 1 : 0;
@@ -107,8 +76,7 @@ public final class UmbraOtp {
         value ^= value << 13;
         value ^= value >>> 7;
         value ^= value << 17;
-        // A zero state would be a xorshift fixed point; the odd constant keeps
-        // every state non-zero, including a seed that came out as zero.
+
         value ^= 0x9E3779B97F4A7C15L;
         value = nativeMix(value);
         state = value;
@@ -116,15 +84,6 @@ public final class UmbraOtp {
         return value;
     }
 
-    /**
-     * Hands the advance to the guard library when it registered
-     * {@code nativeNext}, so the state transition is not a plain Java xorshift a
-     * patcher can reimplement. The guard loads lazily (its {@code JNI_OnLoad} runs
-     * when the native library is loaded), so the first protected calls can happen
-     * before the binding exists: those are retried a bounded number of times and
-     * then the Java path is kept for good. Nothing escapes, because this runs
-     * inside the entry prelude of every protected method.
-     */
     private static long nativeMix(long value) {
         if (nativeState == 2 || (nativeState == 0 && nativeTries >= 8)) {
             return value;

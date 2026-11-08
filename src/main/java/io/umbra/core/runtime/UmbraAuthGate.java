@@ -91,13 +91,10 @@ public final class UmbraAuthGate {
     private static String TIMEOUT = "@@TIMEOUT@@";
     private static String ENTRY = "@@ENTRY@@";
 
-    /** Last authorization failure reason, used for the silent/CI diagnostics line. */
     private static String lastError = "";
 
-    /** Cached machine fingerprint (SHA-256 hex) used for HWID binding. */
     private static String hwidCache;
 
-    /** True when the last server response rejected this machine's fingerprint. */
     private static boolean hwidMismatch;
 
     private static final Color BG = new Color(0x12, 0x1A, 0x28);
@@ -111,10 +108,6 @@ public final class UmbraAuthGate {
     private UmbraAuthGate() {
     }
 
-    /**
-     * Entry point called before protected {@code main} methods and configured
-     * entry points. Returns normally only after successful authorization.
-     */
     public static void guard() {
         final boolean silent = isTrue(System.getProperty("umbra.auth.silent", ""));
         lastError = "";
@@ -150,9 +143,7 @@ public final class UmbraAuthGate {
                 }
             }
             if (silent) {
-                // silent mode never bypasses server verification: no valid token
-                // (or a machine-fingerprint rejection) means the protected program
-                // refuses to start.
+
                 System.err.println("UMBRA_AUTH_REQUIRED: "
                         + (hwidMismatch ? "hwid mismatch" : reason()));
                 System.exit(1);
@@ -182,21 +173,6 @@ public final class UmbraAuthGate {
         return lastError == null || lastError.isEmpty() ? "authorization required" : lastError;
     }
 
-    // ------------------------------------------------------------------
-    // machine fingerprint (HWID binding)
-    // ------------------------------------------------------------------
-
-    /**
-     * Stable, non-sensitive machine fingerprint used for HWID binding:
-     * SHA-256 over the sorted non-loopback network-interface MAC addresses,
-     * hostname ({@code HOSTNAME}/{@code COMPUTERNAME}, then
-     * {@link InetAddress#getLocalHost()}), {@code user.name}, {@code os.name}
-     * and {@code os.arch} -> 64 lowercase hex chars.
-     *
-     * <p>{@code -Dumbra.auth.hwid=<value>} overrides the computation (tests and
-     * managed environments). The value is cached for the process lifetime; it is
-     * never written to the token cache.</p>
-     */
     private static String hwid() {
         String override = System.getProperty("umbra.auth.hwid", "").trim();
         if (!override.isEmpty()) {
@@ -229,14 +205,14 @@ public final class UmbraAuthGate {
                     }
                     macs.add(hex.toString());
                 } catch (Throwable ignored) {
-                    // Interface disappears or cannot be queried: skip it.
+
                 }
             }
             for (String mac : macs) {
                 source.append(mac).append('|');
             }
         } catch (Throwable ignored) {
-            // No usable network interfaces: the remaining inputs still identify.
+
         }
         String host = System.getenv("HOSTNAME");
         if (host == null || host.trim().isEmpty()) {
@@ -266,24 +242,12 @@ public final class UmbraAuthGate {
             }
             hwidCache = hex.toString();
         } catch (Throwable unavailable) {
-            // SHA-256 always exists on Java 8; keep a stable fallback identifier.
+
             hwidCache = "hwid-unavailable";
         }
         return hwidCache;
     }
 
-    /**
-     * Headless helper used by tests/CI: logs in (or activates with a card) and
-     * writes the token cache. Never opens a window.
-     *
-     * @param server    authorization server base URL
-     * @param software  software id
-     * @param username  user name
-     * @param password  password
-     * @param card      optional activation card (may be empty)
-     * @param cacheFile token cache path (empty for the default location)
-     * @return true when a token was obtained and cached
-     */
     public static boolean authenticate(String server, String software, String username,
                                        String password, String card, String cacheFile) {
         SERVER = server == null ? "" : server.trim();
@@ -304,7 +268,6 @@ public final class UmbraAuthGate {
         return false;
     }
 
-    /** True when a token is currently valid for this software. */
     public static boolean isAuthorized() {
         try {
             String cached = loadCachedToken();
@@ -313,10 +276,6 @@ public final class UmbraAuthGate {
             return false;
         }
     }
-
-    // ------------------------------------------------------------------
-    // server API
-    // ------------------------------------------------------------------
 
     private static boolean validateToken(String token) {
         if (token == null || token.isEmpty()) {
@@ -350,7 +309,6 @@ public final class UmbraAuthGate {
         return false;
     }
 
-    /** @return token on success, {@code null} when login did not authorize. */
     private static String loginToken(String username, String password) {
         Map<String, Object> result = apiPost("/api/auth/login",
                 "username=" + encode(username) + "&password=" + encode(password)
@@ -358,7 +316,6 @@ public final class UmbraAuthGate {
         return tokenFrom(result);
     }
 
-    /** @return token on success, {@code null} when activation failed. */
     private static String activateToken(String username, String password, String card) {
         Map<String, Object> result = apiPost("/api/auth/activate",
                 "username=" + encode(username) + "&password=" + encode(password)
@@ -419,9 +376,7 @@ public final class UmbraAuthGate {
             String text = in == null ? "" : readAll(in);
             Map<String, Object> parsed = parseJsonObject(text);
             if (parsed == null && status >= HttpURLConnection.HTTP_BAD_REQUEST) {
-                // The JDK returns a null error stream for some 401 responses (no
-                // challenge header). Map the HTTP status to the contract code so the
-                // dialog and silent mode can still report a meaningful error.
+
                 parsed = new LinkedHashMap<String, Object>();
                 parsed.put("ok", Boolean.FALSE);
                 if (status == 401) {
@@ -483,12 +438,8 @@ public final class UmbraAuthGate {
         return new String(out.toByteArray(), StandardCharsets.UTF_8);
     }
 
-    // ------------------------------------------------------------------
-    // token cache
-    // ------------------------------------------------------------------
-
     private static String cachePath() {
-        // Runtime override first (E2E isolation), then the build-time cache path.
+
         String runtime = System.getProperty("umbra.auth.cache", "").trim();
         if (!runtime.isEmpty()) {
             return runtime;
@@ -507,8 +458,7 @@ public final class UmbraAuthGate {
             if (!Files.isRegularFile(path)) {
                 return null;
             }
-            // The cache is keyed by server + software: a token saved for another
-            // software (even when E2E tests share one cache path) never validates.
+
             String cachedServer = null;
             String cachedSoftware = null;
             String token = null;
@@ -562,10 +512,10 @@ public final class UmbraAuthGate {
                 file.setWritable(false, false);
                 file.setWritable(true, true);
             } catch (Throwable ignored) {
-                // Windows ignores POSIX-style permissions; best effort only.
+
             }
         } catch (Throwable ignored) {
-            // An unwritable cache must not break authorization.
+
         }
     }
 
@@ -576,14 +526,6 @@ public final class UmbraAuthGate {
         }
         return result;
     }
-
-    // ------------------------------------------------------------------
-    // interactive dialog (restrained classic style + zh/en internationalization)
-    //
-    // The template must stay a single class file: panel/field/button chrome is
-    // generated as flat ARGB images, and every user-visible string lives in a
-    // Swing component refreshed by the UI.
-    // ------------------------------------------------------------------
 
     private static final int TONE_INFO = 0;
     private static final int TONE_ERROR = 1;
@@ -617,14 +559,8 @@ public final class UmbraAuthGate {
     private static final int BUTTON_WIDTH = CONTENT_WIDTH;
     private static final int BUTTON_HEIGHT = 38;
 
-    /**
-     * The gate UI is English-only by product decision (the obfuscator GUI and the
-     * admin console keep their own zh/en switches). -Dumbra.auth.lang is no
-     * longer used by the dialog.
-     */
     private static boolean chinese = false;
 
-    /** Live translators registered by the open dialog (single dialog per process). */
     private static final List<Runnable> TRANSLATORS = new ArrayList<Runnable>();
 
     private static String lastStatusZh = "";
@@ -682,7 +618,7 @@ public final class UmbraAuthGate {
             dialog.setBackground(new Color(0, 0, 0, 0));
             dialog.setShape(new RoundRectangle2D.Double(0, 0, DIALOG_WIDTH, DIALOG_HEIGHT, 8, 8));
         } catch (Throwable ignored) {
-            // Shape/transparency is best effort on older window managers.
+
         }
 
         final Font bodyFont = uiBodyFont(Font.PLAIN, 12);
@@ -701,7 +637,6 @@ public final class UmbraAuthGate {
         root.setLayout(new BorderLayout(0, 8));
         root.setBorder(new EmptyBorder(16, 20, 14, 20));
 
-        // Header: wordmark, serif title, thin bronze rule, software line.
         final JLabel brand = styledLabel("UMBRA AUTH", brandFont, GOLD);
         final JLabel title = styledLabel(TITLE, titleFont, INK_TEXT);
         final JPanel rule = new JPanel();
@@ -729,7 +664,6 @@ public final class UmbraAuthGate {
         headerRight.add(close);
         header.add(headerRight, BorderLayout.NORTH);
 
-        // Underlined text-style tabs + CardLayout panels (no OS tab chrome).
         final CardLayout cardLayout = new CardLayout();
         final JPanel cardPanel = transparentPanel(cardLayout);
         final String[] cardNames = {"login", "register", "activate"};
@@ -741,7 +675,6 @@ public final class UmbraAuthGate {
             tabStrip.add(tabButtons[i]);
         }
 
-        // Login card.
         final JLabel loginUserCaption = caption(smallFont);
         final JLabel loginPassCaption = caption(smallFont);
         final JTextField loginUser = textField(bodyFont);
@@ -756,7 +689,6 @@ public final class UmbraAuthGate {
         loginFields.add(fieldFrame(loginPass, fieldIdle, fieldFrames));
         cardPanel.add(card(loginFields, loginButton), cardNames[0]);
 
-        // Register card.
         final JLabel regUserCaption = caption(smallFont);
         final JLabel regPassCaption = caption(smallFont);
         final JLabel regConfirmCaption = caption(smallFont);
@@ -776,7 +708,6 @@ public final class UmbraAuthGate {
         registerFields.add(fieldFrame(regConfirm, fieldIdle, fieldFrames));
         cardPanel.add(card(registerFields, registerButton), cardNames[1]);
 
-        // Card activation card.
         final JLabel actUserCaption = caption(smallFont);
         final JLabel actPassCaption = caption(smallFont);
         final JLabel actCardCaption = caption(smallFont);
@@ -800,8 +731,6 @@ public final class UmbraAuthGate {
         centerStack.add(tabStrip, BorderLayout.NORTH);
         centerStack.add(cardPanel, BorderLayout.CENTER);
 
-        // Status line only: the server URL and software id are intentionally
-        // hidden from end users so the gate does not leak deployment details.
         final JLabel status = styledLabel(" ", bodyFont, INK_MUTED);
         final JButton exit = imageButton(hover, "", 104, 30, bodyFont, STYLE_GHOST, STYLE_GHOST_HOVER);
         final JPanel footer = transparentPanel(new BorderLayout());
@@ -877,7 +806,6 @@ public final class UmbraAuthGate {
                 KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0),
                 JComponent.WHEN_IN_FOCUSED_WINDOW);
 
-        // Register all dynamic strings once; refreshI18n() runs them on toggle.
         onTranslate(() -> {
             brand.setFont(uiBodyFont(Font.BOLD, 10));
             title.setText(TITLE);
@@ -907,7 +835,6 @@ public final class UmbraAuthGate {
             dialog.setTitle(TITLE);
         });
 
-        // One AWT listener drives window dragging, hover and field focus.
         final Point dragStart = new Point();
         final boolean[] dragging = {false};
         final AWTEventListener uiEvents = event -> {
@@ -982,10 +909,6 @@ public final class UmbraAuthGate {
         }
         return -1;
     }
-
-    // ------------------------------------------------------------------
-    // dialog actions (all user-visible text is localized)
-    // ------------------------------------------------------------------
 
     private static void attemptLogin(JDialog dialog, JLabel status, boolean[] granted,
                                      Runnable showActivate, String username, String password) {
@@ -1150,9 +1073,6 @@ public final class UmbraAuthGate {
         String status = string(result, "status");
         return status == null ? "Authorization failed" : status;
     }
-    // ------------------------------------------------------------------
-    // layout helpers
-    // ------------------------------------------------------------------
 
     private static void selectTab(JPanel cards, CardLayout layout, JButton[] tabs, int[] selected,
                                   Font tabFont, int index, String[] names) {
@@ -1293,10 +1213,6 @@ public final class UmbraAuthGate {
         hover.put(button, new Icon[]{normal, hovered});
     }
 
-    // ------------------------------------------------------------------
-    // fonts
-    // ------------------------------------------------------------------
-
     private static Font uiBodyFont(int style, int size) {
         try {
             java.util.Set<String> families = new java.util.HashSet<String>(java.util.Arrays.asList(
@@ -1308,7 +1224,7 @@ public final class UmbraAuthGate {
                 }
             }
         } catch (Throwable ignored) {
-            // Fall through to the logical Dialog font.
+
         }
         return new Font("Dialog", style, size);
     }
@@ -1326,7 +1242,7 @@ public final class UmbraAuthGate {
                 }
             }
         } catch (Throwable ignored) {
-            // Fall through to the logical Serif font.
+
         }
         return new Font("Serif", style, size);
     }
@@ -1343,10 +1259,6 @@ public final class UmbraAuthGate {
         }
         return false;
     }
-
-    // ------------------------------------------------------------------
-    // generated classic chrome (flat images; single-class template)
-    // ------------------------------------------------------------------
 
     private static BufferedImage panelImage(int width, int height) {
         BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
@@ -1402,10 +1314,6 @@ public final class UmbraAuthGate {
         g.dispose();
         return image;
     }
-
-    // ------------------------------------------------------------------
-    // minimal flat JSON parser (responses are flat per server contract)
-    // ------------------------------------------------------------------
 
     private static Map<String, Object> parseJsonObject(String text) {
         if (text == null) {
@@ -1486,7 +1394,6 @@ public final class UmbraAuthGate {
         }
     }
 
-    /** Parses a JSON string starting at the opening quote; returns the next index or -1. */
     private static int parseString(String text, int index, StringBuilder out) {
         int i = index + 1;
         int length = text.length();
@@ -1592,7 +1499,6 @@ public final class UmbraAuthGate {
         return "true".equalsIgnoreCase(trimmed) || "1".equals(trimmed) || "yes".equalsIgnoreCase(trimmed);
     }
 
-    /** Kept to make the @@ENTRY@@ placeholder observable for diagnostics. */
     static String entryPoints() {
         return ENTRY == null ? "" : ENTRY;
     }

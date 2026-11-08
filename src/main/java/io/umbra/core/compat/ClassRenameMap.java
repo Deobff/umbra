@@ -25,7 +25,6 @@ import java.util.Set;
  */
 public final class ClassRenameMap {
 
-    /** No-op mapping. */
     public static final ClassRenameMap EMPTY = new ClassRenameMap(
             Collections.<String, String>emptyMap(),
             Collections.<String, String>emptyMap(),
@@ -71,7 +70,6 @@ public final class ClassRenameMap {
         }
     }
 
-    /** Builds a map from the renamer output; any argument may be {@code null}. */
     public static ClassRenameMap of(Map<String, String> classes, Map<String, String> methods,
                                     Map<String, String> fields) {
         boolean emptyClasses = classes == null || classes.isEmpty();
@@ -83,7 +81,6 @@ public final class ClassRenameMap {
         return new ClassRenameMap(copy(classes), copy(methods), copy(fields));
     }
 
-    /** Builds a class-only map (useful for tests and tooling). */
     public static ClassRenameMap ofClasses(Map<String, String> classes) {
         return of(classes, null, null);
     }
@@ -103,7 +100,6 @@ public final class ClassRenameMap {
         return !classes.isEmpty();
     }
 
-    /** Maps an internal class name; returns the input when unmapped. */
     public String mapClass(String internalName) {
         if (internalName == null) {
             return null;
@@ -112,7 +108,6 @@ public final class ClassRenameMap {
         return mapped == null ? internalName : mapped;
     }
 
-    /** Maps a dotted binary class name; returns the input when unmapped. */
     public String mapDotted(String dottedName) {
         if (dottedName == null || dottedName.isEmpty()) {
             return dottedName;
@@ -121,7 +116,6 @@ public final class ClassRenameMap {
         return mapped == null ? dottedName : mapped.replace('/', '.');
     }
 
-    /** Maps a global method name; returns the input when unmapped. */
     public String mapMethodName(String name, String descriptor) {
         if (name == null) {
             return null;
@@ -130,7 +124,6 @@ public final class ClassRenameMap {
         return mapped == null ? name : mapped;
     }
 
-    /** Maps a global field name; returns the input when unmapped. */
     public String mapFieldName(String name, String descriptor) {
         if (name == null) {
             return null;
@@ -139,7 +132,6 @@ public final class ClassRenameMap {
         return mapped == null ? name : mapped;
     }
 
-    /** Maps an internal package name ({@code a/b}); returns the input when unmapped. */
     public String mapPackageInternal(String internalPackage) {
         if (internalPackage == null) {
             return null;
@@ -148,7 +140,6 @@ public final class ClassRenameMap {
         return mapped == null ? internalPackage : mapped;
     }
 
-    /** Maps a dotted package name ({@code a.b}); returns the input when unmapped. */
     public String mapPackageDotted(String dottedPackage) {
         if (dottedPackage == null || dottedPackage.isEmpty()) {
             return dottedPackage;
@@ -157,34 +148,22 @@ public final class ClassRenameMap {
         return mapped == null ? dottedPackage : mapped.replace('/', '.');
     }
 
-    /** True when the package itself has a consistent mapping. */
     public boolean hasPackageMapping(String internalPackage) {
         return packages.containsKey(internalPackage);
     }
 
-    /** True when at least one class left this package for a different package. */
     public boolean hasClassMovedOut(String internalPackage) {
         return movedOutPackages.contains(internalPackage);
     }
 
-    /** Packages whose classes moved inconsistently; they cannot be mapped safely. */
     public Set<String> packageConflicts() {
         return Collections.unmodifiableSet(packageConflicts);
     }
 
-    /** Consistent package mappings (internal form). */
     public Map<String, String> packageMap() {
         return Collections.unmodifiableMap(packages);
     }
 
-    /**
-     * Rewrites dotted class names inside an arbitrary text blob.
-     *
-     * <p>Tokens are scanned as Java-identifier runs including {@code '.'} and
-     * {@code '$'}; only exact mapped class names are replaced, so file formats
-     * such as {@code spring.factories}, {@code .imports} lists and
-     * {@code META-INF/native-image} JSON stay structurally intact.</p>
-     */
     public String rewriteDottedNames(String text) {
         if (text == null || text.isEmpty() || classes.isEmpty()) {
             return text;
@@ -216,7 +195,6 @@ public final class ClassRenameMap {
         return out.toString();
     }
 
-    /** ASM remapper backed by this mapping (class/method/field/package aware). */
     public Remapper remapper() {
         final ClassRenameMap mapping = this;
         return new Remapper() {
@@ -242,7 +220,7 @@ public final class ClassRenameMap {
 
             @Override
             public String mapPackageName(String name) {
-                // ASM passes the internal form (as stored in the Module attribute).
+
                 return mapping.mapPackageInternal(name);
             }
 

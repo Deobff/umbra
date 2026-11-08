@@ -9,15 +9,11 @@ package io.umbra.core.api;
  */
 public interface Pass {
 
-    /** Stable identifier used in logs and configuration. */
     String name();
 
-    /** Lower values run first. */
     int order();
 
-    /** Whether the pass should run for the current configuration. */
     boolean enabled(PassContext context);
 
-    /** Executes the pass. */
     void run(PassContext context) throws Exception;
 }

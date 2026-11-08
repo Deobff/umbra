@@ -23,7 +23,6 @@ public final class MappingWriter {
     private MappingWriter() {
     }
 
-    /** Writes the mapping to {@code file}. */
     public static void write(Path file, MappingSet mappings) throws IOException {
         Path parent = file.toAbsolutePath().getParent();
         if (parent != null) {
@@ -32,7 +31,6 @@ public final class MappingWriter {
         Files.write(file, toText(mappings).getBytes(StandardCharsets.UTF_8));
     }
 
-    /** Renders the mapping as text. */
     public static String toText(MappingSet mappings) {
         StringBuilder out = new StringBuilder();
         out.append("# Umbra mapping file\n");

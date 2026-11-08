@@ -91,8 +91,6 @@ public final class NocturneTest {
         System.out.println("NocturneTest: " + checks + " checks passed");
     }
 
-    // ------------------------------------------------------------ main tests
-
     private static void testNocturnePass() throws Exception {
         ClassNode node = target();
         byte[] original = serialize(node);
@@ -114,7 +112,6 @@ public final class NocturneTest {
         Class<?> type = verifyAndLoad(transformed, "nocturne", TARGET_DOTTED);
         assertBehaviour(type);
 
-        // Shadow bodies exist and the dispatcher really is keyed.
         int addShadows = countShadows(node, "add", "(IIJ)I");
         check(addShadows == 3, "add has 3 keyed shadow clones: " + addShadows);
         MethodNode addDispatcher = find(node, "add", "(II)I");
@@ -150,7 +147,7 @@ public final class NocturneTest {
     }
 
     private static void testSkipsAndLimits() throws Exception {
-        // Over-limit method, synchronized method, @Keep method, native method.
+
         ClassNode node = skipTarget();
         byte[] original = serialize(node);
         PassContext context = context(original, node, 303L, 3, 10, 0, new ArrayList<String>());
@@ -161,7 +158,6 @@ public final class NocturneTest {
                 "large/sync/keep methods are counted as skips: " + stat(context.stats(), "nocturne.skipped"));
         verifyAndLoad(serialize(node, context.hierarchy()), "skips", SKIP_DOTTED);
 
-        // Per-class method cap.
         ClassNode cap = capTarget();
         byte[] capBytes = serialize(cap);
         PassContext capContext = context(capBytes, cap, 404L, 2, 4000, 1, new ArrayList<String>());
@@ -212,8 +208,6 @@ public final class NocturneTest {
         check(!Arrays.equals(firstBytes, serialize(third, c.hierarchy())),
                 "different seed yields different shadow state");
     }
-
-    // --------------------------------------------------------------- behaviour
 
     private static void assertBehaviour(Class<?> type) throws Exception {
         check(((Integer) call(type, "add", new Class<?>[] { int.class, int.class }, 7, 8))
@@ -286,8 +280,6 @@ public final class NocturneTest {
         }
     }
 
-    // --------------------------------------------------------------- demo jar
-
     private static void testDemoJar() throws Exception {
         Path root = findProjectRoot();
         if (root == null) {
@@ -323,8 +315,6 @@ public final class NocturneTest {
         check(Arrays.equals(classDigest(firstJar), classDigest(secondJar)),
                 "Nocturne CLI output is byte-identical for the same seed");
     }
-
-    // ------------------------------------------------------- class synthesis
 
     private static ClassNode target() {
         ClassNode node = baseClass(TARGET);
@@ -689,8 +679,6 @@ public final class NocturneTest {
         return method;
     }
 
-    // ------------------------------------------------------------ inspection
-
     private static int countShadows(ClassNode node, String methodName, String descriptor) {
         int count = 0;
         for (MethodNode method : node.methods) {
@@ -738,8 +726,6 @@ public final class NocturneTest {
         return false;
     }
 
-    // ------------------------------------------------------------ infrastructure
-
     private static PassContext context(byte[] originalBytes, ClassNode node, long seed, int variants,
                                        int maxInstructions, int maxMethods, List<String> bodySkip) {
         try {
@@ -769,7 +755,6 @@ public final class NocturneTest {
         }
     }
 
-    /** Console log sink so verification/skip reasons surface while debugging. */
     private static Log testLog() {
         boolean verbose = System.getProperty("umbra.nocturne.verbose") != null;
         if (!verbose) {
@@ -897,7 +882,6 @@ public final class NocturneTest {
         return trimmed.length() <= 1500 ? trimmed : trimmed.substring(trimmed.length() - 1500);
     }
 
-    /** SHA-256 over all class entries (sorted) of a jar. */
     private static byte[] classDigest(Path jar) throws Exception {
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         ZipFile zip = new ZipFile(jar.toFile());
@@ -961,7 +945,6 @@ public final class NocturneTest {
         return out.toByteArray();
     }
 
-    /** Fails loudly instead of hanging forever if transformed code loops. */
     private static void startWatchdog() {
         final long timeout = Long.parseLong(System.getProperty("umbra.nocturne.watchdog", "60000"));
         Thread watchdog = new Thread(new Runnable() {

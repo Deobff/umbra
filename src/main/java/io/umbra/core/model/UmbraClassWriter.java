@@ -22,18 +22,6 @@ public final class UmbraClassWriter extends ClassWriter {
         return hierarchy.getCommonSuperClass(type1, type2);
     }
 
-    /**
-     * Serializes a class, preferring computed frames. For class file versions
-     * before 1.6 (major 50) frames are optional, so an incomplete hierarchy may
-     * fall back to computing max stack/locals only. For version 1.6 and newer a
-     * StackMapTable is mandatory: silently dropping frames would produce an
-     * unverifiable class, so the failure is propagated and {@code Jars.write}
-     * reports the class name.
-     *
-     * @param node      class to serialize
-     * @param hierarchy hierarchy resolver
-     * @return class file bytes
-     */
     public static byte[] toBytes(ClassNode node, Hierarchy hierarchy) {
         try {
             UmbraClassWriter writer = new UmbraClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS, hierarchy);

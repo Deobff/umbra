@@ -39,13 +39,12 @@ import javax.crypto.spec.SecretKeySpec;
  */
 public final class Cipher {
 
-    /** Size of the symmetric key in bytes (256 bits). */
     public static final int KEY_BYTES = 32;
-    /** Size of the ChaCha20 nonce in bytes (96 bits). */
+
     public static final int NONCE_BYTES = 12;
-    /** Size of the HMAC-SHA-256 authentication tag in bytes. */
+
     public static final int TAG_BYTES = 32;
-    /** Size of the AES-CTR initialisation vector in bytes. */
+
     public static final int AES_IV_BYTES = 16;
 
     private static final String HMAC_ALGORITHM = "HmacSHA256";
@@ -54,7 +53,6 @@ public final class Cipher {
     private Cipher() {
     }
 
-    /** Supported payload ciphers. */
     public enum Algorithm {
         XOR("xor"),
         CHACHA20("chacha20"),
@@ -66,12 +64,10 @@ public final class Cipher {
             this.id = id;
         }
 
-        /** Stable identifier used in option values and logs. */
         public String id() {
             return id;
         }
 
-        /** Parses an option value, falling back to {@code fallback}. */
         public static Algorithm parse(String value, Algorithm fallback) {
             if (value != null) {
                 String normalized = value.trim().toLowerCase(java.util.Locale.ROOT);
@@ -89,18 +85,6 @@ public final class Cipher {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Legacy string API (kept binary/source compatible for existing passes)
-    // ------------------------------------------------------------------
-
-    /**
-     * Encrypts a UTF-8 string into a Base64 ChaCha20 payload. Deterministic for
-     * a given key.
-     *
-     * @param plain plaintext string
-     * @param key   64-bit call-site key
-     * @return Base64 ciphertext
-     */
     public static String encrypt(String plain, long key) {
         byte[] data = plain.getBytes(StandardCharsets.UTF_8);
         byte[] derivedKey = legacyKey(key);
@@ -113,13 +97,6 @@ public final class Cipher {
         }
     }
 
-    /**
-     * Decrypts a payload produced by {@link #encrypt(String, long)}.
-     *
-     * @param payload Base64 ciphertext
-     * @param key     64-bit call-site key
-     * @return plaintext string
-     */
     public static String decrypt(String payload, long key) {
         byte[] data = Base64.getDecoder().decode(payload);
         byte[] derivedKey = legacyKey(key);
@@ -132,74 +109,46 @@ public final class Cipher {
         }
     }
 
-    /** Derives the 256-bit key used by the legacy string API. */
     public static byte[] legacyKey(long key) {
         return sha256(concat(utf8(DomainTags.tag(DomainTags.I_LEGACY_KEY)), le64(key)));
     }
 
-    /** Derives the 96-bit nonce used by the legacy string API. */
     public static byte[] legacyNonce(long key) {
         return first(sha256(concat(utf8(DomainTags.tag(DomainTags.I_LEGACY_NONCE)), le64(key))),
                 NONCE_BYTES);
     }
 
-    // ------------------------------------------------------------------
-    // String payload key derivation (mirrored by the runtime decryptor)
-    // ------------------------------------------------------------------
-
-    /** Deterministic per-call-site seed embedded in the class file. */
     public static long deriveSiteSeed(long seed, String className, int siteId) {
         byte[] digest = sha256(concat(utf8(DomainTags.tag(DomainTags.I_SITE_SEED)), le64(seed),
                 utf8(className), le32(siteId)));
         return readLongBE(digest, 0);
     }
 
-    /** Deterministic 256-bit per-class key. */
     public static byte[] deriveClassKey(long seed, String className) {
         return sha256(concat(utf8(DomainTags.tag(DomainTags.I_CLASS_KEY)), le64(seed),
                 utf8(className)));
     }
 
-    /** Per-site key (32 bytes) derived from the embedded 64-bit site seed. */
     public static byte[] stringSiteKey(long siteSeed, int siteId) {
         return sha256(concat(utf8(DomainTags.tag(DomainTags.I_SITE_KEY)), le64(siteSeed),
                 le32(siteId)));
     }
 
-    /** Per-site nonce (12 bytes) derived from the embedded 64-bit site seed. */
     public static byte[] stringSiteNonce(long siteSeed, int siteId) {
         return first(sha256(concat(utf8(DomainTags.tag(DomainTags.I_SITE_NONCE)), le64(siteSeed),
                 le32(siteId))), NONCE_BYTES);
     }
 
-    /** Per-class nonce (12 bytes) derived from the 256-bit class key. */
     public static byte[] stringClassNonce(byte[] classKey, int siteId) {
         return first(sha256(concat(utf8(DomainTags.tag(DomainTags.I_CLASS_NONCE)), classKey,
                 le32(siteId))), NONCE_BYTES);
     }
 
-    /** AES-CTR IV derived from the key and the payload nonce. */
     public static byte[] aesIv(byte[] key, byte[] nonce) {
         return first(sha256(concat(utf8(DomainTags.tag(DomainTags.I_AES_IV)), key, nonce)),
                 AES_IV_BYTES);
     }
 
-    // ------------------------------------------------------------------
-    // Authenticated payload envelopes (class encryption)
-    // ------------------------------------------------------------------
-
-    /**
-     * Encrypts a class payload and authenticates it.
-     *
-     * <p>Envelope layout: {@code nonce(12) | ciphertext | tag(32)}. The tag is
-     * {@code HMAC-SHA-256(key, nonce | ciphertext)}.</p>
-     *
-     * @param plain  plaintext bytes
-     * @param key    256-bit key
-     * @param nonce  96-bit nonce
-     * @param alg    payload cipher ({@link Algorithm#CHACHA20} or {@link Algorithm#AES_CTR})
-     * @return sealed envelope
-     */
     public static byte[] seal(byte[] plain, byte[] key, byte[] nonce, Algorithm alg) {
         requireLength(key, KEY_BYTES, "key");
         requireLength(nonce, NONCE_BYTES, "nonce");
@@ -208,11 +157,6 @@ public final class Cipher {
         return concat(nonce, ciphertext, tag);
     }
 
-    /**
-     * Verifies and decrypts an envelope produced by {@link #seal}.
-     *
-     * @throws SecurityException when the payload was tampered with
-     */
     public static byte[] unseal(byte[] envelope, byte[] key, Algorithm alg) {
         requireLength(key, KEY_BYTES, "key");
         if (envelope == null || envelope.length < NONCE_BYTES + TAG_BYTES) {
@@ -230,7 +174,6 @@ public final class Cipher {
         return decryptPayload(ciphertext, key, nonce, alg);
     }
 
-    /** Encrypts raw bytes with the requested cipher (no authentication). */
     public static byte[] encryptPayload(byte[] plain, byte[] key, byte[] nonce, Algorithm alg) {
         requireLength(key, KEY_BYTES, "key");
         requireLength(nonce, NONCE_BYTES, "nonce");
@@ -241,16 +184,10 @@ public final class Cipher {
         return chacha20(key, nonce, 1, plain);
     }
 
-    /** Decrypts raw bytes with the requested cipher (no authentication). */
     public static byte[] decryptPayload(byte[] data, byte[] key, byte[] nonce, Algorithm alg) {
         return encryptPayload(data, key, nonce, alg);
     }
 
-    // ------------------------------------------------------------------
-    // Primitives
-    // ------------------------------------------------------------------
-
-    /** SHA-256 digest. */
     public static byte[] sha256(byte[] data) {
         try {
             return MessageDigest.getInstance("SHA-256").digest(data);
@@ -259,7 +196,6 @@ public final class Cipher {
         }
     }
 
-    /** HMAC-SHA-256. */
     public static byte[] hmacSha256(byte[] key, byte[] data) {
         try {
             Mac mac = Mac.getInstance(HMAC_ALGORITHM);
@@ -270,10 +206,6 @@ public final class Cipher {
         }
     }
 
-    /**
-     * RFC 8439 ChaCha20: XORs {@code data} with the keystream and returns a new
-     * array. The counter is the block counter of the first block.
-     */
     public static byte[] chacha20(byte[] key, byte[] nonce, int counter, byte[] data) {
         requireLength(key, KEY_BYTES, "key");
         requireLength(nonce, NONCE_BYTES, "nonce");
@@ -336,7 +268,6 @@ public final class Cipher {
         x[b] = Integer.rotateLeft(x[b] ^ x[c], 7);
     }
 
-    /** AES-256-CTR through {@code javax.crypto}; returns a new array. */
     public static byte[] aesCtr(byte[] key, byte[] iv, byte[] data) {
         requireLength(key, KEY_BYTES, "key");
         requireLength(iv, AES_IV_BYTES, "iv");
@@ -350,7 +281,6 @@ public final class Cipher {
         }
     }
 
-    /** Weak xorshift64 stream used by the {@code xor} option; returns a new array. */
     public static byte[] xorStream(byte[] data, long key) {
         byte[] out = data.clone();
         long state = key == 0L ? 0x9E3779B97F4A7C15L : key;
@@ -363,21 +293,14 @@ public final class Cipher {
         return out;
     }
 
-    // ------------------------------------------------------------------
-    // Encoding helpers
-    // ------------------------------------------------------------------
-
-    /** Base64 encodes bytes. */
     public static String base64(byte[] data) {
         return Base64.getEncoder().encodeToString(data);
     }
 
-    /** Base64 decodes a string. */
     public static byte[] fromBase64(String value) {
         return Base64.getDecoder().decode(value);
     }
 
-    /** Concatenates byte arrays. */
     public static byte[] concat(byte[]... parts) {
         int length = 0;
         for (byte[] part : parts) {
@@ -392,19 +315,16 @@ public final class Cipher {
         return out;
     }
 
-    /** UTF-8 bytes of a string. */
     public static byte[] utf8(String value) {
         return value.getBytes(StandardCharsets.UTF_8);
     }
 
-    /** Little-endian 32-bit encoding (ChaCha20 word order). */
     public static byte[] le32(int value) {
         return new byte[] {
                 (byte) value, (byte) (value >>> 8), (byte) (value >>> 16), (byte) (value >>> 24)
         };
     }
 
-    /** Little-endian 64-bit encoding. */
     public static byte[] le64(long value) {
         byte[] out = new byte[8];
         for (int i = 0; i < 8; i++) {
@@ -413,19 +333,16 @@ public final class Cipher {
         return out;
     }
 
-    /** First {@code count} bytes of an array. */
     public static byte[] first(byte[] data, int count) {
         return Arrays.copyOfRange(data, 0, Math.min(count, data.length));
     }
 
-    /** Deterministic random bytes from a {@link Random} instance. */
     public static byte[] randomBytes(Random random, int length) {
         byte[] out = new byte[length];
         random.nextBytes(out);
         return out;
     }
 
-    /** Hex string of bytes (lower case). */
     public static String hex(byte[] data) {
         char[] out = new char[data.length * 2];
         for (int i = 0; i < data.length; i++) {
@@ -436,11 +353,6 @@ public final class Cipher {
         return new String(out);
     }
 
-    // ------------------------------------------------------------------
-    // Security helpers
-    // ------------------------------------------------------------------
-
-    /** Constant-time comparison of two byte arrays. */
     public static boolean constantTimeEquals(byte[] a, byte[] b) {
         if (a == null || b == null) {
             return a == b;
@@ -455,14 +367,12 @@ public final class Cipher {
         return result == 0;
     }
 
-    /** Overwrites sensitive material with zeros. */
     public static void wipe(byte[] secret) {
         if (secret != null) {
             Arrays.fill(secret, (byte) 0);
         }
     }
 
-    /** Overwrites sensitive characters with zeros. */
     public static void wipe(char[] secret) {
         if (secret != null) {
             Arrays.fill(secret, '\0');

@@ -95,8 +95,7 @@ public final class JunkMemberPass implements Pass {
                 method = new MethodNode(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
                         name, "()V", null, null);
                 method.instructions.add(new InsnNode(Opcodes.RETURN));
-                // No operands; keep a positive bound so no generated method ever
-                // reports maxStack == 0 to a downstream Analyzer.
+
                 maxStack = 1;
                 maxLocals = 0;
                 break;
