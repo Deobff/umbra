@@ -212,17 +212,45 @@ public final class ResourceRewritePass implements Pass {
         }
         String text = new String(bytes, StandardCharsets.UTF_8);
         String rewritten = text;
-        for (Map.Entry<String, String> entry : classMap.entrySet()) {
-            String original = entry.getKey().replace('/', '.');
-            String mapped = entry.getValue().replace('/', '.');
-            if (original.equals(mapped) || original.isEmpty()) {
+        // Longest first: a short inner class name must never eat the prefix of a
+        // longer one.
+        List<Map.Entry<String, String>> ordered = new ArrayList<Map.Entry<String, String>>(
+                classMap.entrySet());
+        java.util.Collections.sort(ordered, new java.util.Comparator<Map.Entry<String, String>>() {
+            @Override
+            public int compare(Map.Entry<String, String> left, Map.Entry<String, String> right) {
+                return Integer.compare(right.getKey().length(), left.getKey().length());
+            }
+        });
+        for (Map.Entry<String, String> entry : ordered) {
+            String internal = entry.getKey();
+            String mappedInternal = entry.getValue();
+            if (internal.isEmpty() || internal.equals(mappedInternal)) {
                 continue;
             }
-            String pattern = "(?<![A-Za-z0-9_$./])" + java.util.regex.Pattern.quote(original)
-                    + "(?![A-Za-z0-9_$])";
-            rewritten = rewritten.replaceAll(pattern, java.util.regex.Matcher.quoteReplacement(mapped));
+            // Descriptor form La/b/C; comes first because the leading L would
+            // otherwise block a token-boundary match on the internal name.
+            String descriptor = 'L' + internal + ';';
+            if (rewritten.contains(descriptor)) {
+                rewritten = rewritten.replace(descriptor, "L" + mappedInternal + ";");
+            }
+            // Slashed internal form (a/b/C), used by mixin configs and access
+            // wideners.
+            rewritten = replaceToken(rewritten, internal, mappedInternal);
+            // Dotted form (a.b.C), used by Json manifests and service files.
+            rewritten = replaceToken(rewritten, internal.replace('/', '.'),
+                    mappedInternal.replace('/', '.'));
         }
         return rewritten.equals(text) ? null : rewritten;
+    }
+
+    private static String replaceToken(String text, String from, String to) {
+        if (from.equals(to) || !text.contains(from)) {
+            return text;
+        }
+        String pattern = "(?<![A-Za-z0-9_$./])" + java.util.regex.Pattern.quote(from)
+                + "(?![A-Za-z0-9_$])";
+        return text.replaceAll(pattern, java.util.regex.Matcher.quoteReplacement(to));
     }
 
     private static String mapDotted(Map<String, String> classMap, String dotted) {

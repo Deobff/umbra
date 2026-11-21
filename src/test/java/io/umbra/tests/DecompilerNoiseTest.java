@@ -233,11 +233,17 @@ public final class DecompilerNoiseTest {
                 "engine output is deterministic for the same seed");
 
         Path wmOne = dir.resolve("demo-wm-1.jar");
-        Path wmTwo = dir.resolve("demo-wm-2.jar");
+        Path wmOther = dir.resolve("demo-wm-other-seed.jar");
         runEngineWithWatermark(demoJar, wmOne, 1);
-        runEngineWithWatermark(demoJar, wmTwo, 1);
-        check(!sha256(wmOne).equals(sha256(wmTwo)),
-                "RSA-blind watermark differs per build (blind payload is randomised)");
+        runEngineWithWatermark(demoJar, wmOther, 1, 424243L);
+        // The blind payload is derived from the build seed. Comparing two builds of
+        // the *same* seed is not a stable assertion here: the watermark text also
+        // carries the build time unless timestamps are pinned, so two builds inside
+        // one second are identical and two across a second boundary are not. The
+        // reproducible contract is covered by DeterminismTest under --fixed-time;
+        // this check only pins that the seed really reaches the watermark.
+        check(!sha256(wmOne).equals(sha256(wmOther)),
+                "a different seed changes the RSA-blind watermark");
 
         for (String candidate : new String[] {
                 "C:\\Program Files\\Java\\jdk-21.0.10\\bin\\java.exe",
@@ -307,10 +313,16 @@ public final class DecompilerNoiseTest {
 
     private static EngineResult runEngineWithWatermark(Path input, Path output, int level)
             throws Exception {
+        return runEngineWithWatermark(input, output, level, 424242L);
+    }
+
+    private static EngineResult runEngineWithWatermark(Path input, Path output, int level,
+                                                       long seed) throws Exception {
         UmbraConfig config = new UmbraConfig.Builder()
                 .input(input)
                 .output(output)
-                .seed(424242L)
+                .seed(seed)
+        
                 .option("decompilerNoise.enabled", "true")
                 .option("decompilerNoise.level", Integer.toString(level))
                 .option("string.allowKeylessFallback", "true")

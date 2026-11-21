@@ -13,6 +13,10 @@ import java.util.TreeSet;
  * and differently ordered inputs yield identical lists. The collector is the
  * only place that formats keep rules, which keeps the {@code owner#name(desc)}
  * shape in one location.</p>
+ *
+ * <p>Refmap bookkeeping ({@link #refmapFile(String)} /
+ * {@link #refmapHit(String, String, String)}) is collected the same way so the
+ * report lists exactly which references were translated to a production name.</p>
  */
 public final class MixinCollector {
 
@@ -21,6 +25,8 @@ public final class MixinCollector {
     private final TreeSet<String> keepRules = new TreeSet<String>();
     private final TreeSet<String> bodySkipGlobs = new TreeSet<String>();
     private final TreeSet<String> notes = new TreeSet<String>();
+    private final TreeSet<String> refmapFiles = new TreeSet<String>();
+    private final TreeSet<String> refmapHits = new TreeSet<String>();
 
     public void addMixin(String internalName) {
         if (internalName != null && !internalName.isEmpty()) {
@@ -64,9 +70,30 @@ public final class MixinCollector {
         }
     }
 
+    /** Records a refmap resource that contributed mappings. */
+    public void refmapFile(String path) {
+        if (path != null && !path.isEmpty()) {
+            refmapFiles.add(path);
+        }
+    }
+
+    /** Records one reference translated by a refmap. */
+    public void refmapHit(String owner, String reference, String production) {
+        if (owner == null || owner.isEmpty() || reference == null || reference.isEmpty()
+                || production == null || production.isEmpty()) {
+            return;
+        }
+        refmapHits.add(owner + "#" + reference + "->" + production);
+    }
+
+    public int refmapHitCount() {
+        return refmapHits.size();
+    }
+
     public boolean isEmpty() {
         return mixinClasses.isEmpty() && targetClasses.isEmpty()
-                && keepRules.isEmpty() && bodySkipGlobs.isEmpty() && notes.isEmpty();
+                && keepRules.isEmpty() && bodySkipGlobs.isEmpty() && notes.isEmpty()
+                && refmapFiles.isEmpty() && refmapHits.isEmpty();
     }
 
     public MixinAnalysis build() {
@@ -78,6 +105,8 @@ public final class MixinCollector {
                 new ArrayList<String>(targetClasses),
                 new ArrayList<String>(keepRules),
                 new ArrayList<String>(bodySkipGlobs),
-                new ArrayList<String>(notes));
+                new ArrayList<String>(notes),
+                new ArrayList<String>(refmapFiles),
+                new ArrayList<String>(refmapHits));
     }
 }

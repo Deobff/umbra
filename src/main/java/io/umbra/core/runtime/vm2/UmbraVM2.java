@@ -236,7 +236,7 @@ public final class UmbraVM2 {
                     while (true) {
                         int p = pc;
                         if (p < 0 || p >= code.length) {
-                            throw new IllegalStateException("Umbra VM2 pc out of range: " + p
+                            throw new IllegalStateException("vm pc out of range: " + p
                                     + " of " + code.length);
                         }
                         if (++relocationTick >= relocationPeriod) {
@@ -563,7 +563,7 @@ public final class UmbraVM2 {
                                 pc = p;
                                 break;
                             case 186:
-                                throw new IllegalStateException("Umbra VM2: invokedynamic is not supported");
+                                throw new IllegalStateException("vm: invokedynamic is not supported");
                             case 187: {
                                 String token = typeTokenFromRef(refs[code[p++]]);
                                 Object[] marker = new Object[] { resolveInternal(token) };
@@ -630,7 +630,7 @@ public final class UmbraVM2 {
                             }
                             case 194: case 195:
                                 throw new IllegalStateException(
-                                        "Umbra VM2: monitor instructions are not supported");
+                                        "vm: monitor instructions are not supported");
                             case 197: {
                                 String token = typeTokenFromRef(refs[code[p++]]);
                                 int dims = code[p++];
@@ -652,7 +652,7 @@ public final class UmbraVM2 {
                                 break;
                             default:
                                 throw new IllegalStateException(
-                                        "Umbra VM2: unsupported opcode " + op);
+                                        "vm: unsupported opcode " + op);
                         }
                     }
                 } catch (Throwable thrown) {
@@ -1280,7 +1280,7 @@ public final class UmbraVM2 {
                 int id = (int) ns[--sp];
                 if (id < 0 || id >= refs.length) {
                     throw new IllegalStateException(
-                            "Umbra VM2: call id out of range (" + id + ")");
+                            "vm: call id out of range (" + id + ")");
                 }
                 int next = invoke(refs, refCache, id, code[p], ns, rs, ws, sp, rl);
                 return pack(next, p + 1);
@@ -1290,14 +1290,14 @@ public final class UmbraVM2 {
                 int id = (int) nl[code[p + 1]];
                 if (id < 0 || id >= refs.length) {
                     throw new IllegalStateException(
-                            "Umbra VM2: call id out of range (" + id + ")");
+                            "vm: call id out of range (" + id + ")");
                 }
                 int next = invoke(refs, refCache, id, code[p], ns, rs, ws, sp, rl);
                 return pack(next, p + 2);
             }
             default:
                 throw new IllegalStateException(
-                        "Umbra VM2: unsupported superinstruction " + op);
+                        "vm: unsupported superinstruction " + op);
         }
     }
 
@@ -1542,7 +1542,7 @@ public final class UmbraVM2 {
         try {
             return parsePayload(meta, map, blocks);
         } catch (IllegalStateException e) {
-            throw new IllegalStateException("Umbra VM2 payload #" + payloadId + " rejected: "
+            throw new IllegalStateException("vm payload #" + payloadId + " rejected: "
                     + e.getMessage(), e);
         }
     }
@@ -1760,7 +1760,7 @@ public final class UmbraVM2 {
     }
 
     private static IllegalStateException tampered(String what) {
-        return new IllegalStateException("Umbra VM2 payload rejected (" + what + ")");
+        return new IllegalStateException("vm payload rejected (" + what + ")");
     }
 
     private static long metaKey(int[] meta) {
@@ -1958,7 +1958,7 @@ public final class UmbraVM2 {
             if (((Integer) info[INFO_KIND]).intValue() == 1) {
                 if (!(receiver instanceof Object[]) || ((Object[]) receiver).length != 1
                         || !(((Object[]) receiver)[0] instanceof Class)) {
-                    throw new IllegalStateException("Umbra VM2: uninitialized object expected");
+                    throw new IllegalStateException("vm: uninitialized object expected");
                 }
                 Constructor<?> constructor = (Constructor<?>) info[INFO_CTOR];
                 Object created = constructor.newInstance(args);
@@ -1993,11 +1993,11 @@ public final class UmbraVM2 {
             sneakyThrow(e.getCause());
             return sp;
         } catch (IllegalAccessException e) {
-            throw new IllegalStateException("Umbra VM2 cannot access " + refs[refIndex], e);
+            throw new IllegalStateException("vm cannot access " + refs[refIndex], e);
         } catch (IllegalArgumentException e) {
-            throw new IllegalStateException("Umbra VM2 argument mismatch for " + refs[refIndex], e);
+            throw new IllegalStateException("vm argument mismatch for " + refs[refIndex], e);
         } catch (InstantiationException e) {
-            throw new IllegalStateException("Umbra VM2 cannot instantiate " + refs[refIndex], e);
+            throw new IllegalStateException("vm cannot instantiate " + refs[refIndex], e);
         }
     }
 
@@ -2063,7 +2063,7 @@ public final class UmbraVM2 {
             }
         }
         if (field == null) {
-            throw new IllegalStateException("Umbra VM2 cannot resolve field " + ref);
+            throw new IllegalStateException("vm cannot resolve field " + ref);
         }
         makeAccessible(field);
         Object[] holder = new Object[] { field, Character.valueOf(sortOf(field.getType())) };
@@ -2115,7 +2115,7 @@ public final class UmbraVM2 {
             method = findDeclared(owner, name, parameters);
         }
         if (method == null) {
-            throw new IllegalStateException("Umbra VM2 cannot resolve method " + ref);
+            throw new IllegalStateException("vm cannot resolve method " + ref);
         }
         makeAccessible(method);
         METHODS.put(key, method);
@@ -2166,7 +2166,7 @@ public final class UmbraVM2 {
             CONSTRUCTORS.put(key, constructor);
             return constructor;
         } catch (NoSuchMethodException e) {
-            throw new IllegalStateException("Umbra VM2 cannot resolve constructor " + key);
+            throw new IllegalStateException("vm cannot resolve constructor " + key);
         }
     }
 
@@ -2321,9 +2321,9 @@ public final class UmbraVM2 {
         try {
             field.set(receiver, value);
         } catch (IllegalAccessException e) {
-            throw new IllegalStateException("Umbra VM2 cannot write field " + field.getName(), e);
+            throw new IllegalStateException("vm cannot write field " + field.getName(), e);
         } catch (IllegalArgumentException e) {
-            throw new IllegalStateException("Umbra VM2 field type mismatch " + field.getName(), e);
+            throw new IllegalStateException("vm field type mismatch " + field.getName(), e);
         }
         return sp;
     }
@@ -2332,7 +2332,7 @@ public final class UmbraVM2 {
         try {
             return field.get(null);
         } catch (IllegalAccessException e) {
-            throw new IllegalStateException("Umbra VM2 cannot read field " + field.getName(), e);
+            throw new IllegalStateException("vm cannot read field " + field.getName(), e);
         }
     }
 
@@ -2340,7 +2340,7 @@ public final class UmbraVM2 {
         try {
             return field.get(receiver);
         } catch (IllegalAccessException e) {
-            throw new IllegalStateException("Umbra VM2 cannot read field " + field.getName(), e);
+            throw new IllegalStateException("vm cannot read field " + field.getName(), e);
         }
     }
 
@@ -2354,7 +2354,7 @@ public final class UmbraVM2 {
             case 10: return new int[length];
             case 11: return new long[length];
             default:
-                throw new IllegalStateException("Umbra VM2: bad NEWARRAY type " + type);
+                throw new IllegalStateException("vm: bad NEWARRAY type " + type);
         }
     }
 
@@ -2434,7 +2434,7 @@ public final class UmbraVM2 {
                 failure = e;
             }
         }
-        throw new IllegalStateException("Umbra VM2 cannot load type " + dottedName
+        throw new IllegalStateException("vm cannot load type " + dottedName
                 + " (context loader " + (context == null ? "none" : context.getClass().getName())
                 + ", helper loader " + (own == null ? "bootstrap" : own.getClass().getName())
                 + ")", failure);
@@ -2460,7 +2460,7 @@ public final class UmbraVM2 {
             case 'D': return double.class;
             case 'V': return void.class;
             default:
-                throw new IllegalStateException("Umbra VM2: bad primitive " + kind);
+                throw new IllegalStateException("vm: bad primitive " + kind);
         }
     }
 

@@ -6,6 +6,7 @@ import io.umbra.core.engine.Stats;
 import io.umbra.core.model.ClassPool;
 import io.umbra.core.model.Hierarchy;
 import io.umbra.core.rules.RuleSet;
+import io.umbra.core.util.BuildRoot;
 import io.umbra.core.util.Log;
 
 import java.util.ArrayList;
@@ -76,13 +77,27 @@ public final class PassContext {
         return secrets.containsKey(name);
     }
 
+    /**
+     * The per-build root every protection layer derives from.
+     *
+     * <p>Derived from {@code config.seed()} through {@link BuildRoot}, so a run is
+     * reproducible for a given seed (see ARCHITECTURE.md). It used to be drawn from
+     * an <em>unseeded</em> {@code SecureRandom}: two runs with the same seed then
+     * agreed only on the generated entry names, every payload byte differed, and
+     * the archives landed a few bytes apart, which made {@code --seed} promise the
+     * opposite of what it delivered.</p>
+     *
+     * <p>Reproducibility is safe because the root reaches the archive either way -
+     * the native library embeds derivations of it and the seed-bound fallback keeps
+     * its half in the loader - so keep the deployment seed private: two archives
+     * built from the same seed carry the same root.</p>
+     */
     public byte[] keyRoot() {
         byte[] existing = secret(NATIVE_KEY_ROOT);
         if (existing != null) {
             return existing;
         }
-        byte[] root = new byte[32];
-        new java.security.SecureRandom().nextBytes(root);
+        byte[] root = BuildRoot.derive(config.seed());
         putSecret(NATIVE_KEY_ROOT, root);
         byte[] copy = root.clone();
         java.util.Arrays.fill(root, (byte) 0);

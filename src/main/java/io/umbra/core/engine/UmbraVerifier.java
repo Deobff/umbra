@@ -243,8 +243,14 @@ public final class UmbraVerifier {
             }
             String expectedPath = expectedEntryPath(expectedName, entryName, report.layout);
             if (!expectedPath.equals(entryName)) {
-                report.errors.add(entryName + ": class file declares internal name " + expectedName
-                        + " but lives at the wrong entry path (expected " + expectedPath + ')');
+                // The entry path does not name the class inside the file, so the JVM can
+                // never load it from here: it is payload data (code generator templates
+                // and the like) that Umbra keeps byte-identical on purpose. Reporting it
+                // as a verification failure would fail a faithful archive.
+                report.notes.add(entryName + ": payload data, the path does not name the class "
+                        + expectedName + " (kept byte-identical, not linked)");
+                report.skippedAsPayload++;
+                continue;
             }
             report.expectedClassEntries.add(expectedPath);
         }
@@ -315,6 +321,19 @@ public final class UmbraVerifier {
                     try {
                         className = new ClassReader(bytes).getClassName().replace('/', '.');
                     } catch (RuntimeException malformed) {
+                        continue;
+                    }
+                    String relative = className.replace('.', '/') + ".class";
+                    boolean prefixedEntry = report.classPrefix != null
+                            && report.classPrefix.length() > 0
+                            && entryName.equals(report.classPrefix + relative);
+                    if (!entryName.equals(relative) && !prefixedEntry) {
+                        // The archive cannot load this class from the path it sits at, so it
+                        // is payload data (code generator templates); linking it would only
+                        // turn into an error for a file the JVM never reads.
+                        report.notes.add(entryName + ": payload data (the path does not name the "
+                                + "class); not linked");
+                        report.skippedAsPayload++;
                         continue;
                     }
                     if (!verified.add(className)) {
@@ -626,6 +645,7 @@ public final class UmbraVerifier {
         private String classPrefix = "";
         private int classesVerified;
         private int skippedByVersion;
+    private int skippedAsPayload;
         private int versionedClasses;
         private int moduleDescriptors;
         private int nestedLibraries;
@@ -651,6 +671,11 @@ public final class UmbraVerifier {
 
         public int skippedByVersion() {
             return skippedByVersion;
+        }
+
+        /** Class files whose path does not name them: payload data, never linked. */
+        public int skippedAsPayload() {
+            return skippedAsPayload;
         }
 
         public int versionedClasses() {

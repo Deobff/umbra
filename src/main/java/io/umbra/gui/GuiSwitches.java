@@ -147,6 +147,23 @@ public final class GuiSwitches {
                 toggle("watermarkBlind", "RSA-blind watermark", "watermark.blind", true),
                 toggle("minecraft", "Minecraft auto-adaptation", "minecraft.enabled", true)));
 
+        // Ported layers stay collapsed and off: the engine treats every one of them
+        // as opt-in, so the console must not enable them by accident.
+        groups.add(group("Ported layers", false,
+                toggle("salt", "Salt system", "salt.enabled", false),
+                toggle("saltParams", "Salt method parameters", "salt.methodParams", false),
+                toggle("polyStrings", "Polymorphic string decoders", "polyStrings.enabled", false),
+                toggle("integerMasks", "Polymorphic integer masks", "integer.masks", false),
+                toggle("numberHash", "Hash-encoded numbers", "numberHash.enabled", false),
+                toggle("opaque", "Seed-chain opaque predicates", "opaque.enabled", false),
+                toggle("branchShape", "Branch shape rewriting", "branch.enabled", false),
+                toggle("definalize", "Remove final modifiers", "definalize.enabled", false),
+                toggle("flowInts", "Flow-sensitive state ints", "flowInts.enabled", false),
+                toggle("classInitOrder", "Class-init order analysis", "classInitOrder.enabled",
+                        false),
+                toggle("bodyOptimize", "Body optimisation", "bodyOptimize.enabled", false),
+                toggle("nativePayload", "Compressed native payload", "native.payload", true)));
+
         groups.add(new GroupDef("Advanced", false, Kind.ADVANCED,
                 Collections.<Toggle>emptyList()));
 

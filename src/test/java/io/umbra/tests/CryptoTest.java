@@ -5,6 +5,8 @@ import io.umbra.core.config.UmbraConfig;
 import io.umbra.core.engine.EngineResult;
 import io.umbra.core.engine.UmbraEngine;
 import io.umbra.core.engine.UmbraVerifier;
+import io.umbra.core.runtime.UmbraIndyBootstrap;
+import io.umbra.core.runtime.UmbraStringDecryptor;
 import io.umbra.core.runtime.crypto.NativeKeySupport;
 import io.umbra.core.runtime.crypto.UmbraCrypto;
 import io.umbra.core.runtime.crypto.UmbraStringCipher;
@@ -28,6 +30,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.reflect.Method;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
@@ -69,6 +72,7 @@ public final class CryptoTest {
         testChaCha20KnownAnswer();
         testChaCha20RoundTrip();
         testLegacyStringRoundTrip();
+        testRuntimeTemplatePairs();
         testKeyDerivation();
         testAesCtr();
         testSealedEnvelope();
@@ -132,6 +136,64 @@ public final class CryptoTest {
                 check(Cipher.encrypt(sample, key).equals(payload), "legacy cipher is deterministic");
             }
         }
+    }
+
+    /**
+     * Pins the build-side primitives to the two self-contained runtime templates.
+     *
+     * <p>{@code UmbraStringDecryptor} and {@code UmbraIndyBootstrap} are injected
+     * without the crypto helper, so they cannot call into {@code Cipher} or
+     * {@code UmbraCrypto} - they re-implement the domain-prefixed KDFs. U1-crypto.md
+     * §3.3 records exactly that shape as the failure mode of another product
+     * ("the two sides each wrote the same formulas once"), so the pair is asserted
+     * here instead of trusted.</p>
+     */
+    private static void testRuntimeTemplatePairs() throws Exception {
+        String[] samples = { "Hello, Umbra!", "", "unicode \u00e9\u00fc" };
+        long[] keys = { 1L, 0x9E3779B97F4A7C15L, -42L };
+        for (String sample : samples) {
+            for (long key : keys) {
+                String payload = Cipher.encrypt(sample, key);
+                check(sample.equals(UmbraStringDecryptor.d(payload, key)),
+                        "legacy cipher payload decrypts in the injected decryptor template");
+            }
+        }
+        Method indyDecrypt = UmbraIndyBootstrap.class.getDeclaredMethod("decrypt",
+                String.class, long.class);
+        indyDecrypt.setAccessible(true);
+        for (long key : keys) {
+            String payload = Cipher.encrypt("indy-owner", key);
+            Object value = indyDecrypt.invoke(null, payload, key);
+            check("indy-owner".equals(value),
+                    "legacy cipher payload decrypts in the indy bootstrap template");
+        }
+        byte[] key = Cipher.sha256("pair-key".getBytes(StandardCharsets.UTF_8));
+        byte[] nonce = Cipher.first(Cipher.sha256("pair-nonce".getBytes(StandardCharsets.UTF_8)), 12);
+        check(Arrays.equals(Cipher.aesIv(key, nonce), UmbraCrypto.aesIv(key, nonce)),
+                "the AES IV derivation is identical on both sides");
+        // The KDF separators are 4-byte domain ids (UmbraCrypto.K1..K17) rather than
+        // the retired D_* label words; the invariant is unchanged: no two domains
+        // may render the same word, or one derivation replays into another.
+        java.util.Set<Integer> domainIds = new java.util.HashSet<Integer>();
+        for (int id = UmbraCrypto.K1; id <= UmbraCrypto.K17; id++) {
+            domainIds.add(Integer.valueOf(id));
+        }
+        check(domainIds.size() == 17, "every KDF domain id is distinct");
+        boolean distinctWords = true;
+        java.util.List<byte[]> words = new java.util.ArrayList<byte[]>();
+        for (int id = UmbraCrypto.K1; id <= UmbraCrypto.K17; id++) {
+            byte[] word = UmbraCrypto.domain(id);
+            for (byte[] seen : words) {
+                if (Arrays.equals(seen, word)) {
+                    distinctWords = false;
+                }
+            }
+            words.add(word);
+        }
+        check(distinctWords, "colliding-input domains keep distinct domain words");
+        byte[] legacyKey = Cipher.legacyKey(7L);
+        check(legacyKey.length == 32 && !Arrays.equals(legacyKey, Cipher.legacyKey(8L)),
+                "the legacy key derivation stays keyed");
     }
 
     private static void testKeyDerivation() {
@@ -248,21 +310,21 @@ public final class CryptoTest {
         check(UmbraCrypto.keyRoot() == null, "the root can be cleared");
 
         byte[] payloadSalt = "SALT1234".getBytes(StandardCharsets.UTF_8);
-        byte[] withRoot = UmbraStringCipher.siteKeyV4(root, 77L, 1234L, 5, payloadSalt);
-        byte[] withoutRoot = UmbraStringCipher.siteKeyV4(null, 77L, 1234L, 5, payloadSalt);
-        check(Arrays.equals(withRoot, UmbraStringCipher.siteKeyV4(root, 77L, 1234L, 5, payloadSalt)),
+        byte[] withRoot = UmbraStringCipher.siteKeyV4(root, 1234L, 5, payloadSalt);
+        byte[] withoutRoot = UmbraStringCipher.siteKeyV4(null, 1234L, 5, payloadSalt);
+        check(Arrays.equals(withRoot, UmbraStringCipher.siteKeyV4(root, 1234L, 5, payloadSalt)),
                 "v4 site key is deterministic");
         check(!Arrays.equals(withRoot, withoutRoot), "v4 site key is bound to the native root");
         byte[] otherSalt = "SALT5678".getBytes(StandardCharsets.UTF_8);
-        check(!Arrays.equals(withRoot, UmbraStringCipher.siteKeyV4(root, 77L, 1234L, 5, otherSalt)),
+        check(!Arrays.equals(withRoot, UmbraStringCipher.siteKeyV4(root, 1234L, 5, otherSalt)),
                 "v4 site key is bound to the payload salt");
-        check(!Arrays.equals(withRoot, UmbraStringCipher.siteKeyV4(root, 77L, 1234L, 6, payloadSalt)),
+        check(!Arrays.equals(withRoot, UmbraStringCipher.siteKeyV4(root, 1234L, 6, payloadSalt)),
                 "v4 site key still separates call sites");
 
         byte[] plain = "self-check failed: ".getBytes(StandardCharsets.UTF_8);
         long siteSeed = 0x1122334455667788L;
-        byte[] key = UmbraStringCipher.siteKeyV4(root, 99L, siteSeed, 7, payloadSalt);
-        byte[] nonce = UmbraStringCipher.siteNonceV4(root, 99L, siteSeed, 7, payloadSalt);
+        byte[] key = UmbraStringCipher.siteKeyV4(root, siteSeed, 7, payloadSalt);
+        byte[] nonce = UmbraStringCipher.siteNonceV4(root, siteSeed, 7, payloadSalt);
         long streamSeed = UmbraStringCipher.payloadStreamSeed(siteSeed, payloadSalt);
         byte[] body = UmbraStringCipher.transform(UmbraStringCipher.CHACHA20, plain, key, nonce,
                 streamSeed);
@@ -272,15 +334,15 @@ public final class CryptoTest {
         byte[] runtimeSalt = Arrays.copyOfRange(payload, 0, UmbraStringCipher.PAYLOAD_SALT_BYTES);
         byte[] ciphertext = Arrays.copyOfRange(payload, UmbraStringCipher.PAYLOAD_SALT_BYTES,
                 payload.length);
-        byte[] runtimeKey = UmbraStringCipher.siteKeyV4(root, 99L, siteSeed, 7, runtimeSalt);
-        byte[] runtimeNonce = UmbraStringCipher.siteNonceV4(root, 99L, siteSeed, 7, runtimeSalt);
+        byte[] runtimeKey = UmbraStringCipher.siteKeyV4(root, siteSeed, 7, runtimeSalt);
+        byte[] runtimeNonce = UmbraStringCipher.siteNonceV4(root, siteSeed, 7, runtimeSalt);
         byte[] restored = UmbraStringCipher.transform(UmbraStringCipher.CHACHA20, ciphertext,
                 runtimeKey, runtimeNonce, UmbraStringCipher.payloadStreamSeed(siteSeed, runtimeSalt));
         check(Arrays.equals(plain, restored), "payload v4 round-trips through the self-binding schedule");
         byte[] tampered = payload.clone();
         tampered[0] ^= 0x01;
         byte[] tamperedSalt = Arrays.copyOfRange(tampered, 0, UmbraStringCipher.PAYLOAD_SALT_BYTES);
-        byte[] tamperedKey = UmbraStringCipher.siteKeyV4(root, 99L, siteSeed, 7, tamperedSalt);
+        byte[] tamperedKey = UmbraStringCipher.siteKeyV4(root, siteSeed, 7, tamperedSalt);
         check(!Arrays.equals(runtimeKey, tamperedKey),
                 "changing one payload byte changes the derived key");
 
@@ -583,12 +645,19 @@ public final class CryptoTest {
             }
 
             Path output = dir.resolve("tiny-encrypted.jar");
+            List<String> seedTierLog = new ArrayList<String>();
             EngineResult result = runEngine(config(input, output,
                     "classEncryption.enabled", "true",
                     "classEncryption.integrity", "true",
                     "integrity.level", "2",
                     "integrity.action", "throw",
-                    "string.strength", "3"));
+                    "string.strength", "3"), seedTierLog);
+            check(stat(result, "classEncryption.seedFallback") == 1,
+                    "the default delivery is counted as the seed tier");
+            check("seed".equals(result.stats().text("classEncryption.masterTier")),
+                    "the default delivery reports the seed master tier");
+            check(findLog(seedTierLog, "decrypt every class offline") != null,
+                    "the default seed tier warns that the archive is offline-decryptable");
             check(stat(result, "classEncryption.classes") >= 2, "class encryption encrypted every class");
             check(stat(result, "classEncryption.resources") >= 1, "class encryption encrypted the resource");
             check(stat(result, "classEncryption.resourceBytes") >= 20000,
@@ -763,6 +832,25 @@ public final class CryptoTest {
                     "maximum-style nativeKey=true + fallback=false refuses without a bridge");
             check(!Files.exists(refusedNative),
                     "the refused native build did not write an archive");
+
+            Path fallbackJar = dir.resolve("tiny-fallback.jar");
+            List<String> fallbackLog = new ArrayList<String>();
+            EngineResult fallback = runEngine(config(input, fallbackJar,
+                    "classEncryption.enabled", "true",
+                    "classEncryption.nativeKey.fallback", "true",
+                    "string.strength", "3"), fallbackLog);
+            check(Files.isRegularFile(fallbackJar),
+                    "an explicit classEncryption.nativeKey.fallback=true still builds");
+            check(stat(fallback, "classEncryption.nativeKeyFallback") == 1,
+                    "the explicit fallback is counted");
+            check(stat(fallback, "classEncryption.seedFallback") == 1,
+                    "the explicit fallback is counted as the seed tier");
+            check("seed".equals(fallback.stats().text("classEncryption.masterTier")),
+                    "the explicit fallback reports the seed master tier");
+            check(findLog(fallbackLog, "classEncryption.nativeKey.fallback=true") != null,
+                    "the explicit fallback names the opt-in it came from");
+            check(findLog(fallbackLog, "decrypt every class offline") != null,
+                    "the explicit fallback states the offline-decryption consequence");
         } finally {
             deleteRecursively(dir);
         }
@@ -780,13 +868,27 @@ public final class CryptoTest {
     }
 
     private static EngineResult runEngine(UmbraConfig config) throws Exception {
+        return runEngine(config, new ArrayList<String>());
+    }
+
+    private static EngineResult runEngine(UmbraConfig config, final List<String> logLines)
+            throws Exception {
         Log log = new Log(new Log.Sink() {
             @Override
             public void line(String level, String message) {
-
+                logLines.add("[" + level + "] " + message);
             }
         }, false);
         return new UmbraEngine(log).run(config, ProgressListener.NONE);
+    }
+
+    private static String findLog(List<String> lines, String text) {
+        for (String line : lines) {
+            if (line.contains(text)) {
+                return line;
+            }
+        }
+        return null;
     }
 
     private static long stat(EngineResult result, String key) {

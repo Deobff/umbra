@@ -812,6 +812,10 @@ public final class RenamePass implements Pass {
         public Object mapValue(Object value) {
             if (rewriteClassStrings && value instanceof String) {
                 String text = (String) value;
+                String descriptor = rewriteDescriptorText(text);
+                if (descriptor != null) {
+                    return descriptor;
+                }
                 String internal = text.replace('.', '/');
                 String mapped = mappings.mappedClass(internal);
                 if (!mapped.equals(internal)) {
@@ -819,6 +823,59 @@ public final class RenamePass implements Pass {
                 }
             }
             return super.mapValue(value);
+        }
+
+        /**
+         * Rewrites a JVM descriptor held in a string constant, e.g.
+         * {@code (La/b/C;I)V} or {@code La/b/C;}. Only values that look like a
+         * descriptor are touched, so ordinary text is never mangled.
+         */
+        private String rewriteDescriptorText(String text) {
+            if (text.length() < 3) {
+                return null;
+            }
+            boolean methodDescriptor = text.charAt(0) == '(';
+            boolean fieldDescriptor = text.charAt(0) == 'L' && text.charAt(text.length() - 1) == ';';
+            if (!methodDescriptor && !fieldDescriptor) {
+                return null;
+            }
+            StringBuilder out = new StringBuilder(text.length() + 16);
+            boolean changed = false;
+            int index = 0;
+            while (index < text.length()) {
+                char c = text.charAt(index);
+                if (c == 'L') {
+                    int end = text.indexOf(';', index);
+                    if (end > index + 1) {
+                        String internal = text.substring(index + 1, end);
+                        if (isInternalName(internal)) {
+                            String mapped = mappings.mappedClass(internal);
+                            if (!mapped.equals(internal)) {
+                                out.append('L').append(mapped).append(';');
+                                changed = true;
+                                index = end + 1;
+                                continue;
+                            }
+                        }
+                    }
+                }
+                out.append(c);
+                index++;
+            }
+            return changed ? out.toString() : null;
+        }
+
+        private static boolean isInternalName(String value) {
+            if (value.isEmpty()) {
+                return false;
+            }
+            for (int i = 0; i < value.length(); i++) {
+                char c = value.charAt(i);
+                if (c == '.' || c == ';' || c == '[' || c == '(' || c == ')' || c == ' ') {
+                    return false;
+                }
+            }
+            return true;
         }
 
         @Override

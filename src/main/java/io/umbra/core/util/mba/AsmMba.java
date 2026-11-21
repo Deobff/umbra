@@ -14,7 +14,7 @@ public final class AsmMba {
 
     public static InsnList generateMba(int slotX, int slotY, boolean isTrue, int seed) {
         final InsnList insnList = new InsnList();
-        int[] mbaExpr = MBAUtils.genMbaExpr();
+        int[] mbaExpr = MBAUtils.genMbaExpr(seed);
         int opa = (seed % 1000) - 500;
         int opb = opa * 5 + (isTrue ? 1 : 0);
         int x = slotX;

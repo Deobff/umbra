@@ -56,7 +56,7 @@ YAML or a build plugin.
 </tr>
 </table>
 
-<sub>13 groups / 109 controls · presets load the engine's own effective values · numeric values use animated sliders</sub>
+<sub>16 groups / 187 controls · presets load the engine's own effective values · numeric values use animated sliders</sub>
 </div>
 
 ---
@@ -187,7 +187,7 @@ The engine jar stays JavaFX-free: `java -jar umbra.jar` looks for
 `umbra-gui-fx.jar` next to itself and starts the console as a child process,
 printing the command-line help when either the console jar or a JavaFX-capable
 JVM is missing. The console draws its own window chrome and groups every
-switch and value the engine accepts into 13 sections (109 controls) behind
+switch and value the engine accepts into 16 sections (187 controls) behind
 Options / Command / Output views, with a targets band, a preset selector that
 loads the engine's effective values, live log, progress, cancel and an About
 window.
@@ -208,6 +208,17 @@ java -jar dist\umbra.jar -c umbra.example.yml
 java -jar dist\umbra.jar -i app.jar --inspect
 java -jar dist\umbra.jar -i app.jar --inspect-json inspection.json
 ```
+
+`--seed` pins the build. Without it every run draws a fresh seed and prints it:
+the seed drives class naming, the string and integer keys and the build key root,
+so two archives built from the same seed are byte-identical (a single recovery
+would cover both) while the default keeps every deployment unique. Copy the
+printed value back into `--seed` to rebuild one specific archive bit for bit;
+`--fixed-time` additionally pins archive timestamps, which otherwise record the
+build time. `DeterminismTest` enforces the contract: same seed, same bytes for
+every entry. The Maven and Gradle plugins inherit the same rule: a build without
+a configured `seed` gets a fresh one per run, so set `seed` when a pipeline needs
+byte-identical artifacts (the seed used is printed in the engine log).
 
 Advanced modules are reached through `--set`:
 
@@ -424,7 +435,7 @@ Umbra 是一套面向 Java 字节码的混淆/加固工具：兼容 Spring Boot 
 多版本 JAR、JPMS、签名 JAR、agent、OSGi 与 Minecraft 模组；提供重命名、
 多引擎字符串加密、控制流混淆、VM2 虚拟化、原生 JNI、整包类加密、运行时反调试
 与反 dump，并附带 JavaFX 桌面控制台、CLI、YAML、Gradle/Maven 插件。
-每个模式都集中在 13 个分组、109 个控件里细调，数值项使用带缓动的滑块，
+每个模式都集中在 16 个分组、187 个控件里细调（含三个「Ported」分组，对应移植层），数值项使用带缓动的滑块，
 预设会直接读取引擎的真实生效值。发布包见
 [Releases](https://github.com/Deobff/umbra/releases)。
 

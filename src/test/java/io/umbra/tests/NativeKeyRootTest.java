@@ -331,9 +331,20 @@ public final class NativeKeyRootTest {
                 "the mask depends on the word index");
         check(KeyRootCode.maskWord(salt, 3, seed) != KeyRootCode.maskWord(salt ^ 1, 3, seed),
                 "the mask depends on the salt");
-        check(KeyRootCode.newRoot().length == 32, "a fresh root is 32 bytes");
-        check(!Arrays.equals(KeyRootCode.newRoot(), KeyRootCode.newRoot()),
-                "two builds get different roots");
+        // The unseeded helpers are gone: the build root comes from BuildRoot and the
+        // bridge gate secret from newGateSecret(seed). Both must be reproducible for a
+        // seed (ARCHITECTURE.md) and must live in separate derivation domains.
+        byte[] derivedRoot = io.umbra.core.util.BuildRoot.derive(424242L);
+        check(derivedRoot.length == 32, "the build root is 32 bytes");
+        check(Arrays.equals(derivedRoot, io.umbra.core.util.BuildRoot.derive(424242L)),
+                "the build root is reproducible for a seed (BuildRoot)");
+        check(!Arrays.equals(derivedRoot, io.umbra.core.util.BuildRoot.derive(424243L)),
+                "a different seed derives a different build root");
+        check(!Arrays.equals(derivedRoot, KeyRootCode.newGateSecret(424242L)),
+                "the gate secret is not the build root (separate derivation domain)");
+        check(Arrays.equals(KeyRootCode.newGateSecret(424242L),
+                        KeyRootCode.newGateSecret(424242L)),
+                "the gate secret is reproducible for a seed");
     }
 
     private static void testKeyRootAnswers() throws Exception {

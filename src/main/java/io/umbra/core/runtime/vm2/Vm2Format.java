@@ -7,7 +7,7 @@ import java.util.Map;
 import java.util.Random;
 
 /**
- * Wire format and cryptography of the Umbra VM2 virtualization engine.
+ * Wire format and cryptography of the vm virtualization engine.
  *
  * <p>This class is used by {@code VirtualizationPass} when {@code vm2.enabled}
  * is set. It is <b>not</b> injected into the protected program: the interpreter

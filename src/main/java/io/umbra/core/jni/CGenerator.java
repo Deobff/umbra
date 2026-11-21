@@ -40,12 +40,14 @@ public final class CGenerator {
             "java/lang/Byte",
             "java/lang/Character",
             "java/lang/Short",
-            "java/lang/Boolean"
+            "java/lang/Boolean",
+            "java/lang/String"
     };
 
     private static final String[] RUNTIME_MACROS = {
             "NPE", "CLASSCASTEXCEPTION", "ARITHMETICEXCEPTION", "ARRAY",
-            "INTEGER", "LONG", "FLOAT", "DOUBLE", "BYTE", "CHARACTER", "SHORT", "BOOLEAN"
+            "INTEGER", "LONG", "FLOAT", "DOUBLE", "BYTE", "CHARACTER", "SHORT", "BOOLEAN",
+            "STRING"
     };
 
     public static final class MethodC {
@@ -72,7 +74,14 @@ public final class CGenerator {
 
     private long literalKey = 0x6A09E667F3BCC908L;
 
+    private boolean intrinsics = true;
+
+    private int intrinsicSites;
+
     private static final int LITERAL_MAX = 256;
+
+    /** Domain separation between the member-name pool and the string pool. */
+    static final int UMBRA_STR_SALT = 0x5EED;
 
     private String antiDumpLoader;
     private long antiDumpKey;
@@ -186,8 +195,49 @@ public final class CGenerator {
         this.literalKey = key;
     }
 
-    int newIdSite() {
-        return nextIdSite++;
+    public void configureIntrinsics(boolean enabled) {
+        this.intrinsics = enabled;
+    }
+
+    boolean intrinsicsEnabled() {
+        return this.intrinsics;
+    }
+
+    void noteIntrinsic() {
+        this.intrinsicSites++;
+    }
+
+    public int intrinsicCount() {
+        return this.intrinsicSites;
+    }
+
+    private final Map<String, Integer> idSlots = new LinkedHashMap<String, Integer>();
+    private int idSiteCount;
+
+    /**
+     * Allocates one {@code umbra_ids[]} slot per distinct member and reuses it
+     * for every later reference, so N call sites of the same method resolve
+     * the jmethodID once instead of N times.
+     */
+    int newIdSite(String owner, String name, String descriptor, boolean isStatic) {
+        this.idSiteCount++;
+        String key = owner + '\u0000' + name + '\u0000' + descriptor + '\u0000'
+                + (isStatic ? '1' : '0');
+        Integer existing = this.idSlots.get(key);
+        if (existing != null) {
+            return existing.intValue();
+        }
+        int slot = this.nextIdSite++;
+        this.idSlots.put(key, Integer.valueOf(slot));
+        return slot;
+    }
+
+    public int idSiteCount() {
+        return this.idSiteCount;
+    }
+
+    public int uniqueIdCount() {
+        return this.nextIdSite;
     }
 
     public void addMethod(MethodC method) {
@@ -204,6 +254,7 @@ public final class CGenerator {
         out.append("#include <string.h>\n");
         out.append("#include <stdlib.h>\n");
         out.append("#include <stdio.h>\n");
+        out.append("#include <math.h>\n");
         out.append("#ifdef _WIN32\n");
         out.append("#include <windows.h>\n");
         out.append("#endif\n\n");
@@ -393,14 +444,94 @@ public final class CGenerator {
         out.append('\n');
     }
 
+    /**
+     * Emits the Java string literal pool as encrypted UTF-16 code units.
+     *
+     * <p>The old table was {@code static const char umbra_str_N[]} fed straight
+     * into {@code NewStringUTF}. That only works for modified UTF-8: NUL, emoji and
+     * isolated surrogates were re-encoded by the compiler, and the literal itself
+     * was plaintext inside the library. The pool below keeps the exact
+     * {@code char[]} content, XORs each code unit with the same LCG keystream the
+     * member-name pool uses, and rebuilds it with
+     * {@code NewString(env, jchar[], len)} so UTF-16 semantics are preserved.</p>
+     */
     private void appendStringConstants(StringBuilder out) {
+        ByteArrayOutputStream pool = new ByteArrayOutputStream();
+        StringBuilder offsets = new StringBuilder();
+        StringBuilder lengths = new StringBuilder();
+        int maxUnits = 1;
         for (int i = 0; i < strings.size(); i++) {
-            out.append("static const char umbra_str_").append(i).append("[] = ")
-                    .append(cString(strings.get(i))).append(";\n");
+            String value = strings.get(i);
+            if (value == null) {
+                value = "";
+            }
+            byte[] cipher = encryptUtf16(this.literalKey, i, value);
+            if (i > 0) {
+                offsets.append(", ");
+                lengths.append(", ");
+            }
+            offsets.append(pool.size());
+            lengths.append(value.length());
+            pool.write(cipher, 0, cipher.length);
+            if (value.length() > maxUnits) {
+                maxUnits = value.length();
+            }
         }
-        if (!strings.isEmpty()) {
+        byte[] bytes = pool.toByteArray();
+        out.append("#define UMBRA_STR_SALT ").append(UMBRA_STR_SALT).append('\n');
+        out.append("#define UMBRA_STR_COUNT ").append(strings.size()).append('\n');
+        out.append("#define UMBRA_STR_MAX_UNITS ").append(maxUnits).append("\n\n");
+        out.append("static const unsigned char umbra_str_bytes[] = {\n");
+        for (int i = 0; i < bytes.length; i++) {
+            if (i % 16 == 0) {
+                out.append("   ");
+            }
+            out.append(' ').append("0x")
+                    .append(String.format(java.util.Locale.ROOT, "%02x",
+                            Integer.valueOf(bytes[i] & 0xFF)))
+                    .append(',');
+            if (i % 16 == 15) {
+                out.append('\n');
+            }
+        }
+        if (bytes.length % 16 != 0) {
             out.append('\n');
         }
+        out.append("};\n");
+        out.append("static const int umbra_str_off[UMBRA_STR_COUNT] = { ")
+                .append(offsets).append(" };\n");
+        out.append("static const int umbra_str_len[UMBRA_STR_COUNT] = { ")
+                .append(lengths).append(" };\n\n");
+        out.append("static void umbra_str_recover(int index, jchar* out) {\n");
+        out.append("    int i;\n");
+        out.append("    int len;\n");
+        out.append("    umbra_u64 state;\n");
+        out.append("    if (index < 0 || index >= UMBRA_STR_COUNT) {\n");
+        out.append("        return;\n");
+        out.append("    }\n");
+        out.append("    len = umbra_str_len[index];\n");
+        out.append("    state = UMBRA_LIT_KEY ^ (umbra_u64)(unsigned int)(index + UMBRA_STR_SALT);\n");
+        out.append("    for (i = 0; i < len; i++) {\n");
+        out.append("        unsigned int cipher;\n");
+        out.append("        state = state * 6364136223846793005ULL + 1442695040888963407ULL;\n");
+        out.append("        cipher = ((unsigned int)umbra_str_bytes[umbra_str_off[index] + i * 2] << 8)\n");
+        out.append("                | (unsigned int)umbra_str_bytes[umbra_str_off[index] + i * 2 + 1];\n");
+        out.append("        out[i] = (jchar)(cipher ^ (unsigned int)((state >> 33) & 0xFFFFu));\n");
+        out.append("    }\n");
+        out.append("}\n\n");
+    }
+
+    /** XORs every UTF-16 code unit with the shared LCG keystream. */
+    static byte[] encryptUtf16(long key, int index, String value) {
+        byte[] out = new byte[value.length() * 2];
+        long state = key ^ (long) (index + UMBRA_STR_SALT);
+        for (int i = 0; i < value.length(); i++) {
+            state = state * 6364136223846793005L + 1442695040888963407L;
+            int cipher = (value.charAt(i) ^ (int) ((state >>> 33) & 0xFFFF)) & 0xFFFF;
+            out[i * 2] = (byte) (cipher >>> 8);
+            out[i * 2 + 1] = (byte) cipher;
+        }
+        return out;
     }
 
     private void appendMethod(StringBuilder out, MethodC method) {
@@ -698,6 +829,11 @@ public final class CGenerator {
     }
 
     private void appendBindLoaderExport(StringBuilder out) {
+        // The bind diagnostics used to be unconditional: every protected program printed
+        // the native method names it binds ("umbra-bind-names register=[...]") to stderr
+        // at startup, which both leaked the un-renamed entry points and polluted the
+        // program's output. Keep the code, compile it out by default.
+        out.append("#ifdef UMBRA_BIND_DIAG\n");
         out.append("static void umbra_bind_stderr(const char* text) {\n");
         out.append("#ifdef _WIN32\n");
         out.append("    HANDLE handle = GetStdHandle(STD_ERROR_HANDLE);\n");
@@ -735,7 +871,11 @@ public final class CGenerator {
         out.append("        one[1] = 0;\n");
         out.append("        umbra_bind_stderr(one);\n");
         out.append("    }\n");
-        out.append("}\n\n");
+        out.append("}\n");
+        out.append("#else\n");
+        out.append("static void umbra_bind_stderr(const char* text) { (void)text; }\n");
+        out.append("static void umbra_bind_stderr_int(int value) { (void)value; }\n");
+        out.append("#endif\n\n");
         out.append("JNIEXPORT jint JNICALL umbra_bind_loader(JNIEnv* env, jclass loader,\n");
         out.append("        const char* registerName, const char* challengeName) {\n");
         if (registerLoader == null) {
@@ -784,14 +924,22 @@ public final class CGenerator {
         out.append("    umbra_bind_stderr(\"umbra-bind-sig=\");\n");
         out.append("    umbra_bind_stderr(_sig);\n");
         out.append("    umbra_bind_stderr(\"]\\n\");\n");
-        out.append("    _mid = (*env)->GetMethodID(env, loader, _m.name, _sig);\n");
+        // GetMethodID only looks up *instance* methods; register/verifyChallenge are
+        // static natives, so the old lookup always returned NULL. The code then printed
+        // "umbra-bind-skip" and still returned 0 without binding anything - the
+        // class-encryption + native stack only failed later, as a bare
+        // UnsatisfiedLinkError inside the protected program. GetStaticMethodID is the
+        // matching lookup, and a missing entry point now fails the install.
+        out.append("    _mid = (*env)->GetStaticMethodID(env, loader, _m.name, _sig);\n");
         out.append("    umbra_bind_stderr(\"umbra-bind-mid=\");\n");
         out.append("    umbra_bind_stderr(_mid == NULL ? \"0\\n\" : \"1\\n\");\n");
         out.append("    if (_mid == NULL) {\n");
         out.append("        (*env)->ExceptionDescribe(env);\n");
         out.append("        (*env)->ExceptionClear(env);\n");
-        out.append("        umbra_bind_stderr(\"umbra-bind-skip ").append(name).append("\\n\");\n");
-        out.append("    } else {\n");
+        out.append("        umbra_bind_stderr(\"umbra-bind-missing ").append(name).append("\\n\");\n");
+        out.append("        return -6;\n");
+        out.append("    }\n");
+        out.append("    {\n");
         out.append("        _rc = (*env)->RegisterNatives(env, loader, &_m, 1);\n");
         out.append("        umbra_bind_stderr(\"umbra-bind-rn=\");\n");
         out.append("        umbra_bind_stderr(_rc == 0 ? \"0\\n\" : \"1\\n\");\n");
@@ -1030,7 +1178,24 @@ public final class CGenerator {
     }
 
     private static final String RUNTIME_C =
-            "typedef struct {\n"
+            "/* Member-id cache with explicit memory ordering. The slot\n"
+            + " * payload (mid/fid) is published with a release store before\n"
+            + " * the ready flag, and readers acquire the flag before touching\n"
+            + " * the payload, so a concurrent first use can never observe\n"
+            + " * ready==1 with a stale id. Non-GNU compilers fall back to\n"
+            + " * plain accesses (single-threaded correctness only). */\n"
+            + "#if defined(__GNUC__) || defined(__clang__)\n"
+            + "#define UMBRA_ATOMIC_LOAD(p) __atomic_load_n((p), __ATOMIC_ACQUIRE)\n"
+            + "#define UMBRA_ATOMIC_STORE(p, v) __atomic_store_n((p), (v), __ATOMIC_RELEASE)\n"
+            + "#define UMBRA_ATOMIC_CAS(p, expected, desired) \\\n"
+            + "    __atomic_compare_exchange_n((p), (expected), (desired), 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)\n"
+            + "#else\n"
+            + "#define UMBRA_ATOMIC_LOAD(p) (*(p))\n"
+            + "#define UMBRA_ATOMIC_STORE(p, v) (*(p) = (v))\n"
+            + "#define UMBRA_ATOMIC_CAS(p, expected, desired) \\\n"
+            + "    ((*(p) == *(expected)) ? (*(p) = (desired), 1) : (*(expected) = *(p), 0))\n"
+            + "#endif\n\n"
+            + "typedef struct {\n"
             + "    jmethodID mid;\n"
             + "    jfieldID fid;\n"
             + "    int ready;\n"
@@ -1047,6 +1212,11 @@ public final class CGenerator {
             + "    memcpy(&value, &bits, sizeof(value));\n"
             + "    return value;\n"
             + "}\n\n"
+            + "/* JVM frem/drem: % is illegal on floating-point operands in C, so\n"
+            + " * the remainder needs fmodf/fmod. fmod follows IEC 60559 and keeps\n"
+            + " * the JVM results for NaN, +/-Inf and signed zero. */\n"
+            + "static jfloat umbra_frem(jfloat a, jfloat b) { return fmodf(a, b); }\n\n"
+            + "static jdouble umbra_drem(jdouble a, jdouble b) { return fmod(a, b); }\n\n"
             + "static jint umbra_f2i(jfloat value) {\n"
             + "    if (value != value) return 0;\n"
             + "    if (value >= 2147483647.0f) return 2147483647;\n"

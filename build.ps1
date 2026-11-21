@@ -248,7 +248,7 @@ function Build-Dist {
         'Manifest-Version: 1.0',
         'Main-Class: io.umbra.cli.Main',
         'Implementation-Title: Umbra',
-        'Implementation-Version: 3.4.0',
+        'Implementation-Version: 3.4.1',
         'Created-By: Umbra build.ps1'
     )
     [System.IO.File]::WriteAllText($manifest, ($lines -join "`r`n") + "`r`n", (New-Object System.Text.UTF8Encoding($false)))
@@ -265,7 +265,7 @@ function Build-Package {
     $distJar = Join-Path $Dist 'umbra.jar'
     if (-not (Test-Path $distJar)) { Build-Dist }
     Write-Step 'package'
-    $version = '3.4.0'
+    $version = '3.4.1'
     # Refreshes dist\umbra-gui-fx.jar, the launchers and the example config next to
     # the engine jar, and builds the GUI when it is missing.
     Copy-GuiArtifacts

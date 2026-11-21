@@ -1,4 +1,4 @@
-# Umbra 3.0 example configuration
+# Umbra 3.4.1 example configuration
 #
 #   java -jar dist/umbra.jar -c umbra.example.yml
 #
@@ -202,3 +202,67 @@ options:
   # VM2 coverage
   vm2.indy: "true"
   vm2.constructors: "false"
+  # ---------------------------------------------------------------------------
+  # 移植层（4.0）：把 aidsfuscator / the reference implementation / the reference implementation 的独门技法搬进管线。
+  # 全部默认关闭；打开后产物会明显变大、变慢，先用 --verify 在小样本上验证。
+  # 逐条判定与源码出处见 docs/port/SPEC-*.md，选项细节见 docs/OPTIONS.md。
+  # ---------------------------------------------------------------------------
+
+  # 每个类一个盐字段 + 每方法一个自抵消盐局部量 + 严格盐派发器（the reference implementation）。
+  salt.enabled: "false"
+  salt.class: "true"
+  salt.method: "true"
+  salt.methodParams: "false"          # 给 private 方法追加 int 参数（跨类闭包安全判定）
+  salt.dispatcher: "true"
+  salt.unifyAccess: "true"
+
+  # 每类独立的多态字符串解密器（the reference implementation Poly1/Poly2；order 69，先于经典引擎 70）。
+  polyStrings.enabled: "false"
+  polyStrings.ratio: "100"
+  polyStrings.masks: "0"              # 0 = 每类随机 1..4 条掩码
+  polyStrings.traceKey: "true"        # 密钥折进调用点栈帧哈希
+  polyStrings.loop: "mix"             # for | dowhile | mix
+  polyStrings.codec: "mask"           # mask | caesar | iv | pool
+
+  # 整数常量多态掩码链（the reference implementation IntPolymorphStack，接在整数加密每条载荷路径上）。
+  integer.masks: "false"
+  integer.masks.count: "0"            # >0 才生效
+  integer.masks.random: "true"
+  integer.masks.noninvertible: "false"
+
+  # 哈希化数字常量（the reference implementation 四种哈希 + VM 求值；order 79）。
+  numberHash.enabled: "false"
+  numberHash.codec: "mix"             # skid | bitwise | intellij | legacy | vm | mix
+  numberHash.rate: "100"
+
+  # 种子链不透明谓词（the reference implementation；order 88）。
+  opaque.enabled: "false"
+  opaque.renderer: "conditional"      # conditional | switch | exception | unconditional | internal | mix
+  opaque.seed: "static"               # static | enhanced | exception | switch | internal
+  opaque.rate: "100"
+
+  # 分支形状（取反 / switch 规范化）与去 final（the reference implementation；order 89 / 39）。
+  branch.enabled: "false"
+  branch.switchMode: "mix"
+  definalize.enabled: "false"
+
+  # 流敏感状态整数（the reference implementation flow ints；order 91）。
+  flowInts.enabled: "false"
+  flowInts.rate: "100"
+
+  # 类初始化顺序分析与强制（the reference implementation；order 41）。
+  classInitOrder.enabled: "false"
+  classInitOrder.action: "report"     # report | reorderClinit | hoist
+
+  # 死代码 / 整数复用 / 未使用局部量清理（the reference implementation；order 119）。
+  bodyOptimize.enabled: "false"
+  bodyOptimize.deadCode: "true"
+  bodyOptimize.intReuse: "true"
+  bodyOptimize.unusedLocals: "true"
+
+  # native 载荷容器与覆盖（the reference implementation 移植）：LZMA2 单流 + layout.txt 区间表、
+  # 每个成员去重 id 缓存、字符串常量加密、intrinsic 首批三个、<clinit> 进 native。
+  native.payload: "true"              # 压缩载荷容器
+  native.clinit: "true"               # <clinit> 也翻译成 native
+  native.intrinsics: "true"           # System.arraycopy / String.equals / Integer.valueOf
+  native.targets: ""                  # 空 = 取 native.target+native.arch；可写 "X86_64_WINDOWS,AARCH64_MACOS"

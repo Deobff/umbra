@@ -53,6 +53,9 @@ public final class UmbraNativeLoader {
     private static final String FINGERPRINT_1 = "@@FP1@@";
     private static final String FINGERPRINT_2 = "@@FP2@@";
     private static final String KEY_HEX = "@@AKEY@@";
+    private static final String LAYOUT_ENTRY = "@@LAYOUT@@";
+    /** "1" when the resource is an LZMA2 payload, "0" when it is the library. */
+    private static final String PAYLOAD_FLAG = "@@PAYLOAD@@";
 
     private static final boolean ANTI_DUMP = Boolean.parseBoolean(ANTI_DUMP_FLAG);
     private static final boolean ANTI_BACKFILL = Boolean.parseBoolean(ANTI_BACKFILL_FLAG);
@@ -365,15 +368,7 @@ public final class UmbraNativeLoader {
             } catch (Throwable error) {
                 failure = describe(error);
                 state = 2;
-                String message = String.valueOf(error.getMessage());
-                if (message.indexOf("rejected") >= 0 || message.indexOf("mismatch") >= 0
-                        || message.indexOf("refused") >= 0) {
-                    say("[Umbra] native library refused ("
-                            + RESOURCE + "): " + failure);
-                } else {
-                    say("[Umbra] native library could not be loaded ("
-                            + RESOURCE + "): " + failure);
-                }
+                say("[Umbra] " + refusalMessage(failure));
                 return false;
             }
         }
@@ -387,15 +382,256 @@ public final class UmbraNativeLoader {
         return failure;
     }
 
+    /**
+     * Fail-closed entry point for the generated {@code <clinit>} hook.
+     *
+     * <p>The anti-dump fingerprint is compared with the extracted bytes
+     * <em>before</em> {@link System#load} and the anti-backfill challenge runs right
+     * after it, so both checks already sit on the load path and both have the
+     * library bytes in hand. What used to be missing was the caller: the hook
+     * dropped the {@link #ensureLoaded()} boolean and called the first native method
+     * ({@code register}) anyway, which the JVM answered with a bare
+     * {@code UnsatisfiedLinkError: register} - indistinguishable from a wiring bug
+     * and silent unless {@code -Dumbra.debug=true} was set. The hook now calls this
+     * method, which aborts class initialization with the real refusal reason.</p>
+     */
+    public static void assertLoaded() {
+        if (ensureLoaded()) {
+            return;
+        }
+        String reason = failure == null ? "unknown failure" : failure;
+        throw new IllegalStateException(refusalMessage(reason));
+    }
+
+    private static String refusalMessage(String reason) {
+        // A protected build only ever loads a payload it has verified, so any load
+        // failure under anti-dump/anti-backfill is a refusal, not a missing file.
+        String head = (ANTI_DUMP || ANTI_BACKFILL)
+                ? "Umbra native library refused"
+                : "Umbra native library could not be loaded";
+        return head + " (" + RESOURCE + "): " + reason;
+    }
+
+    /**
+     * Refuses to load the payload when the JVM runs with a Java agent.
+     *
+     * <p>the reference implementation's loader skips its whole extraction routine when an agent is
+     * attached, so instrumentation faces a library that was never loaded instead
+     * of one that was loaded and then verified. The argument form matters:
+     * HotSpot takes {@code -javaagent:<jar>} and {@code -agentlib:<name>}, so a
+     * bare equals() test would miss every real invocation. Both the bare token
+     * and the colon form therefore count as an agent.</p>
+     */
+    static boolean agentAttached() {
+        try {
+            return agentAttached(java.lang.management.ManagementFactory
+                    .getRuntimeMXBean().getInputArguments());
+        } catch (Throwable unavailable) {
+            return false;
+        }
+    }
+
+    static boolean agentAttached(java.util.List<String> arguments) {
+        if (arguments == null) {
+            return false;
+        }
+        for (String argument : arguments) {
+            if (argument == null) {
+                continue;
+            }
+            if ("-javaagent".equals(argument) || argument.startsWith("-javaagent:")) {
+                return true;
+            }
+            if ("-agentlib".equals(argument) || argument.startsWith("-agentlib:")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Decodes the stored-chunk LZMA2 stream produced by the build.
+     *
+     * <p>The loader stays a single self-contained class, so only the stored chunk
+     * kind is understood here: the build never emits range-coded LZMA chunks. A
+     * resource that is not a stream at all (an older build) is returned as-is,
+     * which keeps loaders injected by other passes working.</p>
+     */
+    /**
+     * Decodes the stored-chunk LZMA2 stream produced by the build.
+     *
+     * <p>The decision is a build-time flag, never a guess: the pass substitutes
+     * {@code @@PAYLOAD@@} with "1" when it wrote a container and "0" when the
+     * resource is the library itself (the shape other passes still produce). A
+     * build that says "1" is decoded or refused - it is never written out raw,
+     * because that is exactly the failure mode where an undecoded stream reaches
+     * {@code System.load} and surfaces as "Can't find dependent libraries".</p>
+     */
+    private static byte[] decodePayload(byte[] raw) throws IOException {
+        if (!payloadEnabled()) {
+            say("[umbra-native] payload=raw bytes=" + raw.length);
+            return raw;
+        }
+        int control = raw[0] & 0xFF;
+        if (control != 0 && control != 1 && control != 2) {
+            throw new IOException("native payload uses an unsupported LZMA2 chunk: " + control);
+        }
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(raw.length + 16);
+        int index = 0;
+        boolean resetSeen = false;
+        while (true) {
+            if (index >= raw.length) {
+                throw new IOException("native payload is truncated");
+            }
+            int kind = raw[index++] & 0xFF;
+            if (kind == 0) {
+                break;
+            }
+            if (kind == 1) {
+                resetSeen = true;
+            } else if (kind != 2) {
+                throw new IOException("native payload uses an unsupported LZMA2 chunk: " + kind);
+            } else if (!resetSeen) {
+                throw new IOException("native payload does not start with a dictionary reset");
+            }
+            if (index + 2 > raw.length) {
+                throw new IOException("native payload is truncated");
+            }
+            int size = (((raw[index] & 0xFF) << 8) | (raw[index + 1] & 0xFF)) + 1;
+            index += 2;
+            if (index + size > raw.length) {
+                throw new IOException("native payload chunk overruns the resource");
+            }
+            out.write(raw, index, size);
+            index += size;
+        }
+        return out.toByteArray();
+    }
+
+    /** Build-time switch; an unsubstituted placeholder means "raw library". */
+    private static boolean payloadEnabled() {
+        return "1".equals(PAYLOAD_FLAG);
+    }
+
+    /** Entry name of the layout table, or null when this build has none. */
+    private static String layoutEntry() {
+        // A char test on purpose: a "@@" string literal inside this method would be
+        // flagged by the build-time placeholder assertion in NativeCodePass, which
+        // scans the injected loader for leftover '@@' constants.
+        if (LAYOUT_ENTRY == null || LAYOUT_ENTRY.isEmpty() || LAYOUT_ENTRY.indexOf('@') >= 0) {
+            return null;
+        }
+        return LAYOUT_ENTRY;
+    }
+
+    /** Cuts the platform slice out of the decompressed payload. */
+    private static byte[] sliceFor(byte[] payload) throws IOException {
+        String entry = layoutEntry();
+        if (entry == null) {
+            say("[umbra-native] layout=none bytes=" + payload.length);
+            return payload;
+        }
+        byte[] table = readNamed(entry);
+        if (table == null || table.length == 0) {
+            // Single-target build or a stripped archive: the payload *is* this
+            // platform's library, already fully decoded above.
+            say("[umbra-native] layout=missing bytes=" + payload.length);
+            return payload;
+        }
+        String target = targetName(System.getProperty("os.name", ""),
+                System.getProperty("os.arch", ""));
+        if (target == null) {
+            return payload;
+        }
+        String text = new String(table, java.nio.charset.StandardCharsets.UTF_8);
+        for (String line : text.split("\n")) {
+            String trimmed = line.trim();
+            if (trimmed.isEmpty() || trimmed.startsWith("#")) {
+                continue;
+            }
+            int space = trimmed.indexOf(' ');
+            if (space <= 0) {
+                continue;
+            }
+            if (!trimmed.substring(0, space).equals(target)) {
+                continue;
+            }
+            String rest = trimmed.substring(space + 1).trim();
+            int second = rest.indexOf(' ');
+            if (second < 0) {
+                continue;
+            }
+            try {
+                long start = Long.parseLong(rest.substring(0, second).trim());
+                long end = Long.parseLong(rest.substring(second + 1).trim());
+                if (start < 0 || end < start || end > payload.length) {
+                    throw new IOException("native payload layout is out of range");
+                }
+                byte[] slice = new byte[(int) (end - start)];
+                System.arraycopy(payload, (int) start, slice, 0, slice.length);
+                say("[umbra-native] layout=" + target + " bytes=" + slice.length);
+                return slice;
+            } catch (NumberFormatException malformed) {
+                throw new IOException("native payload layout is malformed");
+            }
+        }
+        throw new IOException("native payload has no slice for " + target);
+    }
+
+    private static String targetName(String osName, String archName) {
+        String os = osName == null ? "" : osName.toLowerCase(java.util.Locale.ROOT);
+        String arch = archName == null ? "" : archName.toLowerCase(java.util.Locale.ROOT);
+        boolean x86 = arch.contains("x86_64") || arch.contains("amd64") || arch.contains("x64");
+        boolean arm = arch.contains("aarch64") || arch.contains("arm64");
+        if (os.contains("win")) {
+            return x86 ? "WINDOWS_X86_64" : (arm ? "WINDOWS_AARCH64" : null);
+        }
+        if (os.contains("mac") || os.contains("darwin")) {
+            return x86 ? "MACOS_X86_64" : (arm ? "MACOS_AARCH64" : null);
+        }
+        if (os.contains("lin")) {
+            return x86 ? "LINUX_X86_64" : (arm ? "LINUX_AARCH64" : null);
+        }
+        return null;
+    }
+
+    private static byte[] readNamed(String entry) {
+        byte[] data = readStream(UmbraNativeLoader.class.getResourceAsStream("/" + entry));
+        if (data != null && data.length > 0) {
+            return data;
+        }
+        try {
+            ClassLoader context = Thread.currentThread().getContextClassLoader();
+            if (context != null) {
+                data = readStream(context.getResourceAsStream(entry));
+                if (data != null && data.length > 0) {
+                    return data;
+                }
+            }
+        } catch (RuntimeException ignored) {
+            // A hostile context loader must not break the fallback chain.
+        }
+        data = readStream(ClassLoader.getSystemResourceAsStream(entry));
+        if (data != null && data.length > 0) {
+            return data;
+        }
+        return readFromCodeSource(entry);
+    }
+
     private static void loadLibrary() throws IOException {
-        byte[] data = readResource();
-        if (data == null || data.length == 0) {
+        if (agentAttached()) {
+            throw new IOException("Java agent attached; the native payload stays unloaded");
+        }
+        byte[] raw = readResource();
+        if (raw == null || raw.length == 0) {
             throw new IOException("native payload is missing from the JAR");
         }
+        byte[] payload = decodePayload(raw);
+        byte[] library = sliceFor(payload);
         if (ANTI_DUMP) {
-            verifyFingerprint(data);
+            verifyFingerprint(payload);
         }
-        File file = writeLibrary(data);
+        File file = writeLibrary(library);
         try {
             System.load(file.getAbsolutePath());
         } catch (Throwable error) {
@@ -539,6 +775,10 @@ public final class UmbraNativeLoader {
         if (!directory.mkdirs()) {
             throw new IOException("could not create the native library directory");
         }
+        // The suffix stays: Windows refuses to load a module whose path has no
+        // .dll extension ("Can't find dependent libraries", reproduced with
+        // System.load on an identical copy), so a suffix-less temp name would make
+        // every protected build unloadable on the platform this pass targets most.
         File file = new File(directory, randomName(16) + librarySuffix());
         OutputStream out = new FileOutputStream(file);
         try {
@@ -657,6 +897,18 @@ public final class UmbraNativeLoader {
         }
     }
 
+    private static String librarySuffix() {
+        String os = System.getProperty("os.name", "");
+        String lower = os.toLowerCase(java.util.Locale.ROOT);
+        if (lower.indexOf("win") >= 0) {
+            return ".dll";
+        }
+        if (lower.indexOf("mac") >= 0) {
+            return ".dylib";
+        }
+        return ".so";
+    }
+
     private static boolean isWindows() {
         String os = System.getProperty("os.name", "");
         return os.toLowerCase(java.util.Locale.ROOT).indexOf("win") >= 0;
@@ -675,18 +927,6 @@ public final class UmbraNativeLoader {
             result = (result << 4) | (digit & 0x0FL);
         }
         return result;
-    }
-
-    private static String librarySuffix() {
-        String os = System.getProperty("os.name", "");
-        String lower = os.toLowerCase(java.util.Locale.ROOT);
-        if (lower.indexOf("win") >= 0) {
-            return ".dll";
-        }
-        if (lower.indexOf("mac") >= 0) {
-            return ".dylib";
-        }
-        return ".so";
     }
 
     private static byte[] readResource() {
@@ -710,14 +950,14 @@ public final class UmbraNativeLoader {
         if (data != null && data.length > 0) {
             return data;
         }
-        data = readFromCodeSource();
+        data = readFromCodeSource(RESOURCE);
         if (data != null && data.length > 0) {
             return data;
         }
         return null;
     }
 
-    private static byte[] readFromCodeSource() {
+    private static byte[] readFromCodeSource(String entry) {
         try {
             CodeSource source = UmbraNativeLoader.class.getProtectionDomain().getCodeSource();
             if (source == null) {
@@ -729,9 +969,9 @@ public final class UmbraNativeLoader {
             }
             File file = new File(location.toURI());
             if (file.isDirectory()) {
-                File entry = new File(file, RESOURCE);
-                if (entry.isFile()) {
-                    InputStream in = new java.io.FileInputStream(entry);
+                File named = new File(file, entry);
+                if (named.isFile()) {
+                    InputStream in = new java.io.FileInputStream(named);
                     try {
                         return readStream(in);
                     } finally {
@@ -745,11 +985,11 @@ public final class UmbraNativeLoader {
             }
             ZipFile zip = new ZipFile(file);
             try {
-                ZipEntry entry = zip.getEntry(RESOURCE);
-                if (entry == null) {
+                ZipEntry archived = zip.getEntry(entry);
+                if (archived == null) {
                     return null;
                 }
-                return readStream(zip.getInputStream(entry));
+                return readStream(zip.getInputStream(archived));
             } finally {
                 zip.close();
             }

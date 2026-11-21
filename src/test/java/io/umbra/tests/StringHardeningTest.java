@@ -6,6 +6,7 @@ import io.umbra.core.engine.EngineResult;
 import io.umbra.core.engine.UmbraEngine;
 import io.umbra.core.engine.UmbraVerifier;
 import io.umbra.core.pass.impl.StringEncryptionPass;
+import io.umbra.core.runtime.crypto.UmbraStringCipher;
 import io.umbra.core.util.Log;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
@@ -80,7 +81,7 @@ public final class StringHardeningTest {
         }
         try {
             testSiteIdsRandomizedAndDeterministic(demo);
-            testArtifactSalt(demo);
+            testNoEmbeddedKeyMaterial(demo);
             testCacheDefaultAndOptIn(demo);
             testWipeAndHideFlags(demo);
             testMultiEngineAutoAndUnsupported(demo);
@@ -129,25 +130,198 @@ public final class StringHardeningTest {
         System.out.println("StringHardeningTest: site-id sample " + preview(siteIds(first)));
     }
 
-    private static void testArtifactSalt(Path demo) throws Exception {
+    /**
+     * The artifact salt and the domain separators must not come back as readable
+     * constants. Until 3.4.0 the injected decryptor carried the salt as a
+     * {@code SALT_SPEC} string constant and every KDF was prefixed with a 16-hex
+     * domain tag, both of which a static scan could collect (U1-crypto.md §4.2
+     * rebuilt the whole string layer from them). The salt is now folded into the
+     * per-class key and the per-site seed at build time, and the separators are
+     * int domain words inside method bodies.
+     */
+    private static void testNoEmbeddedKeyMaterial(Path demo) throws Exception {
         Run first = protect(demo, SEED, options("string.engine", "chacha20"));
-        Run repeat = protect(demo, SEED, options("string.engine", "chacha20"));
         Run otherSeed = protect(demo, SEED + 5, options("string.engine", "chacha20"));
         Run explicit = protect(demo, SEED,
                 options("string.engine", "chacha20", "string.siteSalt", "1234567890123"));
 
-        check("salt: decryptor salt is not the placeholder", decryptorSalt(first) != 0L);
-        check("salt: same seed same salt", decryptorSalt(first) == decryptorSalt(repeat));
-        check("salt: different seed different salt",
-                decryptorSalt(first) != decryptorSalt(otherSeed));
-        check("salt: explicit string.siteSalt is embedded",
-                decryptorSalt(explicit) == 1234567890123L);
+        long derivedSalt = UmbraStringCipher.deriveArtifactSalt(SEED);
+        check("salt: derived artifact salt is non-zero", derivedSalt != 0L);
+        check("salt: derived salt is not a string constant in any entry",
+                !containsText(first.jar, Long.toString(derivedSalt)));
+        check("salt: hexadecimal form of the derived salt is not embedded either",
+                !containsText(first.jar, Long.toHexString(derivedSalt)));
+        check("salt: explicit string.siteSalt is not embedded as a string",
+                !containsText(explicit.jar, "1234567890123"));
+        check("salt: the decryptor keeps no SALT field",
+                !hasField(first, "SALT_SPEC") && !hasField(first, "SALT"));
 
-        check("salt: payload version is 4", stat(first, "strings.payloadVersion") == 4);
-        check("salt: native key root is not bound without a native build",
+        check("salt: a different seed changes the payload constants",
+                !payloadFingerprint(first).equals(payloadFingerprint(otherSeed)));
+        check("salt: explicit string.siteSalt still changes the key material",
+                !payloadFingerprint(first).equals(payloadFingerprint(explicit)));
+
+        String tag = domainTagConstant(first);
+        check("tags: no 16-hex domain tag is left in any constant pool"
+                + (tag == null ? "" : " (found " + tag + ")"), tag == null);
+        String label = domainLabelConstant(first);
+        check("tags: no io.umbra.* domain label is left in any constant pool"
+                + (label == null ? "" : " (found " + label + ")"), label == null);
+
+        check("payload: version is 4", stat(first, "strings.payloadVersion") == 4);
+        check("payload: native key root is not bound without a native build",
                 stat(first, "strings.nativeKey") == 0);
-        verify(first, "salt");
-        check("salt: protected demo runs (default cache off)", runsOk(first.jar));
+        verify(first, "keys");
+        check("payload: protected demo runs (default cache off)", runsOk(first.jar));
+    }
+
+    /** Every Utf8 constant-pool string of every class entry in the archive. */
+    private static List<String> poolStrings(Path jar) throws Exception {
+        List<String> out = new ArrayList<String>();
+        try (ZipInputStream zip = new ZipInputStream(new FileInputStream(jar.toFile()))) {
+            ZipEntry entry;
+            while ((entry = zip.getNextEntry()) != null) {
+                if (entry.isDirectory() || !entry.getName().endsWith(".class")) {
+                    continue;
+                }
+                out.addAll(poolStrings(drain(zip)));
+            }
+        }
+        return out;
+    }
+
+    private static List<String> poolStrings(byte[] bytes) {
+        List<String> out = new ArrayList<String>();
+        if (bytes.length < 10) {
+            return out;
+        }
+        int count = ((bytes[8] & 0xFF) << 8) | (bytes[9] & 0xFF);
+        int offset = 10;
+        int index = 1;
+        while (index < count && offset + 1 < bytes.length) {
+            int tag = bytes[offset] & 0xFF;
+            switch (tag) {
+                case 1: {
+                    int length = ((bytes[offset + 1] & 0xFF) << 8) | (bytes[offset + 2] & 0xFF);
+                    out.add(new String(bytes, offset + 3, length, StandardCharsets.UTF_8));
+                    offset += 3 + length;
+                    break;
+                }
+                case 7:
+                case 8:
+                case 16:
+                case 19:
+                case 20:
+                    offset += 3;
+                    break;
+                case 15:
+                    offset += 4;
+                    break;
+                case 3:
+                case 4:
+                case 9:
+                case 10:
+                case 11:
+                case 12:
+                case 17:
+                case 18:
+                    offset += 5;
+                    break;
+                case 5:
+                case 6:
+                    offset += 9;
+                    index++;
+                    break;
+                default:
+                    throw new IllegalStateException("unexpected constant-pool tag " + tag
+                            + " at offset " + offset);
+            }
+            index++;
+        }
+        return out;
+    }
+
+    private static byte[] drain(InputStream in) throws Exception {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buffer = new byte[8192];
+        int read;
+        while ((read = in.read(buffer)) >= 0) {
+            out.write(buffer, 0, read);
+        }
+        return out.toByteArray();
+    }
+
+    private static String domainTagConstant(Run run) throws Exception {
+        for (String value : poolStrings(run.jar)) {
+            if (value.length() == 16 && isLowerHex(value)) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private static String domainLabelConstant(Run run) throws Exception {
+        String[] prefixes = { "io.umbra.string.", "io.umbra.aes.", "io.umbra.cipher.",
+                "umbra.domain.v1" };
+        for (String value : poolStrings(run.jar)) {
+            for (String prefix : prefixes) {
+                if (value.startsWith(prefix)) {
+                    return value;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static boolean isLowerHex(String value) {
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean hasField(Run run, String name) {
+        for (ClassNode node : run.classes.values()) {
+            for (FieldNode field : node.fields) {
+                if (name.equals(field.name)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Raw byte scan of every non-directory entry (covers compressed classes). */
+    private static boolean containsText(Path jar, String text) throws Exception {
+        byte[] needle = text.getBytes(StandardCharsets.ISO_8859_1);
+        try (ZipInputStream zip = new ZipInputStream(new FileInputStream(jar.toFile()))) {
+            ZipEntry entry;
+            while ((entry = zip.getNextEntry()) != null) {
+                if (!entry.isDirectory() && containsBytes(drain(zip), needle)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean containsBytes(byte[] haystack, byte[] needle) {
+        if (needle.length == 0 || haystack.length < needle.length) {
+            return false;
+        }
+        outer:
+        for (int i = 0; i + needle.length <= haystack.length; i++) {
+            for (int j = 0; j < needle.length; j++) {
+                if (haystack[i + j] != needle[j]) {
+                    continue outer;
+                }
+            }
+            return true;
+        }
+        return false;
     }
 
     private static void testCacheDefaultAndOptIn(Path demo) throws Exception {
@@ -582,7 +756,7 @@ public final class StringHardeningTest {
     private static void findHelpers(Run run) {
         for (Map.Entry<String, ClassNode> entry : run.classes.entrySet()) {
             for (FieldNode field : entry.getValue().fields) {
-                if ("SALT_SPEC".equals(field.name) && field.value instanceof String) {
+                if ("FLAGS_SPEC".equals(field.name) && field.value instanceof String) {
                     run.decryptorName = entry.getKey();
                 }
             }
@@ -596,16 +770,6 @@ public final class StringHardeningTest {
         if (run.decryptorName == null) {
             throw new IllegalStateException("injected string decryptor not found in archive");
         }
-    }
-
-    private static long decryptorSalt(Run run) {
-        ClassNode node = run.classes.get(run.decryptorName);
-        for (FieldNode field : node.fields) {
-            if ("SALT_SPEC".equals(field.name) && field.value instanceof String) {
-                return Long.parseLong(((String) field.value).trim());
-            }
-        }
-        throw new IllegalStateException("SALT_SPEC missing");
     }
 
     private static int decryptorFlags(Run run) {
@@ -848,6 +1012,49 @@ public final class StringHardeningTest {
             for (String name : names) {
                 digest.update(name.getBytes(StandardCharsets.UTF_8));
                 digest.update((byte) 0);
+            }
+            StringBuilder out = new StringBuilder();
+            for (byte b : digest.digest()) {
+                out.append(Character.forDigit((b >>> 4) & 0xF, 16));
+                out.append(Character.forDigit(b & 0xF, 16));
+            }
+            return out.toString();
+        } catch (Exception failure) {
+            throw new IllegalStateException(failure);
+        }
+    }
+
+    /**
+     * Digest over every LDC string constant of every class, i.e. the encrypted
+     * payloads themselves. {@link #classFingerprint} only hashes class names, which
+     * are seed-derived, so it cannot answer "did the key material change".
+     */
+    private static String payloadFingerprint(Run run) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            List<String> names = new ArrayList<String>(run.classes.keySet());
+            Collections.sort(names);
+            for (String name : names) {
+                ClassNode node = run.classes.get(name);
+                List<String> constants = new ArrayList<String>();
+                for (MethodNode method : node.methods) {
+                    if (method.instructions == null) {
+                        continue;
+                    }
+                    for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null;
+                         insn = insn.getNext()) {
+                        if (insn instanceof LdcInsnNode
+                                && ((LdcInsnNode) insn).cst instanceof String) {
+                            constants.add((String) ((LdcInsnNode) insn).cst);
+                        }
+                    }
+                }
+                Collections.sort(constants);
+                digest.update(name.getBytes(StandardCharsets.UTF_8));
+                for (String value : constants) {
+                    digest.update(value.getBytes(StandardCharsets.UTF_8));
+                    digest.update((byte) 0);
+                }
             }
             StringBuilder out = new StringBuilder();
             for (byte b : digest.digest()) {

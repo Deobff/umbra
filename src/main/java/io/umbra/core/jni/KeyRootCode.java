@@ -1,7 +1,6 @@
 package io.umbra.core.jni;
 
 import java.security.MessageDigest;
-import java.security.SecureRandom;
 
 /**
  * Emits the native key-root bridge and the P6 gate (native side).
@@ -102,16 +101,53 @@ public final class KeyRootCode {
     private KeyRootCode() {
     }
 
-    public static byte[] newRoot() {
-        byte[] root = new byte[KEY_SIZE];
-        new SecureRandom().nextBytes(root);
-        return root;
+    // The unseeded newRoot() / newGateSecret() pair was removed: both had no
+    // production caller left (NativeGuardPass uses newGateSecret(seed) and the
+    // build root comes from BuildRoot), and keeping a random helper next to the
+    // deterministic one is exactly the trap that broke reproducibility before.
+
+    /**
+     * Build-time gate secret for a pinned run seed.
+     *
+     * <p>The unsown variant above made two builds with the same {@code --seed} embed
+     * different gate material, which moved every byte of the compiled bridge and
+     * broke the reproducibility contract in {@code ARCHITECTURE.md}. The seeded
+     * variant derives from {@link io.umbra.core.util.BuildRoot} with a domain label
+     * of its own, so it cannot collide with the build root.</p>
+     */
+    public static byte[] newGateSecret(long seed) {
+        return io.umbra.core.util.BuildRoot.derive(seed, GATE_SECRET_LABEL);
     }
 
-    public static byte[] newGateSecret() {
-        byte[] secret = new byte[KEY_SIZE];
-        new SecureRandom().nextBytes(secret);
-        return secret;
+    /** Domain label for the seeded gate secret; changing it changes the compiled bridge. */
+    private static final String GATE_SECRET_LABEL = "umbra.native.gate.v1";
+
+    /**
+     * Deterministic seed for the mask/salt RNG compiled into the key bridge.
+     *
+     * <p>Domain-separated from {@code BuildRoot.derive}: the label is different and
+     * the secret material is mixed in, so the mask never equals the build root.</p>
+     */
+    private static long maskSeed(byte[] root, long secret, byte[] gateSecret) {
+        try {
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            digest.update("umbra.keyroot.mask.v1".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            digest.update(root);
+            for (int i = 0; i < 8; i++) {
+                digest.update((byte) ((secret >>> (8 * i)) & 0xFFL));
+            }
+            if (gateSecret != null) {
+                digest.update(gateSecret);
+            }
+            byte[] hash = digest.digest();
+            long value = 0L;
+            for (int i = 0; i < 8; i++) {
+                value = (value << 8) | (hash[i] & 0xFFL);
+            }
+            return value;
+        } catch (java.security.NoSuchAlgorithmException missing) {
+            throw new IllegalStateException("native-key: SHA-256 is unavailable", missing);
+        }
     }
 
     public static byte[] hmacSha256(byte[] key, byte[] message) {
@@ -282,7 +318,11 @@ public final class KeyRootCode {
             throw new IllegalArgumentException("key root must be 32 bytes");
         }
         boolean gate = gateEnabled && gateSecret != null && gateSecret.length == KEY_SIZE;
-        SecureRandom random = new SecureRandom();
+        // Build-time mask material must be a pure function of the inputs: the old
+        // unseeded SecureRandom put different salts, seeds and gate salts into every
+        // bridge built from the same --seed. Derive the RNG from a domain-separated
+        // hash of the root/secret/gate material instead.
+        java.util.Random random = new java.util.Random(maskSeed(root, secret, gateSecret));
         int seed = random.nextInt();
         int[] salt = new int[8];
         for (int i = 0; i < salt.length; i++) {

@@ -245,7 +245,8 @@ public final class NativeGuardPass implements Pass {
         }
 
         boolean nativeGate = config.optionBool(NATIVE_GATE_OPTION, true);
-        byte[] gateSecret = nativeGate ? KeyRootCode.newGateSecret() : null;
+        // Seeded so the compiled bridge is byte-identical for the same --seed.
+        byte[] gateSecret = nativeGate ? KeyRootCode.newGateSecret(config.seed()) : null;
         ClassPool pool = context.classes();
         String loader = findKeyLoader(pool);
         boolean injected = false;
@@ -262,6 +263,11 @@ public final class NativeGuardPass implements Pass {
             loaderReplacements.put("@@FP0@@", "100000000000000000000000");
             loaderReplacements.put("@@FP1@@", "20000000000000000000");
             loaderReplacements.put("@@FP2@@", "30000000000000000000");
+            // This loader is the class that *would* load a bundled library; it never
+            // bundles one. Leaving these two markers behind made the class-encryption
+            // placeholder scan abort the whole build ("unreplaced placeholder").
+            loaderReplacements.put("@@PAYLOAD@@", "0");
+            loaderReplacements.put("@@LAYOUT@@", "");
             loader = TemplateInjector.inject(pool, UmbraNativeLoader.class,
                     RuntimeNames.path("N"), config.seed(), loaderReplacements);
             injected = true;
@@ -278,7 +284,7 @@ public final class NativeGuardPass implements Pass {
                 rootFingerprint == null ? "?" : rootFingerprint.substring(0, 16));
         Path temp = null;
         try {
-            temp = Files.createTempDirectory(neutralDirectoryName());
+            temp = Files.createTempDirectory(neutralDirectoryName(config.seed()));
             String target = guardTarget();
             int handleScanMs = 100;
             try {
@@ -308,6 +314,16 @@ public final class NativeGuardPass implements Pass {
             Files.write(sourceFile, source.getBytes(StandardCharsets.UTF_8));
             NativeCompiler.Result result = NativeCompiler.compile(compiler, sourceFile, libraryFile,
                     target, "-s", context.log(), true);
+            if (!result.success()) {
+                // A toolchain hiccup (antivirus holding the fresh output, a full temp
+                // directory, a slow machine tripping the compile timeout) used to end
+                // the whole run later in class encryption. One retry removes that
+                // intermittent failure class before it can matter.
+                context.log().warn("native-key: the key bridge did not compile on the first "
+                        + "attempt (%s); retrying once", result.command());
+                result = NativeCompiler.compile(compiler, sourceFile, libraryFile,
+                        target, "-s", context.log(), true);
+            }
             context.stats().add("antiDebug.nativeKey.compile.ms", result.millis());
             if (!result.success()) {
                 context.log().warn("native-key: the key bridge did not compile (%s); the archive "
@@ -316,12 +332,17 @@ public final class NativeGuardPass implements Pass {
                 if (output != null && !output.trim().isEmpty()) {
                     context.log().warn("native-key: compiler output: %s", abbreviate(output));
                 }
+                // Remember why, so class encryption can refuse with the real cause
+                // instead of "the native pass was disabled".
+                context.stats().text("native.keyBridge.status",
+                        "compile failed: " + firstLine(output) + " [" + result.command() + "]");
                 if (injected) {
                     pool.removeClass(loader);
                 }
                 context.stats().add("antiDebug.nativeKey.fallback", 1);
                 return "";
             }
+            context.stats().text("native.keyBridge.status", "built in " + result.millis() + " ms");
             byte[] bridge = Files.readAllBytes(result.library());
             if (injected) {
 
@@ -365,9 +386,23 @@ public final class NativeGuardPass implements Pass {
         }
     }
 
-    private static String neutralDirectoryName() {
-        return Long.toHexString(new java.security.SecureRandom().nextLong()
-                & 0x7FFFFFFFFFFFFFFFL);
+    /**
+     * Neutral temp-directory name for the key-bridge build.
+     *
+     * <p>Used to draw from an unseeded {@code SecureRandom}, which made the name
+     * (and, through the leading-zero trim, its length) differ between two builds
+     * with the same seed - one of the sources of the reproducible-build length
+     * jitter. It is now a fixed-width function of the run seed.</p>
+     */
+    private static String neutralDirectoryName(long seed) {
+        long value = new java.util.Random(seed ^ 0x4E45555452414CL).nextLong()
+                & 0x7FFFFFFFFFFFFFFFL;
+        String hex = Long.toHexString(value);
+        StringBuilder out = new StringBuilder(16);
+        for (int i = hex.length(); i < 16; i++) {
+            out.append('0');
+        }
+        return out.append(hex).toString();
     }
 
     private static String findKeyLoader(ClassPool pool) {
@@ -555,6 +590,13 @@ public final class NativeGuardPass implements Pass {
 
             NativeCompiler.Result result = NativeCompiler.compile(compiler, sourceFile, libraryFile,
                     target, "-s", context.log(), reproducible);
+            if (!result.success()) {
+                // See the key bridge above: one retry for a transient toolchain failure.
+                context.log().warn("native-guard: the guard library did not compile on the first "
+                        + "attempt (%s); retrying once", result.command());
+                result = NativeCompiler.compile(compiler, sourceFile, libraryFile,
+                        target, "-s", context.log(), reproducible);
+            }
             context.stats().add("antiDebug.nativeGuard.compile.ms", result.millis());
             if (!result.success()) {
                 return failedGuardBuild(context, result);
@@ -580,6 +622,19 @@ public final class NativeGuardPass implements Pass {
         } finally {
             deleteRecursively(temp);
         }
+    }
+
+    /** The first meaningful compiler line, for a one-line failure reason. */
+    private static String firstLine(String output) {
+        if (output == null || output.trim().isEmpty()) {
+            return "no compiler output";
+        }
+        for (String line : output.split("\r?\n")) {
+            if (!line.trim().isEmpty()) {
+                return line.trim();
+            }
+        }
+        return output.trim();
     }
 
     private static GuardBuild failedGuardBuild(PassContext context, NativeCompiler.Result result) {

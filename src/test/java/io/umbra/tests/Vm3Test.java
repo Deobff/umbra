@@ -90,6 +90,9 @@ public final class Vm3Test {
     private static int checks;
     private static final String GCC = "E:\\1111\\bin\\gcc.exe";
 
+    /** Fixed runtime package so every artifact in this suite is addressable. */
+    private static final String RUNTIME_PACKAGE = "rt";
+
     private Vm3Test() {
     }
 
@@ -868,6 +871,7 @@ public final class Vm3Test {
             check(stat(stats, "native.antiBackfill.entries") > 0,
                     "e2e: native method backfill table has entries");
             check(UmbraVerifier.verify(output).isEmpty(), "e2e: protected jar verifies");
+            checkNoNativePlaceholders(output);
 
             String control = runJar(input);
             String protectedOutput = runJar(output, false);
@@ -982,7 +986,8 @@ public final class Vm3Test {
         check(refused.contains("backfill") || refused.contains("challenge")
                         || refused.contains("UnsatisfiedLinkError")
                         || refused.contains("rejected"),
-                "e2e: refusal comes from the keyed backfill challenge");
+                "e2e: refusal comes from the keyed backfill challenge: "
+                        + firstLines(refused, 6));
         check(!refused.contains("VM3-OK"),
                 "e2e: foreign library does not let the protected program run");
     }
@@ -1002,6 +1007,13 @@ public final class Vm3Test {
         options.put("antiLlm.enabled", "false");
         options.put("noise.enabled", "false");
 
+        // Pin the runtime helper package. RuntimeNames.base is a process-wide static
+        // that every engine run re-derives from its seed, so without this the second
+        // protect() call leaves the global pointing at the *other* build's package and
+        // the tamper helpers below can no longer address the first artifact. The
+        // package name is cosmetic; reset() in finally keeps the rest of the suite on
+        // the default behaviour.
+        options.put("runtime.package", RUNTIME_PACKAGE);
         options.put("string.allowKeylessFallback", "true");
         UmbraConfig.Builder builder = new UmbraConfig.Builder()
                 .input(input)
@@ -1012,7 +1024,11 @@ public final class Vm3Test {
             builder.option(entry.getKey(), entry.getValue());
         }
         UmbraConfig config = builder.build();
-        return new UmbraEngine(new Log(null, false)).run(config, ProgressListener.NONE);
+        try {
+            return new UmbraEngine(new Log(null, false)).run(config, ProgressListener.NONE);
+        } finally {
+            RuntimeNames.reset();
+        }
     }
 
     private static Path buildAppJar(Path directory) throws Exception {
@@ -1082,6 +1098,50 @@ public final class Vm3Test {
         return jar;
     }
 
+    /**
+     * P0-1 regression guard: the injected loader declares its payload entry as
+     * {@code @@RESOURCE@@}. If the pass substitutes any other key the placeholder
+     * survives into the artifact and only fails at run time, as an
+     * {@code UnsatisfiedLinkError} inside {@code <clinit>}.
+     */
+    private static void checkNoNativePlaceholders(Path jar) throws Exception {
+        String[] markers = { "@@RESOURCE@@", "@@CODELIB@@", "@@ANTIDUMP@@", "@@ANTIBACKFILL@@",
+                "@@AKEY@@", "@@FP0@@", "@@FP1@@", "@@FP2@@" };
+        JarInputStream in = new JarInputStream(Files.newInputStream(jar));
+        int hits = 0;
+        try {
+            JarEntry entry;
+            while ((entry = in.getNextJarEntry()) != null) {
+                if (!entry.getName().endsWith(".class")) {
+                    continue;
+                }
+                byte[] data = readAllBytes(in);
+                for (String marker : markers) {
+                    if (indexOf(data, marker.getBytes(StandardCharsets.ISO_8859_1)) >= 0) {
+                        hits++;
+                    }
+                }
+            }
+        } finally {
+            in.close();
+        }
+        check(hits == 0, "e2e: protected classes carry no unreplaced native placeholders"
+                + " (hits=" + hits + ")");
+    }
+
+    private static int indexOf(byte[] haystack, byte[] needle) {
+        outer:
+        for (int i = 0; i + needle.length <= haystack.length; i++) {
+            for (int j = 0; j < needle.length; j++) {
+                if (haystack[i + j] != needle[j]) {
+                    continue outer;
+                }
+            }
+            return i;
+        }
+        return -1;
+    }
+
     private static byte[] readNativeResource(Path jar) throws Exception {
         JarInputStream in = new JarInputStream(Files.newInputStream(jar));
         try {
@@ -1120,6 +1180,7 @@ public final class Vm3Test {
                                                                  byte[] dll, String oldSha)
             throws Exception {
         String newSha = sha256(dll);
+        int patchedClasses = 0;
         ZipInputStream in = new ZipInputStream(Files.newInputStream(jar));
         ZipOutputStream out = new ZipOutputStream(Files.newOutputStream(repacked));
         try {
@@ -1129,8 +1190,18 @@ public final class Vm3Test {
                 byte[] data = readAllBytes(in);
                 if (name.startsWith("umbra/native/") && name.endsWith(".dat")) {
                     data = dll;
-                } else if (name.startsWith(RuntimeNames.path("N")) && name.endsWith(".class")) {
-                    data = patchLoaderFingerprint(data, oldSha, newSha);
+                } else if (name.endsWith(".class")) {
+                    // Do not filter on RuntimeNames.path("N"): that name is a process
+                    // wide static re-derived by every engine run, so after the second
+                    // protect() call it points at the *other* build's runtime package
+                    // and the loader of the first artifact was never patched. Patching
+                    // cannot misfire either - only strings equal to the old digest
+                    // chunks are rewritten.
+                    byte[] candidate = patchLoaderFingerprint(data, oldSha, newSha);
+                    if (candidate != data) {
+                        patchedClasses++;
+                        data = candidate;
+                    }
                 }
                 out.putNextEntry(new ZipEntry(name));
                 out.write(data);
@@ -1140,6 +1211,7 @@ public final class Vm3Test {
             in.close();
             out.close();
         }
+        check(patchedClasses > 0, "e2e: the loader fingerprint constants were found and patched");
     }
 
     private static byte[] patchLoaderFingerprint(byte[] classBytes, String oldSha,

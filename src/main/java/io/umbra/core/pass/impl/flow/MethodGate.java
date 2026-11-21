@@ -85,11 +85,26 @@ public final class MethodGate {
         return copy;
     }
 
+    /**
+     * Commits a verified method into the class.
+     *
+     * <p>The committed body is a <em>fresh</em> copy of the verified work method,
+     * not the work method itself. {@link #verify} serialised the work method with a
+     * throw-away {@link ClassWriter}, and that writer binds every {@link LabelNode}
+     * to its own {@code Label} resolution state. Reusing those labels in the final
+     * serialisation makes ASM compute jump offsets against the old writer, which
+     * produces a class that writes out cleanly but jumps into the middle of an
+     * instruction (the verifier then reports {@code Undefined label used} or
+     * {@code Cannot pop operand off an empty stack}). Copying here gives the final
+     * writer unbound labels, so every pass that goes through this gate is safe
+     * without having to clone the body itself.</p>
+     */
     public static void commit(MethodNode target, MethodNode work) {
-        target.instructions = work.instructions;
-        target.tryCatchBlocks = work.tryCatchBlocks;
-        target.maxStack = work.maxStack;
-        target.maxLocals = work.maxLocals;
+        MethodNode fresh = copy(work);
+        target.instructions = fresh.instructions;
+        target.tryCatchBlocks = fresh.tryCatchBlocks;
+        target.maxStack = fresh.maxStack;
+        target.maxLocals = fresh.maxLocals;
         target.localVariables = null;
         target.visibleLocalVariableAnnotations = null;
         target.invisibleLocalVariableAnnotations = null;

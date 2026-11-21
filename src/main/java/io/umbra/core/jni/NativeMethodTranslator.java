@@ -1,5 +1,6 @@
 package io.umbra.core.jni;
 
+import io.umbra.core.jni.intrinsic.IntrinsicTable;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
@@ -84,10 +85,24 @@ public final class NativeMethodTranslator implements Opcodes {
     private int maxStackSlots;
     private int instructionCount;
 
+    private final boolean allowClassInitializer;
+
     public NativeMethodTranslator(String owner, MethodNode method, CGenerator generator) {
+        this(owner, method, generator, false);
+    }
+
+    /**
+     * @param allowClassInitializer when true, {@code <clinit>()V} is accepted and
+     *        translated like any other method. The caller is responsible for
+     *        renaming it and for synthesising a Java initializer that loads the
+     *        library and calls it.
+     */
+    public NativeMethodTranslator(String owner, MethodNode method, CGenerator generator,
+                                  boolean allowClassInitializer) {
         this.owner = owner;
         this.method = method;
         this.generator = generator;
+        this.allowClassInitializer = allowClassInitializer;
         this.staticMethod = (method.access & ACC_STATIC) != 0;
         this.argumentTypes = JniNames.argumentTypes(method.desc);
         this.returnDescriptor = JniNames.returnType(method.desc);
@@ -102,7 +117,11 @@ public final class NativeMethodTranslator implements Opcodes {
             throw new UnsupportedException("method is already native or abstract");
         }
         if (method.name.startsWith("<")) {
-            throw new UnsupportedException("constructors and class initializers are not translated");
+            boolean classInitializer = "<clinit>".equals(method.name) && "()V".equals(method.desc);
+            if (!(this.allowClassInitializer && classInitializer)) {
+                throw new UnsupportedException(
+                        "constructors and class initializers are not translated");
+            }
         }
         if (method.instructions == null || method.instructions.size() == 0) {
             throw new UnsupportedException("method has no code");
@@ -493,9 +512,12 @@ public final class NativeMethodTranslator implements Opcodes {
             case FDIV:
                 binFloat("/");
                 return;
-            case FREM:
-                binFloat("%");
+            case FREM: {
+                String fremB = popFloat();
+                String fremA = popFloat();
+                pushFloat("umbra_frem(" + fremA + ", " + fremB + ")");
                 return;
+            }
             case FNEG:
                 unaryFloat("-");
                 return;
@@ -511,9 +533,12 @@ public final class NativeMethodTranslator implements Opcodes {
             case DDIV:
                 binDouble("/");
                 return;
-            case DREM:
-                binDouble("%");
+            case DREM: {
+                String dremB = popDouble();
+                String dremA = popDouble();
+                pushDouble("umbra_drem(" + dremA + ", " + dremB + ")");
                 return;
+            }
             case DNEG:
                 unaryDouble("-");
                 return;
@@ -729,10 +754,6 @@ public final class NativeMethodTranslator implements Opcodes {
         line("jclass " + clazz + " = umbra_class(env, " + classIndex + ");");
         line("if (" + clazz + " == NULL) " + branch);
 
-        String init = "_i" + tempCounter++;
-        line("jmethodID " + init + " = (*env)->GetMethodID(env, " + clazz
-                + ", \"toString\", \"()Ljava/lang/String;\");");
-        line("if (" + init + " == NULL) " + branch);
         line("jobject " + object + " = (*env)->AllocObject(env, " + clazz + ");");
         line("if (" + object + " == NULL) " + branch);
         pushRef(object);
@@ -802,12 +823,19 @@ public final class NativeMethodTranslator implements Opcodes {
             return;
         }
         if (constant instanceof String) {
-            int stringIndex = generator.stringRef((String) constant);
+            String text = (String) constant;
+            int stringIndex = generator.stringRef(text);
             String branch = exceptionBranch(index);
             String string = "_s" + tempCounter++;
-            line("jstring " + string + " = (*env)->NewStringUTF(env, umbra_str_" + stringIndex + ");");
-            line("if (" + string + " == NULL) " + branch);
-            pushRef(string);
+            String buffer = "_u" + tempCounter++;
+            line("{");
+            line("    jchar " + buffer + "[" + Math.max(1, text.length()) + "];");
+            line("    umbra_str_recover(" + stringIndex + ", " + buffer + ");");
+            line("    jstring " + string + " = (*env)->NewString(env, " + buffer + ", "
+                    + text.length() + ");");
+            line("    if (" + string + " == NULL) " + branch);
+            line("    st[sp].l = (jobject)" + string + "; sp += 1;");
+            line("}");
             return;
         }
         if (constant instanceof Type) {
@@ -847,30 +875,31 @@ public final class NativeMethodTranslator implements Opcodes {
         boolean isStatic = insn.getOpcode() == GETSTATIC || insn.getOpcode() == PUTSTATIC;
         boolean isLoad = insn.getOpcode() == GETSTATIC || insn.getOpcode() == GETFIELD;
         int classIndex = generator.classRef(insn.owner);
-        int id = generator.newIdSite();
+        int id = generator.newIdSite(insn.owner, insn.name, insn.desc, isStatic);
         String branch = exceptionBranch(index);
         String kind = jniTypeName(insn.desc);
         String getPrefix = isStatic ? "GetStatic" : "Get";
         String setPrefix = isStatic ? "SetStatic" : "Set";
+        String idVar = "_id" + tempCounter++;
         if (isLoad) {
             if (!isStatic) {
                 String object = popRef();
                 line("{");
-                emitFieldResolution(id, classIndex, false, insn, branch);
+                emitFieldResolution(id, classIndex, false, insn, branch, idVar);
                 String value = "_f" + tempCounter++;
                 line("    " + cType(insn.desc) + " " + value + " = (*env)->" + getPrefix + kind
-                        + "Field(env, " + object + ", umbra_ids[" + id + "].fid);");
+                        + "Field(env, " + object + ", " + idVar + ");");
                 line("    if ((*env)->ExceptionCheck(env)) " + branch);
                 pushFromDescriptor(insn.desc, value);
                 line("}");
             } else {
                 line("{");
-                emitFieldResolution(id, classIndex, true, insn, branch);
+                emitFieldResolution(id, classIndex, true, insn, branch, idVar);
                 line("    jclass _c = umbra_class(env, " + classIndex + ");");
                 line("    if (_c == NULL) " + branch);
                 String value = "_f" + tempCounter++;
                 line("    " + cType(insn.desc) + " " + value + " = (*env)->" + getPrefix + kind
-                        + "Field(env, _c, umbra_ids[" + id + "].fid);");
+                        + "Field(env, _c, " + idVar + ");");
                 line("    if ((*env)->ExceptionCheck(env)) " + branch);
                 pushFromDescriptor(insn.desc, value);
                 line("}");
@@ -879,61 +908,87 @@ public final class NativeMethodTranslator implements Opcodes {
             String value = popByDescriptor(insn.desc);
             String object = isStatic ? null : popRef();
             line("{");
-            emitFieldResolution(id, classIndex, isStatic, insn, branch);
+            emitFieldResolution(id, classIndex, isStatic, insn, branch, idVar);
             if (isStatic) {
                 line("    jclass _c = umbra_class(env, " + classIndex + ");");
                 line("    if (_c == NULL) " + branch);
-                line("    (*env)->" + setPrefix + kind + "Field(env, _c, umbra_ids[" + id
-                        + "].fid, (" + cType(insn.desc) + ")" + value + ");");
+                line("    (*env)->" + setPrefix + kind + "Field(env, _c, " + idVar
+                        + ", (" + cType(insn.desc) + ")" + value + ");");
             } else {
-                line("    (*env)->" + setPrefix + kind + "Field(env, " + object + ", umbra_ids[" + id
-                        + "].fid, (" + cType(insn.desc) + ")" + value + ");");
+                line("    (*env)->" + setPrefix + kind + "Field(env, " + object + ", " + idVar
+                        + ", (" + cType(insn.desc) + ")" + value + ");");
             }
             line("    if ((*env)->ExceptionCheck(env)) " + branch);
             line("}");
         }
     }
 
+    /**
+     * Emits the lazily resolved jfieldID for one call site. The slot is shared by
+     * every reference to the same member (CGenerator.newIdSite dedupes on
+     * owner/name/descriptor/isStatic), so the Get*FieldID round trip happens once
+     * per member instead of once per call site.
+     */
     private void emitFieldResolution(int id, int classIndex, boolean isStatic,
-                                     FieldInsnNode insn, String branch) {
-        line("    if (!umbra_ids[" + id + "].ready) {");
+                                     FieldInsnNode insn, String branch, String idVar) {
+        line("    jfieldID " + idVar + ";");
+        line("    if (!UMBRA_ATOMIC_LOAD(&umbra_ids[" + id + "].ready)) {");
         line("        jclass _c = umbra_class(env, " + classIndex + ");");
         line("        char _n[UMBRA_LIT_MAX];");
         line("        char _d[UMBRA_LIT_MAX];");
+        line("        jfieldID _resolved;");
         line("        if (_c == NULL) " + branch);
         line("        umbra_lit_copy(" + generator.literalRef(insn.name) + ", _n);");
         line("        umbra_lit_copy(" + generator.literalRef(insn.desc) + ", _d);");
-        line("        umbra_ids[" + id + "].fid = (*env)->Get"
-                + (isStatic ? "Static" : "") + "FieldID(env, _c, _n, _d);");
-        line("        if (umbra_ids[" + id + "].fid == NULL) " + branch);
-        line("        umbra_ids[" + id + "].ready = 1;");
+        line("        _resolved = (*env)->Get" + (isStatic ? "Static" : "")
+                + "FieldID(env, _c, _n, _d);");
+        line("        if (_resolved == NULL) " + branch);
+        line("        UMBRA_ATOMIC_STORE(&umbra_ids[" + id + "].fid, _resolved);");
+        line("        { int _expect = 0; UMBRA_ATOMIC_CAS(&umbra_ids[" + id
+                + "].ready, &_expect, 1); }");
         line("    }");
+        line("    " + idVar + " = UMBRA_ATOMIC_LOAD(&umbra_ids[" + id + "].fid);");
     }
 
     private void emitMethodInsn(MethodInsnNode insn, int index) throws UnsupportedException {
         if (insn.getOpcode() == INVOKESPECIAL && insn.itf) {
             throw new UnsupportedException("invokespecial on an interface is not supported");
         }
+        if (this.generator.intrinsicsEnabled()) {
+            String intrinsic = IntrinsicTable.lookup(insn);
+            if (intrinsic != null && emitIntrinsic(intrinsic, index)) {
+                this.generator.noteIntrinsic();
+                return;
+            }
+        }
         int opcode = insn.getOpcode();
         boolean isStatic = opcode == INVOKESTATIC;
         int classIndex = generator.classRef(insn.owner);
-        int id = generator.newIdSite();
+        int id = generator.newIdSite(insn.owner, insn.name, insn.desc, isStatic);
         String branch = exceptionBranch(index);
         List<String> args = JniNames.argumentTypes(insn.desc);
         String returnType = JniNames.returnType(insn.desc);
         String suffix = jniTypeName(returnType);
-        line("    if (!umbra_ids[" + id + "].ready) {");
+        String idVar = "_mid" + tempCounter++;
+        // One shared slot per member: the resolve block runs at most once and
+        // publishes the id with a release store before the ready flag.
+        line("    jmethodID " + idVar + ";");
+        line("    if (!UMBRA_ATOMIC_LOAD(&umbra_ids[" + id + "].ready)) {");
         line("        jclass _c = umbra_class(env, " + classIndex + ");");
         line("        char _n[UMBRA_LIT_MAX];");
         line("        char _d[UMBRA_LIT_MAX];");
+        line("        jmethodID _resolved;");
         line("        if (_c == NULL) " + branch);
         line("        umbra_lit_copy(" + generator.literalRef(insn.name) + ", _n);");
         line("        umbra_lit_copy(" + generator.literalRef(insn.desc) + ", _d);");
-        line("        umbra_ids[" + id + "].mid = (*env)->Get"
-                + (isStatic ? "Static" : "") + "MethodID(env, _c, _n, _d);");
-        line("        if (umbra_ids[" + id + "].mid == NULL) " + branch);
-        line("        umbra_ids[" + id + "].ready = 1;");
+        line("        _resolved = (*env)->Get" + (isStatic ? "Static" : "")
+                + "MethodID(env, _c, _n, _d);");
+        line("        if (_resolved == NULL) " + branch);
+        line("        UMBRA_ATOMIC_STORE(&umbra_ids[" + id + "].mid, _resolved);");
+        line("        { int _expect = 0; UMBRA_ATOMIC_CAS(&umbra_ids[" + id
+                + "].ready, &_expect, 1); }");
         line("    }");
+        line("    " + idVar + " = UMBRA_ATOMIC_LOAD(&umbra_ids[" + id + "].mid);");
         line("{");
         if (!args.isEmpty()) {
             line("    jvalue _args[" + args.size() + "];");
@@ -951,14 +1006,14 @@ public final class NativeMethodTranslator implements Opcodes {
         String call;
         if (isStatic) {
             call = "(*env)->CallStatic" + suffix + "MethodA(env, umbra_class(env, " + classIndex
-                    + "), umbra_ids[" + id + "].mid, " + arguments + ")";
+                    + "), " + idVar + ", " + arguments + ")";
         } else if (opcode == INVOKESPECIAL) {
             call = "(*env)->CallNonvirtual" + suffix + "MethodA(env, " + receiver
-                    + ", umbra_class(env, " + classIndex + "), umbra_ids[" + id + "].mid, "
+                    + ", umbra_class(env, " + classIndex + "), " + idVar + ", "
                     + arguments + ")";
         } else {
-            call = "(*env)->Call" + suffix + "MethodA(env, " + receiver
-                    + ", umbra_ids[" + id + "].mid, " + arguments + ")";
+            call = "(*env)->Call" + suffix + "MethodA(env, " + receiver + ", " + idVar + ", "
+                    + arguments + ")";
         }
         if ("V".equals(returnType)) {
             line("    " + call + ";");
@@ -1122,117 +1177,322 @@ public final class NativeMethodTranslator implements Opcodes {
         line("}");
     }
 
-    private void emitArrayLoad(int opcode, int index) throws UnsupportedException {
-        String position = popInt();
-        String array = popRef();
-        String branch = exceptionBranch(index);
-        String value = "_e" + tempCounter++;
-        switch (opcode) {
-            case IALOAD:
-                line("jint " + value + " = 0;");
-                line("(*env)->GetIntArrayRegion(env, (jintArray)" + array + ", " + position
-                        + ", 1, &" + value + ");");
-                line("if ((*env)->ExceptionCheck(env)) " + branch);
-                pushInt(value);
-                return;
-            case LALOAD:
-                line("jlong " + value + " = 0;");
-                line("(*env)->GetLongArrayRegion(env, (jlongArray)" + array + ", " + position
-                        + ", 1, &" + value + ");");
-                line("if ((*env)->ExceptionCheck(env)) " + branch);
-                pushLong(value);
-                return;
-            case FALOAD:
-                line("jfloat " + value + " = 0;");
-                line("(*env)->GetFloatArrayRegion(env, (jfloatArray)" + array + ", " + position
-                        + ", 1, &" + value + ");");
-                line("if ((*env)->ExceptionCheck(env)) " + branch);
-                pushFloat(value);
-                return;
-            case DALOAD:
-                line("jdouble " + value + " = 0;");
-                line("(*env)->GetDoubleArrayRegion(env, (jdoubleArray)" + array + ", " + position
-                        + ", 1, &" + value + ");");
-                line("if ((*env)->ExceptionCheck(env)) " + branch);
-                pushDouble(value);
-                return;
-            case AALOAD:
-                line("jobject " + value + " = (*env)->GetObjectArrayElement(env, (jobjectArray)"
-                        + array + ", " + position + ");");
-                line("if ((*env)->ExceptionCheck(env)) " + branch);
-                pushRef(value);
-                return;
-            case BALOAD:
-                line("jbyte " + value + " = 0;");
-                line("(*env)->GetByteArrayRegion(env, (jbyteArray)" + array + ", " + position
-                        + ", 1, &" + value + ");");
-                line("if ((*env)->ExceptionCheck(env)) " + branch);
-                pushInt("(jint)" + value);
-                return;
-            case CALOAD:
-                line("jchar " + value + " = 0;");
-                line("(*env)->GetCharArrayRegion(env, (jcharArray)" + array + ", " + position
-                        + ", 1, &" + value + ");");
-                line("if ((*env)->ExceptionCheck(env)) " + branch);
-                pushInt("(jint)" + value);
-                return;
-            case SALOAD:
-                line("jshort " + value + " = 0;");
-                line("(*env)->GetShortArrayRegion(env, (jshortArray)" + array + ", " + position
-                        + ", 1, &" + value + ");");
-                line("if ((*env)->ExceptionCheck(env)) " + branch);
-                pushInt("(jint)" + value);
-                return;
-            default:
-                throw new UnsupportedException("unsupported array load " + opcode);
+    /**
+     * Emits the post-instruction pending-exception transfer.
+     *
+     * <p>Only instructions that may throw <em>and</em> can fall through to the next
+     * instruction need it: a {@code goto}/{@code return}/{@code athrow} already
+     * transfers control, so a check appended after one would be unreachable code.
+     * The two tables below are the JVM specification's lists, not a heuristic.</p>
+     */
+    private void emitPostCheck(int opcode, int index) {
+        if (mayThrow(opcode) && fallsThrough(opcode)) {
+            line("if ((*env)->ExceptionCheck(env)) " + exceptionBranch(index));
         }
     }
 
+    /** Opcodes that can raise a Java exception through a JNI call or a VM check. */
+    static boolean mayThrow(int opcode) {
+        switch (opcode) {
+            case GETSTATIC:
+            case PUTSTATIC:
+            case GETFIELD:
+            case PUTFIELD:
+            case INVOKEVIRTUAL:
+            case INVOKESPECIAL:
+            case INVOKESTATIC:
+            case INVOKEINTERFACE:
+            case NEW:
+            case NEWARRAY:
+            case ANEWARRAY:
+            case ARRAYLENGTH:
+            case IALOAD:
+            case LALOAD:
+            case FALOAD:
+            case DALOAD:
+            case AALOAD:
+            case BALOAD:
+            case CALOAD:
+            case SALOAD:
+            case IASTORE:
+            case LASTORE:
+            case FASTORE:
+            case DASTORE:
+            case AASTORE:
+            case BASTORE:
+            case CASTORE:
+            case SASTORE:
+            case MONITORENTER:
+            case MONITOREXIT:
+            case IDIV:
+            case LDIV:
+            case IREM:
+            case LREM:
+            case CHECKCAST:
+            case INSTANCEOF:
+            case ATHROW:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /** Opcodes after which the next instruction is not reachable by fall-through. */
+    static boolean fallsThrough(int opcode) {
+        switch (opcode) {
+            case GOTO:
+            case IRETURN:
+            case LRETURN:
+            case FRETURN:
+            case DRETURN:
+            case ARETURN:
+            case RETURN:
+            case ATHROW:
+            case TABLESWITCH:
+            case LOOKUPSWITCH:
+                return false;
+            default:
+                return true;
+        }
+    }
+
+    /**
+     * Emits one of the JDK calls from {@link IntrinsicTable} as direct JNI
+     * primitives.
+     *
+     * @return false when the call must fall back to the generic invoke path.
+     */
+    private boolean emitIntrinsic(String intrinsic, int index) {
+        String branch = exceptionBranch(index);
+        if (IntrinsicTable.STRING_LENGTH.equals(intrinsic)) {
+            String receiver = popRef();
+            String value = "_n" + tempCounter++;
+            line("{");
+            line("    jint " + value + " = 0;");
+            line("    if (" + receiver + " == NULL) {");
+            line("        (*env)->ThrowNew(env, umbra_class(env, UMBRA_C_NPE), \"null\");");
+            line("    } else {");
+            line("        " + value + " = (*env)->GetStringLength(env, (jstring)" + receiver + ");");
+            line("    }");
+            line("    if ((*env)->ExceptionCheck(env)) " + branch);
+            line("    st[sp].i = " + value + "; sp += 1;");
+            line("}");
+            return true;
+        }
+        if (IntrinsicTable.OBJECT_GET_CLASS.equals(intrinsic)) {
+            String receiver = popRef();
+            String value = "_g" + tempCounter++;
+            line("{");
+            line("    jclass " + value + " = NULL;");
+            line("    if (" + receiver + " == NULL) {");
+            line("        (*env)->ThrowNew(env, umbra_class(env, UMBRA_C_NPE), \"null\");");
+            line("    } else {");
+            line("        " + value + " = (*env)->GetObjectClass(env, " + receiver + ");");
+            line("    }");
+            line("    if ((*env)->ExceptionCheck(env)) " + branch);
+            line("    st[sp].l = (jobject)(" + value + "); sp += 1;");
+            line("}");
+            return true;
+        }
+        if (IntrinsicTable.STRING_EQUALS.equals(intrinsic)) {
+            String other = popRef();
+            String self = popRef();
+            String result = "_q" + tempCounter++;
+            String lengthA = "_l" + tempCounter++;
+            String lengthB = "_l" + tempCounter++;
+            String chunkA = "_a" + tempCounter++;
+            String chunkB = "_b" + tempCounter++;
+            line("{");
+            line("    jint " + result + " = 0;");
+            line("    if (" + self + " == NULL) {");
+            line("        (*env)->ThrowNew(env, umbra_class(env, UMBRA_C_NPE), \"null\");");
+            line("    } else if (" + other + " == NULL) {");
+            line("        " + result + " = 0;");
+            line("    } else if ((*env)->IsSameObject(env, " + self + ", " + other + ")) {");
+            line("        " + result + " = 1;");
+            line("    } else if ((*env)->IsInstanceOf(env, " + other
+                    + ", umbra_class(env, UMBRA_C_STRING))) {");
+            line("        jint " + lengthA + " = (*env)->GetStringLength(env, (jstring)"
+                    + self + ");");
+            line("        jint " + lengthB + " = (*env)->GetStringLength(env, (jstring)"
+                    + other + ");");
+            line("        if (" + lengthA + " == " + lengthB + ") {");
+            line("            jchar " + chunkA + "[64];");
+            line("            jchar " + chunkB + "[64];");
+            line("            jint _i = 0;");
+            line("            " + result + " = 1;");
+            line("            while (_i < " + lengthA + ") {");
+            line("                jint _k = " + lengthA + " - _i;");
+            line("                if (_k > 64) { _k = 64; }");
+            line("                (*env)->GetStringRegion(env, (jstring)" + self
+                    + ", _i, _k, " + chunkA + ");");
+            line("                (*env)->GetStringRegion(env, (jstring)" + other
+                    + ", _i, _k, " + chunkB + ");");
+            line("                if ((*env)->ExceptionCheck(env)) { " + result + " = 0; break; }");
+            line("                if (memcmp(" + chunkA + ", " + chunkB
+                    + ", (size_t)_k * sizeof(jchar)) != 0) {");
+            line("                    " + result + " = 0;");
+            line("                    break;");
+            line("                }");
+            line("                _i += _k;");
+            line("            }");
+            line("        }");
+            line("    }");
+            line("    if ((*env)->ExceptionCheck(env)) " + branch);
+            line("    st[sp].i = " + result + "; sp += 1;");
+            line("}");
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Array element read.
+     *
+     * <p>A {@code null} array reference must raise {@code NullPointerException}
+     * before JNI is called; handing NULL to {@code Get*ArrayRegion} is undefined in
+     * the JNI specification and crashed the VM instead of throwing. The {@code if}
+     * guard also keeps the region call off the NULL path, which is why the check
+     * cannot be a plain trailing {@code ExceptionCheck}.</p>
+     */
+    private void emitArrayLoad(int opcode, int index) throws UnsupportedException {
+        String position = popInt();
+        String array = popRef();
+        String value = "_e" + tempCounter++;
+        String ctype;
+        String suffix;
+        char member;
+        boolean reference = false;
+        switch (opcode) {
+            case IALOAD:
+                ctype = "jint";
+                suffix = "Int";
+                member = 'i';
+                break;
+            case LALOAD:
+                ctype = "jlong";
+                suffix = "Long";
+                member = 'j';
+                break;
+            case FALOAD:
+                ctype = "jfloat";
+                suffix = "Float";
+                member = 'f';
+                break;
+            case DALOAD:
+                ctype = "jdouble";
+                suffix = "Double";
+                member = 'd';
+                break;
+            case AALOAD:
+                ctype = "jobject";
+                suffix = "Object";
+                member = 'l';
+                reference = true;
+                break;
+            case BALOAD:
+                ctype = "jbyte";
+                suffix = "Byte";
+                member = 'i';
+                break;
+            case CALOAD:
+                ctype = "jchar";
+                suffix = "Char";
+                member = 'i';
+                break;
+            case SALOAD:
+                ctype = "jshort";
+                suffix = "Short";
+                member = 'i';
+                break;
+            default:
+                throw new UnsupportedException("unsupported array load " + opcode);
+        }
+        line("{");
+        line("    " + ctype + " " + value + " = " + (reference ? "NULL" : "0") + ";");
+        line("    if (" + array + " == NULL) {");
+        line("        (*env)->ThrowNew(env, umbra_class(env, UMBRA_C_NPE), \"null\");");
+        line("    } else {");
+        if (reference) {
+            line("        " + value + " = (*env)->GetObjectArrayElement(env, (jobjectArray)"
+                    + array + ", " + position + ");");
+        } else {
+            line("        (*env)->Get" + suffix + "ArrayRegion(env, (" + ctype + "Array)" + array
+                    + ", " + position + ", 1, &" + value + ");");
+        }
+        line("    }");
+        emitPostCheck(opcode, index);
+        if (reference) {
+            line("    st[sp].l = (jobject)(" + value + "); sp += 1;");
+        } else {
+            // long/double occupy two JVM stack slots, exactly like pushLong/pushDouble.
+            line("    st[sp]." + member + " = (" + ctype + ")(" + value + "); sp += "
+                    + ((member == 'j' || member == 'd') ? 2 : 1) + ";");
+        }
+        line("}");
+    }
+
+    /** Array element write with the same NULL guard as {@link #emitArrayLoad}. */
     private void emitArrayStore(int opcode, int index) throws UnsupportedException {
         String value = popStackValue(opcode);
         String position = popInt();
         String array = popRef();
-        String branch = exceptionBranch(index);
+        String ctype;
+        String suffix;
+        boolean reference = false;
         switch (opcode) {
             case IASTORE:
-                line("(*env)->SetIntArrayRegion(env, (jintArray)" + array + ", " + position
-                        + ", 1, &" + value + ");");
+                ctype = "jint";
+                suffix = "Int";
                 break;
             case LASTORE:
-                line("(*env)->SetLongArrayRegion(env, (jlongArray)" + array + ", " + position
-                        + ", 1, &" + value + ");");
+                ctype = "jlong";
+                suffix = "Long";
                 break;
             case FASTORE:
-                line("(*env)->SetFloatArrayRegion(env, (jfloatArray)" + array + ", " + position
-                        + ", 1, &" + value + ");");
+                ctype = "jfloat";
+                suffix = "Float";
                 break;
             case DASTORE:
-                line("(*env)->SetDoubleArrayRegion(env, (jdoubleArray)" + array + ", " + position
-                        + ", 1, &" + value + ");");
+                ctype = "jdouble";
+                suffix = "Double";
                 break;
             case AASTORE:
-                line("(*env)->SetObjectArrayElement(env, (jobjectArray)" + array + ", "
-                        + position + ", " + value + ");");
+                ctype = "jobject";
+                suffix = "Object";
+                reference = true;
                 break;
             case BASTORE:
-                line("jbyte _b = (jbyte)" + value + ";");
-                line("(*env)->SetByteArrayRegion(env, (jbyteArray)" + array + ", " + position
-                        + ", 1, &_b);");
+                ctype = "jbyte";
+                suffix = "Byte";
                 break;
             case CASTORE:
-                line("jchar _c2 = (jchar)" + value + ";");
-                line("(*env)->SetCharArrayRegion(env, (jcharArray)" + array + ", " + position
-                        + ", 1, &_c2);");
+                ctype = "jchar";
+                suffix = "Char";
                 break;
             case SASTORE:
-                line("jshort _s = (jshort)" + value + ";");
-                line("(*env)->SetShortArrayRegion(env, (jshortArray)" + array + ", " + position
-                        + ", 1, &_s);");
+                ctype = "jshort";
+                suffix = "Short";
                 break;
             default:
                 throw new UnsupportedException("unsupported array store " + opcode);
         }
-        line("if ((*env)->ExceptionCheck(env)) " + branch);
+        String element = "_w" + tempCounter++;
+        line("{");
+        line("    " + ctype + " " + element + " = (" + ctype + ")(" + value + ");");
+        line("    if (" + array + " == NULL) {");
+        line("        (*env)->ThrowNew(env, umbra_class(env, UMBRA_C_NPE), \"null\");");
+        line("    } else {");
+        if (reference) {
+            line("        (*env)->SetObjectArrayElement(env, (jobjectArray)" + array + ", "
+                    + position + ", " + element + ");");
+        } else {
+            line("        (*env)->Set" + suffix + "ArrayRegion(env, (" + ctype + "Array)" + array
+                    + ", " + position + ", 1, &" + element + ");");
+        }
+        line("    }");
+        emitPostCheck(opcode, index);
+        line("}");
     }
 
     private String popStackValue(int opcode) throws UnsupportedException {
@@ -1257,9 +1517,16 @@ public final class NativeMethodTranslator implements Opcodes {
 
     private void emitArrayLength(int index) {
         String array = popRef();
-        line("jint _len = (*env)->GetArrayLength(env, (jarray)" + array + ");");
-        line("if ((*env)->ExceptionCheck(env)) " + exceptionBranch(index));
-        pushInt("_len");
+        line("{");
+        line("    jint _len = 0;");
+        line("    if (" + array + " == NULL) {");
+        line("        (*env)->ThrowNew(env, umbra_class(env, UMBRA_C_NPE), \"null\");");
+        line("    } else {");
+        line("        _len = (*env)->GetArrayLength(env, (jarray)" + array + ");");
+        line("    }");
+        emitPostCheck(ARRAYLENGTH, index);
+        line("    st[sp].i = _len; sp += 1;");
+        line("}");
     }
 
     private void emitMonitor(int index, boolean enter) {

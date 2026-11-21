@@ -110,8 +110,6 @@ public final class StringEncryptionPass implements Pass {
 
     private static final String FLAGS_SPEC = "@@FLAGS@@";
 
-    private static final String SALT_SPEC = "@@SALT@@";
-
     static final int PAYLOAD_VERSION = 4;
 
     public static final String DUAL_PER_SITE_DESC = "([Ljava/lang/String;JIIII)Ljava/lang/String;";
@@ -627,16 +625,14 @@ public final class StringEncryptionPass implements Pass {
             if (engine == UmbraStringCipher.XOR) {
                 ciphertext = UmbraStringCipher.transform(engine, plain, null, null, streamSeed);
             } else if (usePerClass) {
-                byte[] nonce = UmbraStringCipher.classNonceV4(root, run.artifactSalt, classKey,
-                        siteId, payloadSalt);
+                byte[] nonce = UmbraStringCipher.classNonceV4(root, classKey, siteId,
+                        payloadSalt);
                 ciphertext = UmbraStringCipher.transform(engine, plain, classKey, nonce, streamSeed);
                 Cipher.wipe(nonce);
             } else {
-                key = UmbraStringCipher.siteKeyV4(root, run.artifactSalt, siteSeed, siteId,
-                        payloadSalt);
+                key = UmbraStringCipher.siteKeyV4(root, siteSeed, siteId, payloadSalt);
                 temporaryKey = true;
-                byte[] nonce = UmbraStringCipher.siteNonceV4(root, run.artifactSalt, siteSeed,
-                        siteId, payloadSalt);
+                byte[] nonce = UmbraStringCipher.siteNonceV4(root, siteSeed, siteId, payloadSalt);
                 ciphertext = UmbraStringCipher.transform(engine, plain, key, nonce, streamSeed);
                 Cipher.wipe(nonce);
             }
@@ -700,16 +696,13 @@ public final class StringEncryptionPass implements Pass {
         byte[] root = run.keyRoot();
         byte[] out;
         if (usePerClass) {
-            byte[] nonce = UmbraStringCipher.classNonceV4(root, run.artifactSalt, classKey, siteId,
-                    payloadSalt);
+            byte[] nonce = UmbraStringCipher.classNonceV4(root, classKey, siteId, payloadSalt);
             out = UmbraStringCipher.transform(engine, plain, classKey, nonce, streamSeed);
             Cipher.wipe(nonce);
             return prepend(payloadSalt, out);
         }
-        byte[] key = UmbraStringCipher.siteKeyV4(root, run.artifactSalt, siteSeed, siteId,
-                payloadSalt);
-        byte[] nonce = UmbraStringCipher.siteNonceV4(root, run.artifactSalt, siteSeed, siteId,
-                payloadSalt);
+        byte[] key = UmbraStringCipher.siteKeyV4(root, siteSeed, siteId, payloadSalt);
+        byte[] nonce = UmbraStringCipher.siteNonceV4(root, siteSeed, siteId, payloadSalt);
         out = UmbraStringCipher.transform(engine, plain, key, nonce, streamSeed);
         Cipher.wipe(nonce);
         Cipher.wipe(key);
@@ -782,10 +775,24 @@ public final class StringEncryptionPass implements Pass {
     }
 
     private static void addClassKeyField(ClassNode node, String name, byte[] classKey) {
+        // No ConstantValue attribute: the key must not be readable as a single
+        // constant-pool string next to the field. It is assembled in <clinit>
+        // from two fragments, so a naive "dump the constant pool" attack only
+        // sees halves that still have to be concatenated at runtime.
         FieldNode field = new FieldNode(
                 Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL | Opcodes.ACC_SYNTHETIC,
-                name, CLASS_KEY_FIELD_DESC, null, Cipher.base64(classKey));
+                name, CLASS_KEY_FIELD_DESC, null, null);
         node.fields.add(0, field);
+        String encoded = Cipher.base64(classKey);
+        int half = encoded.length() / 2;
+        MethodNode clinit = ensureClinit(node);
+        InsnList code = new InsnList();
+        code.add(new LdcInsnNode(encoded.substring(0, half)));
+        code.add(new LdcInsnNode(encoded.substring(half)));
+        code.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/String", "concat",
+                "(Ljava/lang/String;)Ljava/lang/String;", false));
+        code.add(new FieldInsnNode(Opcodes.PUTSTATIC, node.name, name, CLASS_KEY_FIELD_DESC));
+        clinit.instructions.insert(code);
     }
 
     static final class Options {
@@ -1573,7 +1580,6 @@ public final class StringEncryptionPass implements Pass {
                         | (options.cache ? 4 : 0);
                 Map<String, String> replacements = new LinkedHashMap<String, String>();
                 replacements.put(FLAGS_SPEC, String.valueOf(flags));
-                replacements.put(SALT_SPEC, Long.toString(artifactSalt));
                 CryptoSupport.injectWithCrypto(context.classes(), UmbraStringCipher.class, decryptor,
                         crypto, replacements);
                 if (explicitKey) {

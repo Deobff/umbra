@@ -48,7 +48,9 @@ import java.util.jar.JarFile;
 public final class UmbraClassLoader extends ClassLoader {
 
     private static final String INDEX_ENTRY = "@@INDEX@@";
-    private static final String SITE_SEED = "@@SEED@@";
+    private static final String SITE_SEED_0 = "@@SEED0@@";
+    private static final String SITE_SEED_1 = "@@SEED1@@";
+    private static final String SITE_SEED_2 = "@@SEED2@@";
 
     private static final String CODELIB = "@@CODELIB@@";
 
@@ -1571,8 +1573,11 @@ public final class UmbraClassLoader extends ClassLoader {
     }
 
     private static byte[] siteSeedConstant() {
-        String value = SITE_SEED == null ? "" : SITE_SEED.trim();
-        if (value.isEmpty() || value.charAt(0) == '@') {
+        // Assembled at runtime so the compiler cannot fold it into one literal.
+        StringBuilder seedText = new StringBuilder();
+        seedText.append(SITE_SEED_0).append(SITE_SEED_1).append(SITE_SEED_2);
+        String value = seedText.toString().trim();
+        if (value.isEmpty() || value.indexOf('@') >= 0) {
             return null;
         }
         try {

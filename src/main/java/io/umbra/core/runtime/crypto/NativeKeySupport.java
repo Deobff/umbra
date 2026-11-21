@@ -97,22 +97,14 @@ public final class NativeKeySupport {
         if (existing != null && existing.length == ROOT_BYTES) {
             return existing;
         }
-        try {
-            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
-            byte[] label = DETERMINISTIC_ROOT_LABEL.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-            byte[] material = new byte[label.length + 8];
-            System.arraycopy(label, 0, material, 0, label.length);
-            long seed = context.config().seed();
-            for (int i = 0; i < 8; i++) {
-                material[label.length + i] = (byte) (seed >>> (i * 8));
-            }
-            digest.update(material);
-            byte[] root = digest.digest();
-            context.putSecret(PassContext.NATIVE_KEY_ROOT, root);
-            return root;
-        } catch (java.security.NoSuchAlgorithmException missing) {
-            throw new IllegalStateException("SHA-256 unavailable", missing);
-        }
+        // One implementation only: BuildRoot.derive is the same
+        // SHA-256(label || LE64(seed)) with the same label, and the pass side
+        // (PassContext.keyRoot) already derives from it. Keeping a second copy
+        // here is exactly the split that DeterminismTest pins together.
+        byte[] root = io.umbra.core.util.BuildRoot.derive(context.config().seed(),
+                DETERMINISTIC_ROOT_LABEL);
+        context.putSecret(PassContext.NATIVE_KEY_ROOT, root);
+        return root;
     }
 
     public static byte[] keyRoot(PassContext context) {

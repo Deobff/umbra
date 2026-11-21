@@ -220,21 +220,53 @@ public final class UmbraCrypto {
         return out;
     }
 
-    private static final String LIT_AES_IV = "io.umbra.aes.iv.v1";
+    /**
+     * Key-derivation domain words.
+     *
+     * <p>Every KDF prefixes its hash input with a domain separator so that one
+     * build root cannot be replayed across derivations. Those separators used to
+     * be self-describing ASCII labels ({@code "io.umbra.string.site.key.v1"} and
+     * friends) that were rewritten per build into random hex, and either way they
+     * ended up as readable {@code Utf8} constants in the injected helpers - the
+     * label handed the analyst the whole key schedule, and the rewritten hex was
+     * still a plain constant pool string that a {@code grep} could collect.</p>
+     *
+     * <p>The separator is now a 4-byte little-endian domain number: it lands in the
+     * method body as an {@code ICONST}/{@code BIPUSH} operand, never in the
+     * constant pool, and it reveals nothing about what the domain is for. The
+     * numbers are {@code 1..17} in the same order as
+     * {@code io.umbra.core.util.DomainTags} used to list its labels, so the mapping
+     * stays auditable. {@link UmbraStringDecryptor} and
+     * {@code UmbraIndyBootstrap} are self-contained templates (they must not
+     * reference this class), so they repeat the two/six numbers they need -
+     * {@code CryptoTest} round-trips both pairs through {@code Cipher} so the
+     * copies cannot drift.</p>
+     */
+    public static final int K1 = 1;
+    public static final int K2 = 2;
+    public static final int K3 = 3;
+    public static final int K4 = 4;
+    public static final int K5 = 5;
+    public static final int K6 = 6;
+    public static final int K7 = 7;
+    public static final int K8 = 8;
+    public static final int K9 = 9;
+    public static final int K10 = 10;
+    public static final int K11 = 11;
+    public static final int K12 = 12;
+    public static final int K13 = 13;
+    public static final int K14 = 14;
+    public static final int K15 = 15;
+    public static final int K16 = 16;
+    public static final int K17 = 17;
 
-    private static String TAG_AES_IV = LIT_AES_IV;
-
-    public static void applyDomainTags(java.util.Map<String, String> tags) {
-        TAG_AES_IV = pick(tags, LIT_AES_IV);
-    }
-
-    private static String pick(java.util.Map<String, String> tags, String literal) {
-        String value = tags.get(literal);
-        return value == null ? literal : value;
+    /** The 4-byte domain word a KDF prefixes its input with. */
+    public static byte[] domain(int id) {
+        return le32(id);
     }
 
     public static byte[] aesIv(byte[] key, byte[] nonce) {
-        return first(sha256(concat(utf8(TAG_AES_IV), key, nonce)), AES_IV_BYTES);
+        return first(sha256(concat(domain(K8), key, nonce)), AES_IV_BYTES);
     }
 
     public static final int ROOT_BYTES = 32;

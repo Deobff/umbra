@@ -609,7 +609,10 @@ public final class ControlFlowFlatteningPass implements Pass {
                     leaderSet.add(insn.getNext());
                 }
             } else if (isReturnOrThrow(opcode) && insn.getNext() != null) {
-                leaderSet.add(insn.getNext());
+                AbstractInsnNode next = firstRealInstruction(insn.getNext());
+                if (next != null) {
+                    leaderSet.add(next);
+                }
             }
         }
         List<AbstractInsnNode> leaders = new ArrayList<AbstractInsnNode>();
@@ -915,6 +918,24 @@ public final class ControlFlowFlatteningPass implements Pass {
             inverse *= 2L - value * inverse;
         }
         return inverse;
+    }
+
+    /**
+     * Follows the instruction list past pseudo nodes (labels, line numbers,
+     * stack map frames) that other passes append after a terminal instruction.
+     * Such a pseudo node has no analyzer frame, so using it as a block leader
+     * used to reject the whole method as unreachable.
+     */
+    private static AbstractInsnNode firstRealInstruction(AbstractInsnNode node) {
+        AbstractInsnNode cursor = node;
+        while (cursor != null) {
+            if (!(cursor instanceof LabelNode) && !(cursor instanceof LineNumberNode)
+                    && !(cursor instanceof FrameNode)) {
+                return cursor;
+            }
+            cursor = cursor.getNext();
+        }
+        return null;
     }
 
     private static boolean isReturnOrThrow(int opcode) {

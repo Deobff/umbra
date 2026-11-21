@@ -29,7 +29,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -109,6 +108,21 @@ public final class ClassEncryptionPass implements Pass {
     private static final int BINDING_HOST = 3;
 
     private static final int MAX_ENTRIES = 1_000_000;
+
+    /**
+     * What the seed tier actually buys, spelled out wherever the master key ends
+     * up derived from data the archive itself carries. The old warning only said
+     * "native binding is OFF", which let a delivery read as "protected" when the
+     * master key was recoverable from the archive alone.
+     */
+    private static final String SEED_TIER_CONSEQUENCE =
+            "The master key is derived from the 32-byte class seed that this loader embeds "
+            + "(SITE_SEED_*) together with the ZIP comment and the entry count, so anyone "
+            + "holding the archive can rebuild the master key, open the sealed index and "
+            + "decrypt every class offline without running it. This tier hides the code from a "
+            + "reader and makes renaming/tamper checks work; it does not stop a static "
+            + "recovery. For archive-level static protection bind a native key root "
+            + "(classEncryption.nativeKey=true plus a built native bridge).";
 
     @Override
     public String name() {
@@ -195,7 +209,10 @@ public final class ClassEncryptionPass implements Pass {
             } else if (nativeLoaderName == null) {
                 nativeUnavailable = "the build has no native library (native pass disabled)";
             } else if (nativeLibrary == null) {
-                nativeUnavailable = "the native library entry is missing from the archive";
+                String bridgeStatus = context.stats().text("native.keyBridge.status");
+                nativeUnavailable = "the native library entry is missing from the archive"
+                        + (bridgeStatus == null ? " (the native pass is disabled)"
+                                : " (key bridge " + bridgeStatus + ")");
             } else if (!NativeKeySupport.declaresKeyRoot2(pool.getClass(nativeLoaderName))) {
 
                 throw new IllegalStateException("class-encryption: the injected native bridge "
@@ -274,18 +291,19 @@ public final class ClassEncryptionPass implements Pass {
             }
             if (!fallbackAllowed) {
 
-                context.log().warn("class-encryption: native key binding is OFF (%s); the archive "
-                        + "uses the embedded seed key and the native gate stays disabled. "
-                        + "Set classEncryption.nativeKey=false to silence this, or "
-                        + "classEncryption.nativeKey.fallback=true to accept the fallback.",
-                        nativeUnavailable);
+                context.log().warn("class-encryption: native key binding is OFF (%s) and "
+                        + "classEncryption.nativeKey kept its default, so the build continues in "
+                        + "the seed tier. " + SEED_TIER_CONSEQUENCE
+                        + " Set classEncryption.nativeKey=false to state that explicitly, or "
+                        + "classEncryption.nativeKey.fallback=true to accept the fallback "
+                        + "intentionally.", nativeUnavailable);
                 context.stats().text("classEncryption.nativeKey", "fallback");
                 context.stats().add("classEncryption.nativeKeyFallback", 1);
             } else {
                 context.log().warn("class-encryption: native key binding is OFF (%s); "
                         + "classEncryption.nativeKey.fallback=true was set explicitly, so the "
-                        + "seed-bound master key and the single-key path are used (native gate OFF)",
-                        nativeUnavailable);
+                        + "seed-bound master key and the single-key path are used (native gate "
+                        + "OFF). " + SEED_TIER_CONSEQUENCE, nativeUnavailable);
                 context.stats().text("classEncryption.nativeKey", "fallback");
                 context.stats().add("classEncryption.nativeKeyFallback", 1);
             }
@@ -296,19 +314,35 @@ public final class ClassEncryptionPass implements Pass {
         }
         int binding = hostKeyed ? BINDING_HOST
                 : (nativeBound ? BINDING_NATIVE : requestedBinding);
+        if (hostKeyed) {
+            context.stats().text("classEncryption.masterTier", "host");
+        } else if (nativeBound) {
+            context.stats().text("classEncryption.masterTier", "native");
+        } else {
+            context.stats().text("classEncryption.masterTier", "seed");
+            context.stats().add("classEncryption.seedFallback", 1);
+            if (!nativeKey) {
+                context.log().info("class-encryption: classEncryption.nativeKey=false is explicit, "
+                        + "so this build uses the seed tier. " + SEED_TIER_CONSEQUENCE);
+            }
+        }
 
+        // Every value below must be reproducible for a given seed (ARCHITECTURE.md):
+        // the layer used to draw the class seed, the ZIP comment and the log token
+        // from an unseeded SecureRandom, so two runs with the same seed produced
+        // different archives and a pin no longer meant anything. The lengths are
+        // part of the format and must not change: 32-byte class seed, 16-byte ZIP
+        // comment, 8-character log token.
         Random random = new Random(config.seed() ^ 0x434C415353454E43L);
-
-        SecureRandom secure = new SecureRandom();
         byte[] siteSeed = new byte[32];
-        secure.nextBytes(siteSeed);
+        random.nextBytes(siteSeed);
         byte[] commentBytes = null;
         if (binding == BINDING_SAMPLE || binding == BINDING_NATIVE || binding == BINDING_HOST) {
 
             commentBytes = new byte[16];
-            secure.nextBytes(commentBytes);
+            random.nextBytes(commentBytes);
         }
-        String logToken = randomToken(secure, 8);
+        String logToken = randomToken(random, 8);
 
         String configuredLoader = config.option("classEncryption.loaderClass", "").trim().replace('.', '/');
         String loaderName;
@@ -432,7 +466,19 @@ public final class ClassEncryptionPass implements Pass {
         Map<String, String> replacements = new LinkedHashMap<String, String>();
         replacements.put("@@INDEX@@", indexEntry);
 
-        replacements.put("@@SEED@@", (nativeBound || hostKeyed) ? "" : Cipher.base64(siteSeed));
+        // Three fragments instead of one constant: the loader assembles the
+        // seed at runtime, so a constant-pool dump only yields thirds.
+        String encodedSeed = (nativeBound || hostKeyed) ? "" : Cipher.base64(siteSeed);
+        if (encodedSeed.isEmpty()) {
+            replacements.put("@@SEED0@@", "");
+            replacements.put("@@SEED1@@", "");
+            replacements.put("@@SEED2@@", "");
+        } else {
+            int third = Math.max(1, encodedSeed.length() / 3);
+            replacements.put("@@SEED0@@", encodedSeed.substring(0, third));
+            replacements.put("@@SEED1@@", encodedSeed.substring(third, Math.min(encodedSeed.length(), third * 2)));
+            replacements.put("@@SEED2@@", encodedSeed.substring(Math.min(encodedSeed.length(), third * 2)));
+        }
         replacements.put("@@NATIVE@@", nativeBound ? nativeLoaderName.replace('/', '.') : "");
         replacements.put("@@ACTION@@", action);
         replacements.put("@@GUARDLOG@@",
@@ -475,9 +521,10 @@ public final class ClassEncryptionPass implements Pass {
                 handlerName, indexEntry, siteSeed, commentBytes, binding, algorithm, integrity, level,
                 antiDump, encryptResources, resourceIntegrity, manifestMinimal, minResourceSize,
                 entryClass, entryMethod, watchdogMs, new Random(config.seed() ^ 0x5EA1ED1L),
-                nativeRoot, nativeLoaderName, nativeLibrary, secure.nextInt(),
+                nativeRoot, nativeLoaderName, nativeLibrary,
+                new Random(config.seed() ^ 0x53455249414CL).nextInt(),
                 gateBound, payloadRoot, guardClassName, nativeGuardName, tickBound,
-                libraryBootstrapName);
+                libraryBootstrapName, config.seed());
         context.postProcessors().add(processor);
         context.stats().add("classEncryption.algorithmCode", algorithm == Cipher.Algorithm.AES_CTR ? 2 : 1);
         context.stats().add("classEncryption.indexVersion", INDEX_VERSION);
@@ -640,11 +687,11 @@ public final class ClassEncryptionPass implements Pass {
         }
     }
 
-    private static String randomToken(SecureRandom secure, int length) {
+    private static String randomToken(Random random, int length) {
         String alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
         StringBuilder builder = new StringBuilder(length);
         for (int i = 0; i < length; i++) {
-            builder.append(alphabet.charAt(secure.nextInt(alphabet.length())));
+            builder.append(alphabet.charAt(random.nextInt(alphabet.length())));
         }
         return builder.toString();
     }
@@ -798,6 +845,9 @@ public final class ClassEncryptionPass implements Pass {
 
         private final String libraryBootstrap;
 
+        /** Build seed; nonces are derived from it instead of drawn from {@link #random}. */
+        private final long seed;
+
         private String codeLibraryName = "";
 
         ArchivePostProcessor(String loaderName, String cryptoName, String connectionName, String handlerName,
@@ -808,7 +858,7 @@ public final class ClassEncryptionPass implements Pass {
                              Random random, byte[] nativeRoot, String nativeLoaderName, String nativeLibrary,
                              int buildSerial, boolean gateBound, byte[] payloadRoot,
                              String guardClassName, String nativeGuardName, boolean tickBound,
-                             String libraryBootstrap) {
+                             String libraryBootstrap, long seed) {
             this.loaderName = loaderName;
             this.cryptoName = cryptoName;
             this.connectionName = connectionName;
@@ -839,6 +889,33 @@ public final class ClassEncryptionPass implements Pass {
             this.nativeGuardName = nativeGuardName;
             this.tickBound = tickBound;
             this.libraryBootstrap = libraryBootstrap == null ? "" : libraryBootstrap;
+            this.seed = seed;
+        }
+
+        /**
+         * A nonce for one archive entry, derived from the build seed and a
+         * per-entry label.
+         *
+         * <p>Both nonces used to come from the shared {@code random} instance. That
+         * instance is a seeded {@code java.util.Random}, so this only broke when the
+         * number of draws before the seal changed - and then the same seed produced
+         * an archive with a different sealed index (SecurityHardeningTest pinned it:
+         * identical entries, identical payloads, different index bytes). Deriving
+         * the nonce from a domain label makes each entry independent of the draw
+         * order, and because the label contains the entry's logical name every entry
+         * still gets its own nonce (nonce reuse under one master key is fatal).</p>
+         */
+        private byte[] entryNonce(String label) {
+            byte[] material = io.umbra.core.util.BuildRoot.derive(seed, label);
+            byte[] nonce = new byte[Cipher.NONCE_BYTES];
+            System.arraycopy(material, 0, nonce, 0, nonce.length);
+            Cipher.wipe(material);
+            return nonce;
+        }
+
+        private byte[] payloadNonce(PayloadPlan plan) {
+            return entryNonce("umbra.classenc.payload."
+                    + (plan.kind == PayloadPlan.CLASS ? "c:" : "r:") + plan.logical);
         }
 
         @Override
@@ -910,6 +987,12 @@ public final class ClassEncryptionPass implements Pass {
             for (Map.Entry<String, byte[]> entry : entries.entrySet()) {
                 String name = entry.getKey();
                 byte[] bytes = entry.getValue();
+                if (context.classes().isOpaque(name)) {
+                    // Payload data that merely looks like a class: encrypting it would also
+                    // rename it, and the tool that reads it looks the original path up.
+                    plans.add(PayloadPlan.plaintext(name, bytes));
+                    continue;
+                }
                 if (name.equals("META-INF/MANIFEST.MF") || name.equals("META-INF/INDEX.LIST")) {
                     continue;
                 }
@@ -1040,7 +1123,7 @@ public final class ClassEncryptionPass implements Pass {
                     }
                     continue;
                 }
-                byte[] nonce = Cipher.randomBytes(random, Cipher.NONCE_BYTES);
+                byte[] nonce = payloadNonce(plan);
                 String label = (plan.kind == PayloadPlan.CLASS ? "c:" : "r:") + plan.logical;
 
                 boolean generatedHelper = context.classes().isGenerated(
@@ -1157,7 +1240,7 @@ public final class ClassEncryptionPass implements Pass {
             if (digestKey != master) {
                 Cipher.wipe(digestKey);
             }
-            byte[] nonce = Cipher.randomBytes(random, Cipher.NONCE_BYTES);
+            byte[] nonce = entryNonce("umbra.classenc.index");
             byte[] sealedIndex = Cipher.seal(index.toByteArray(), master, nonce, Cipher.Algorithm.CHACHA20);
             rewritten.put(indexEntry, sealedIndex);
 
@@ -1168,8 +1251,14 @@ public final class ClassEncryptionPass implements Pass {
             Cipher.wipe(master);
 
             try {
+                Set<String> opaqueEntries = new LinkedHashSet<String>();
+                for (String entry : rewritten.keySet()) {
+                    if (context.classes().isOpaque(entry)) {
+                        opaqueEntries.add(entry);
+                    }
+                }
                 assertRewritten(output, rewritten, comment, entryCount, infrastructureEntries,
-                        classPayloads, resourcePayloads, moduleInfoPresent);
+                        classPayloads, resourcePayloads, moduleInfoPresent, opaqueEntries);
             } catch (IOException invalid) {
                 throw invalid;
             }
@@ -1279,7 +1368,8 @@ public final class ClassEncryptionPass implements Pass {
         private void assertRewritten(Path output, Map<String, byte[]> rewritten, String comment,
                                      int entryCount, Set<String> infrastructureEntries,
                                      List<String> classPayloads, List<String> resourcePayloads,
-                                     boolean moduleInfoPresent) throws IOException {
+                                     boolean moduleInfoPresent, Set<String> opaqueEntries)
+            throws IOException {
             if ((binding == BINDING_SAMPLE || binding == BINDING_NATIVE)
                     && (comment == null || comment.isEmpty())) {
                 throw new IOException("class-encryption: sample/native binding requires a ZIP comment");
@@ -1343,7 +1433,10 @@ public final class ClassEncryptionPass implements Pass {
                         continue;
                     }
                     boolean expected = infrastructureEntries.contains(name)
-                            || (moduleInfoPresent && name.endsWith("module-info.class"));
+                            || (moduleInfoPresent && name.endsWith("module-info.class"))
+                            // Payload data that only looks like a class stays plaintext on
+                            // purpose: its path is what the tool that reads it looks up.
+                            || opaqueEntries.contains(name);
                     if (!expected) {
                         throw new IOException("class-encryption: unexpected plaintext class entry: " + name);
                     }
@@ -1487,8 +1580,7 @@ public final class ClassEncryptionPass implements Pass {
 
     static void rewrite(Path jar, Map<String, byte[]> entries, Map<String, Integer> methods,
                         String comment) throws IOException {
-        Path parent = jar.toAbsolutePath().getParent();
-        Path temp = parent.resolve(jar.getFileName().toString() + ".umbra-tmp");
+        Path temp = io.umbra.core.util.SafeArchive.temporary(jar);
         try {
             try (ZipOutputStream out = new ZipOutputStream(Files.newOutputStream(temp))) {
                 if (comment != null) {
@@ -1512,14 +1604,9 @@ public final class ClassEncryptionPass implements Pass {
                     out.closeEntry();
                 }
             }
-            try {
-                Files.move(temp, jar, StandardCopyOption.REPLACE_EXISTING,
-                        StandardCopyOption.ATOMIC_MOVE);
-            } catch (java.nio.file.AtomicMoveNotSupportedException notAtomic) {
-                Files.move(temp, jar, StandardCopyOption.REPLACE_EXISTING);
-            }
+            io.umbra.core.util.SafeArchive.publish(temp, jar);
         } finally {
-            Files.deleteIfExists(temp);
+            io.umbra.core.util.SafeArchive.deleteQuietly(temp);
         }
     }
 

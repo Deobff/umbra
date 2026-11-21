@@ -269,8 +269,10 @@ public final class NativeTest {
         MethodNode method = syntheticMethod("call", "(Ljava/lang/String;)Ljava/lang/String;",
                 Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, 4, 1);
         method.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        // hashCode, not length: String.length is an intrinsic now and no longer
+        // exercises the generic Call<Type>MethodA path this case is about.
         method.instructions.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/String",
-                "length", "()I", false));
+                "hashCode", "()I", false));
         method.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/String",
                 "valueOf", "(I)Ljava/lang/String;", false));
         method.instructions.add(new InsnNode(Opcodes.ARETURN));
@@ -478,7 +480,9 @@ public final class NativeTest {
         CGenerator.MethodC generated = translate(owner, method);
         check(generated.body.contains("switch ("), "tableswitch becomes a C switch");
         check(generated.body.contains("case 1:"), "case label emitted");
-        check(generated.body.contains("NewStringUTF"), "string constants become NewStringUTF");
+        check(generated.body.contains("umbra_str_recover"),
+                "string constants are decoded from the encrypted pool");
+        check(generated.body.contains("NewString(env"), "string constants become UTF-16 strings");
         check(generated.body.contains("umbra_str_"), "string constant table referenced");
     }
 

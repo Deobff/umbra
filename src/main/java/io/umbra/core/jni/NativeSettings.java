@@ -2,6 +2,7 @@ package io.umbra.core.jni;
 
 import io.umbra.core.config.UmbraConfig;
 import io.umbra.core.engine.MappingSet;
+import io.umbra.core.jni.payload.PayloadLayout;
 import io.umbra.core.rules.Glob;
 
 import java.util.ArrayList;
@@ -34,6 +35,10 @@ public final class NativeSettings {
     private final boolean antiBackfill;
     private final boolean constructors;
     private final boolean indy;
+    private final boolean payload;
+    private final boolean classInitializers;
+    private final boolean intrinsics;
+    private final List<String> targets;
     private final List<Entry> include = new ArrayList<Entry>();
     private final List<Entry> exclude = new ArrayList<Entry>();
 
@@ -50,6 +55,17 @@ public final class NativeSettings {
         this.antiBackfill = config.optionBool("native.antiBackfill", true);
         this.constructors = config.optionBool("native.constructors", true);
         this.indy = config.optionBool("native.indy", true);
+        this.payload = config.optionBool("native.payload", true);
+        this.classInitializers = config.optionBool("native.clinit", true);
+        this.intrinsics = config.optionBool("native.intrinsics", true);
+        List<String> resolvedTargets = new ArrayList<String>();
+        for (String text : splitList(config.option("native.targets", ""))) {
+            resolvedTargets.add(text.toUpperCase(Locale.ROOT));
+        }
+        if (resolvedTargets.isEmpty()) {
+            resolvedTargets.add(PayloadLayout.targetForHost(this.target, this.arch));
+        }
+        this.targets = resolvedTargets;
         String includeList = config.option("native.methods", "**");
         String excludeList = config.option("native.exclude", "");
         for (String text : splitList(includeList)) {
@@ -83,6 +99,15 @@ public final class NativeSettings {
     public boolean constructors() { return constructors; }
 
     public boolean indy() { return indy; }
+
+    public boolean payload() { return payload; }
+
+    public boolean classInitializers() { return classInitializers; }
+
+    public boolean intrinsics() { return intrinsics; }
+
+    /** Target names in payload order, e.g. {@code [WINDOWS_X86_64, LINUX_X86_64]}. */
+    public List<String> targets() { return targets; }
 
     public boolean accepts(String owner, String originalOwner, String name, String descriptor) {
         boolean included = false;
@@ -218,6 +243,10 @@ public final class NativeSettings {
                 + ", antiDump=" + antiDump
                 + ", antiBackfill=" + antiBackfill
                 + ", constructors=" + constructors
-                + ", indy=" + indy;
+                + ", indy=" + indy
+                + ", payload=" + payload
+                + ", clinit=" + classInitializers
+                + ", intrinsics=" + intrinsics
+                + ", targets=" + targets;
     }
 }

@@ -93,6 +93,7 @@ public final class Jars {
         boolean multiReleaseInput = false;
         boolean flattenMode = options.multiRelease() == LayoutOptions.MultiReleaseMode.FLATTEN;
         int versionedEntries = 0;
+        int payloadClasses = 0;
         List<FlattenedClass> flattened = new ArrayList<FlattenedClass>();
 
         try (ZipFile zip = new ZipFile(input.toFile())) {
@@ -184,9 +185,18 @@ public final class Jars {
                 }
                 if (isTransformableClass(name, layout)) {
                     try {
-                        ClassReader reader = new ClassReader(bytes);
-                        ClassNode node = new ClassNode();
-                        reader.accept(node, 0);
+                        ClassNode node = parseClassFile(bytes);
+                        if (!isLoadableEntry(name, node.name, layout)) {
+                            // The path does not name the class inside the file, so the JVM
+                            // can never load it from here: it is payload data (code
+                            // generator templates, embedded class files). Rewriting it would
+                            // edit data the tool that shipped it still reads, and ASM can
+                            // refuse a class this size outright - keep the bytes verbatim.
+                            payloadClasses++;
+                            pool.putOpaque(name, bytes, entry.getTime());
+                            context.addPreservedEntry();
+                            continue;
+                        }
                         ClassNode existing = pool.getClass(node.name);
                         if (existing != null) {
                             handleDuplicateClass(context, pool, log, name, node.name, bytes);
@@ -205,6 +215,11 @@ public final class Jars {
             }
         }
 
+        if (payloadClasses > 0 && log != null) {
+            log.info("layout: kept %d class file(s) byte-identical as payload data "
+                    + "(their entry path does not name the class they contain; the JVM cannot "
+                    + "load them from there)", Integer.valueOf(payloadClasses));
+        }
         int promoted = 0;
         if (!flattened.isEmpty()) {
             Collections.sort(flattened, new Comparator<FlattenedClass>() {
@@ -286,6 +301,54 @@ public final class Jars {
         pool.putResource(name, bytes, entry.getTime(), entry.getMethod());
         if (!context.layout().isFlat() && !MANIFEST_ENTRY.equalsIgnoreCase(name)) {
             context.addPreservedEntry();
+        }
+    }
+
+    /**
+     * Whether the entry path is a path the JVM could load the class from, that is
+     * "&lt;class prefix&gt;/&lt;internal name&gt;.class". Anything else under a .class suffix is
+     * payload data that merely looks like a class file.
+     */
+    private static boolean isLoadableEntry(String entryName, String internalName, JarLayout layout) {
+        String expected = internalName + ".class";
+        if (entryName.equals(expected)) {
+            return true;
+        }
+        String prefix = layout == null ? "" : layout.classPrefix();
+        return prefix != null && prefix.length() > 0 && entryName.equals(prefix + expected);
+    }
+
+    /**
+     * Class-file header major version this build of ASM understands. A newer
+     * class file is parsed with its major version temporarily masked down to
+     * this value; ClassNode.version is restored to the original value
+     * afterwards so the emitted class keeps the input version instead of being
+     * silently downgraded or skipped as an opaque resource.
+     */
+    private static final int SUPPORTED_MAJOR = 69;
+
+    private static ClassNode parseClassFile(byte[] bytes) {
+        try {
+            ClassReader reader = new ClassReader(bytes);
+            ClassNode node = new ClassNode();
+            reader.accept(node, 0);
+            return node;
+        } catch (RuntimeException tooNew) {
+            if (bytes == null || bytes.length < 8) {
+                throw tooNew;
+            }
+            int originalMajor = ((bytes[6] & 0xFF) << 8) | (bytes[7] & 0xFF);
+            if (originalMajor <= SUPPORTED_MAJOR) {
+                throw tooNew;
+            }
+            byte[] masked = bytes.clone();
+            masked[6] = (byte) (SUPPORTED_MAJOR >> 8);
+            masked[7] = (byte) SUPPORTED_MAJOR;
+            ClassReader reader = new ClassReader(masked);
+            ClassNode node = new ClassNode();
+            reader.accept(node, 0);
+            node.version = originalMajor;
+            return node;
         }
     }
 
@@ -495,15 +558,15 @@ public final class Jars {
             Files.createDirectories(parent);
         }
 
-        List<PlannedEntry> classEntries = planClasses(pool, hierarchy, layout, preserveTimestamps, context);
+        List<PlannedEntry> classEntries = planClasses(pool, hierarchy, layout, preserveTimestamps, context,
+                rename, log);
         List<PlannedEntry> moduleEntries = planModuleInfo(pool, layout, rename, context, preserveTimestamps, log);
         List<PlannedEntry> resourceEntries = planResources(pool, layout, rename, context,
                 preserveTimestamps, preserveMultiRelease, versionedEntries, log);
         List<PlannedEntry> versionEntries = planVersionedClasses(pool, rename, context,
                 preserveTimestamps, log);
 
-        Path temp = absoluteOutput.resolveSibling(absoluteOutput.getFileName().toString() + ".umbra-tmp");
-        boolean published = false;
+        Path temp = SafeArchive.temporary(absoluteOutput);
         try {
             try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(temp))) {
                 Set<String> directories = new HashSet<String>();
@@ -520,21 +583,9 @@ public final class Jars {
                     writeEntry(zos, entry, directories);
                 }
             }
-            try {
-                Files.move(temp, absoluteOutput, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-                        java.nio.file.StandardCopyOption.ATOMIC_MOVE);
-            } catch (java.nio.file.AtomicMoveNotSupportedException notAtomic) {
-                Files.move(temp, absoluteOutput, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-            }
-            published = true;
+            SafeArchive.publish(temp, absoluteOutput);
         } finally {
-            if (!published) {
-                try {
-                    Files.deleteIfExists(temp);
-                } catch (IOException ignored) {
-
-                }
-            }
+            SafeArchive.deleteQuietly(temp);
         }
 
         LayoutReport report = context.report();
@@ -556,7 +607,8 @@ public final class Jars {
     }
 
     private static List<PlannedEntry> planClasses(ClassPool pool, Hierarchy hierarchy, JarLayout layout,
-                                                  boolean preserveTimestamps, LayoutContext context)
+                                                  boolean preserveTimestamps, LayoutContext context,
+                                                  ClassRenameMap rename, Log log)
             throws IOException {
         List<PlannedEntry> entries = new ArrayList<PlannedEntry>();
         Set<String> names = new LinkedHashSet<String>();
@@ -573,11 +625,14 @@ public final class Jars {
             byte[] bytes = pool.rawOutput(className);
             if (bytes == null) {
                 try {
-                    bytes = UmbraClassWriter.toBytes(node, hierarchy);
+                    bytes = io.umbra.core.model.UmbraMethodGuard.toBytes(node, pool, rename,
+                            hierarchy, log);
                 } catch (RuntimeException failure) {
-
                     throw new IOException("Failed to serialize " + className + ": "
-                            + failure.getMessage(), failure);
+                            + failure.getMessage() + " (the class has a method whose bytecode "
+                            + "exceeds the JVM's 64 KB limit and restoring its original body did "
+                            + "not fit either; lower flow/exception strength for this archive)",
+                            failure);
                 }
             }
             long time = preserveTimestamps ? pool.classTime(className) : FIXED_TIME;
@@ -744,6 +799,17 @@ public final class Jars {
                 continue;
             }
             entries.add(new PlannedEntry(newName, bytes, time, resource.method()));
+        }
+        List<String> opaqueNames = new ArrayList<String>(pool.opaqueEntries().keySet());
+        Collections.sort(opaqueNames);
+        for (String name : opaqueNames) {
+            if (!usedNames.add(name)) {
+                continue;
+            }
+            byte[] bytes = pool.opaqueEntries().get(name);
+            long time = preserveTimestamps ? pool.opaqueTime(name) : FIXED_TIME;
+            time = time <= 0L ? FIXED_TIME : time;
+            entries.add(new PlannedEntry(name, bytes, time, ZipEntry.DEFLATED));
         }
         return entries;
     }

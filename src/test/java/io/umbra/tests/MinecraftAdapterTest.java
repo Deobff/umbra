@@ -44,6 +44,7 @@ public final class MinecraftAdapterTest {
         testNeoForge();
         testQuilt();
         testMixinOnlyJar();
+        testMixinRefmap();
         testBrokenMetadata();
         testAdjustMatrix();
         testProfileMap();
@@ -561,6 +562,76 @@ public final class MinecraftAdapterTest {
         Map<?, ?> disabled = (Map<?, ?>) map.get("disabledFeatures");
         check(Boolean.FALSE.equals(disabled.get("classEncryption")), "asMap disables class encryption");
         check(Boolean.FALSE.equals(disabled.get("native")), "asMap disables native code");
+    }
+
+    /**
+     * A Forge 1.12-1.16 mod ships its members under production names and its
+     * mixin annotations reference them through the refmap; the detector has to
+     * keep the production name, otherwise the mixin cannot find its target.
+     */
+    private static void testMixinRefmap() throws Exception {
+        List<String> lines = new ArrayList<String>();
+        MinecraftProfile profile = MinecraftAdapter.detect(refmapPool(), baseConfig(), logTo(lines));
+        check(profile.detected(), "refmap fixture detected as a mod container");
+        check(has(profile.keepRules(), "com/example/refmap/BlockTicker#tick"),
+                "literal injection reference kept");
+        check(has(profile.keepRules(), "com/example/refmap/BlockTicker#func_1234_a"),
+                "refmap production name kept");
+        check(has(profile.preservedResources(), "refmapmod-refmap.json"), "refmap resource preserved");
+        check(anyContains(profile.evidence(), "refmapmod-refmap.json"), "refmap evidence recorded");
+        check(anyContains(profile.notes(), "kept under their production name"),
+                "refmap summary note recorded");
+        check(!hasLevel(lines, "ERROR"), "refmap detection logs no errors");
+
+        MinecraftProfile disabled = MinecraftAdapter.detect(refmapPool(),
+                baseConfig("minecraft.refmap", "false"), logTo(new ArrayList<String>()));
+        check(has(disabled.keepRules(), "com/example/refmap/BlockTicker#tick"),
+                "minecraft.refmap=false keeps the literal rule");
+        check(!has(disabled.keepRules(), "com/example/refmap/BlockTicker#func_1234_a"),
+                "minecraft.refmap=false drops the translated rule");
+        check(anyContains(disabled.notes(), "disabled by minecraft.refmap=false"),
+                "minecraft.refmap=false is noted");
+    }
+
+    private static ClassPool refmapPool() {
+        ClassPool pool = new ClassPool();
+        ClassNode mixin = node("com/example/refmap/mixin/BlockTickerMixin");
+        mixinAnnotation(mixin, "com/example/refmap/BlockTicker");
+        inject(mixin, "onTick", "()V", "tick");
+        addClass(pool, mixin);
+        addClass(pool, node("com/example/refmap/BlockTicker", "func_1234_a"));
+        resource(pool, "refmapmod.mixins.json", json(
+                "{",
+                "  \"package\": \"com.example.refmap.mixin\",",
+                "  \"refmap\": \"refmapmod-refmap.json\",",
+                "  \"mixins\": [\"BlockTickerMixin\"]",
+                "}"));
+        resource(pool, "refmapmod-refmap.json", json(
+                "{",
+                "  \"mappings\": {",
+                "    \"com.example.refmap.BlockTicker\": {",
+                "      \"tick\": \"func_1234_a\"",
+                "    }",
+                "  }",
+                "}"));
+        return pool;
+    }
+
+    private static void inject(ClassNode node, String name, String desc, String method) {
+        org.objectweb.asm.tree.MethodNode methodNode =
+                new org.objectweb.asm.tree.MethodNode(Opcodes.ACC_PUBLIC, name, desc, null, null);
+        methodNode.instructions = new org.objectweb.asm.tree.InsnList();
+        methodNode.instructions.add(new org.objectweb.asm.tree.InsnNode(Opcodes.RETURN));
+        AnnotationNode annotation =
+                new AnnotationNode("Lorg/spongepowered/asm/mixin/injection/Inject;");
+        annotation.values = new ArrayList<Object>();
+        annotation.values.add("method");
+        annotation.values.add(method);
+        if (methodNode.visibleAnnotations == null) {
+            methodNode.visibleAnnotations = new ArrayList<AnnotationNode>();
+        }
+        methodNode.visibleAnnotations.add(annotation);
+        node.methods.add(methodNode);
     }
 
     private static UmbraConfig baseConfig(String... options) throws Exception {

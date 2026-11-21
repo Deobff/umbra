@@ -38,15 +38,17 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /**
  * The console window: header, configuration rail, segmented views, targets and
  * the action bar.
  *
  * <p>The shell owns the process: it spawns the engine with exactly the arguments
- * the preview shows, streams its output into the log, and reports the outcome in
- * the header pill. Views are swapped inside one {@link StackPane} so the window
- * never changes size when the segment changes.</p>
+ * the preview shows, streams its stdout and stderr into the log, and reports the
+ * outcome - the reason of a failure included - in the log and the header pill.
+ * Views are swapped inside one {@link StackPane} so the window never changes size
+ * when the segment changes.</p>
  */
 final class ConsoleShell {
 
@@ -75,6 +77,10 @@ final class ConsoleShell {
     private final FusionButton cancelButton = new FusionButton("Cancel");
 
     private Process process;
+
+    /** Set by {@link #cancel()}: a destroyed engine is a cancel, not a crash. */
+    private volatile boolean cancelRequested;
+
     private Runnable onDone;
 
     ConsoleShell(javafx.stage.Stage stage, ConsoleModel model) {
@@ -473,37 +479,138 @@ final class ConsoleShell {
     void cancel() {
         Process running = process;
         if (running != null) {
+            // The watcher still reports the outcome; the flag only tells it that the
+            // non-zero exit code is the user's doing and not a crash.
+            cancelRequested = true;
             running.destroy();
             log("!! cancelled");
         }
     }
 
+    /** How many output lines a run keeps for the failure reason; the newest win. */
+    private static final int CAPTURED_LINES = 2000;
+
+    /** "[ERROR] <summary>" - the CLI's own one-line reason, summary not indented. */
+    private static final Pattern REASON_LINE = Pattern.compile("^\\[ERROR\\] \\S.*");
+
+    /** "Umbra failed: ..." / "Umbra crashed: ...": the one-line report of older builds. */
+    private static final Pattern LEGACY_LINE = Pattern.compile(
+            "^Umbra (failed|crashed|ran out of stack|ran out of memory).*");
+
+    /** "Caused by: ..." - the root cause of a wrapped failure. */
+    private static final Pattern CAUSE_LINE = Pattern.compile("^\\s*Caused by: \\S.*");
+
+    /** "[ERROR]   cause: ..." / "[ERROR]   hint: ...": details of the failure block. */
+    private static final Pattern DETAIL_LINE = Pattern.compile("^\\[ERROR\\]  +\\S.*");
+
+    /** "Verification failed for 3 class(es):". */
+    private static final Pattern VERIFY_LINE = Pattern.compile(
+            "(?i)^(verification|verify) failed.*");
+
+    /** The JVM line for an uncaught throwable: Exception in thread "main" ... */
+    private static final Pattern THREAD_LINE = Pattern.compile("^Exception in thread .*");
+
+    /** A stack trace header: "java.lang.OutOfMemoryError: Java heap space". */
+    private static final Pattern THROWABLE_LINE = Pattern.compile(
+            "^[A-Za-z_$][A-Za-z0-9_$.]*[A-Za-z_$][A-Za-z0-9_$]*(Exception|Error|Throwable)(: .*)?$");
+
+    /** Anything that reads like a failure, in either language. */
+    private static final Pattern FAILURE_WORDS = Pattern.compile(
+            "(?i)(fail|failure|error|exception|denied|refused|invalid|cannot|could not|"
+            + " unable|missing|unsupported|abort|timeout|timed out)"
+            + "|失败|错误|异常|无法|不能|不支持|中止|超时");
+
     private void watch(List<String> argv) {
+        // Every line the run printed. When the engine exits non-zero the reason is
+        // picked from these lines, so a failed run never ends in silence again.
+        List<String> captured = new ArrayList<String>();
         int exit = -1;
+        String startupFailure = null;
         try {
-            process = new ProcessBuilder(argv).start();
+            ProcessBuilder builder = new ProcessBuilder(argv);
+            // The engine writes progress to System.out and failures to System.err
+            // ("Umbra failed: ...", the [ERROR] block, the stack trace). Merging both
+            // into the one pipe read here is what makes the reason visible; reading
+            // getInputStream() and getErrorStream() side by side would instead let the
+            // pipe nobody drains fill up and block the engine before it exits.
+            builder.redirectErrorStream(true);
+            process = builder.start();
+            // The child's console output uses the platform code page (GBK on a zh-CN
+            // Windows), which is exactly what the default charset decodes. Forcing
+            // UTF-8 would turn a Chinese failure message into mojibake in the very
+            // moment the user needs to read it.
             Charset charset = Charset.defaultCharset();
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(process.getInputStream(), charset))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
+                    captured.add(line);
+                    // Keep the recent window only: the reason is always near the end,
+                    // and an unbounded list would grow for the whole run.
+                    if (captured.size() > CAPTURED_LINES) {
+                        captured.subList(0, CAPTURED_LINES / 2).clear();
+                    }
                     String current = line;
                     Platform.runLater(() -> log(current));
                 }
             }
             exit = process.waitFor();
-        } catch (Exception failure) {
-            String message = failure.toString();
+        } catch (Throwable failure) {
+            // start() itself failed (no java on PATH, the jar moved, no rights), or the
+            // reader died on something an Exception does not cover. The worker is a
+            // daemon thread: an Escape here would kill it silently and leave the window
+            // on "protecting" with no exit code and no reason for ever.
+            startupFailure = describeFailure(failure);
+            String message = startupFailure;
             Platform.runLater(() -> log("!! " + message));
         } finally {
             int code = exit;
+            boolean cancelled = cancelRequested;
+            cancelRequested = false;
             process = null;
+            String reason = null;
+            if (code != 0) {
+                if (cancelled) {
+                    reason = "stopped by the user";
+                } else if (startupFailure != null) {
+                    reason = startupFailure;
+                } else {
+                    reason = failureReason(captured);
+                }
+            }
+            String status;
+            String kind;
+            String finish;
+            if (code == 0) {
+                status = "done";
+                kind = "ok";
+                finish = "== done";
+            } else if (cancelled) {
+                status = "cancelled";
+                kind = "err";
+                finish = "== cancelled";
+            } else if (code == -1) {
+                status = "not started";
+                kind = "err";
+                finish = "== the engine did not start";
+            } else {
+                status = "exit " + code;
+                kind = "err";
+                finish = "== finished with exit " + code;
+            }
+            if (reason != null) {
+                finish = finish + ": " + reason;
+                status = status + " · " + shorten(reason, 44);
+            }
+            final String finalStatus = status;
+            final String finalKind = kind;
+            final String finalLine = finish;
             Platform.runLater(() -> {
                 protectButton.setDisable(false);
                 cancelButton.setDisable(true);
                 progress.setVisible(false);
-                setStatus(code == 0 ? "done" : "exit " + code, code == 0 ? "ok" : "err");
-                log(code == 0 ? "== done" : "== finished with exit " + code);
+                setStatus(finalStatus, finalKind);
+                log(finalLine);
                 if (onDone != null) {
                     onDone.run();
                 }
@@ -511,11 +618,131 @@ final class ConsoleShell {
         }
     }
 
+    /**
+     * The one line of a finished run that explains it best.
+     *
+     * <p>The engine answers a failure in several shapes and the merged stream holds
+     * all of them: current builds print "[ERROR] &lt;summary&gt; ..." on stdout plus a
+     * compact block on stderr, older ones print "Umbra failed: ..." followed by the
+     * stack trace, --verify prints "Verification failed for N class(es):", and an
+     * uncaught Error prints its exception header first. The rules are tried from the
+     * last line backwards, so the newest explanation wins, and the root cause of a
+     * wrapped failure beats the wrapper sentence that only repeats it. The result is
+     * never empty, so a failed run always says something.</p>
+     *
+     * @param lines everything the run printed, in order
+     * @return a single non-empty line describing the failure
+     */
+    static String failureReason(List<String> lines) {
+        String reason = lastMatching(lines, REASON_LINE);
+        if (reason == null) {
+            reason = lastMatching(lines, CAUSE_LINE);
+        }
+        if (reason == null) {
+            reason = lastMatching(lines, LEGACY_LINE);
+        }
+        if (reason == null) {
+            reason = lastMatching(lines, DETAIL_LINE);
+        }
+        if (reason == null) {
+            reason = lastMatching(lines, VERIFY_LINE);
+        }
+        if (reason == null) {
+            reason = lastMatching(lines, THREAD_LINE);
+        }
+        if (reason == null) {
+            reason = lastMatching(lines, THROWABLE_LINE);
+        }
+        if (reason == null) {
+            reason = lastContaining(lines, FAILURE_WORDS);
+        }
+        if (reason == null) {
+            reason = lastNonBlank(lines);
+        }
+        return reason == null ? "the engine exited without printing a message" : unlabelled(reason);
+    }
+
+    /**
+     * Drops the "[ERROR]" tag from a picked line: the finish line already says the
+     * run failed, so "== finished with exit 1: [ERROR] Umbra failed: ..." would
+     * repeat the same word twice.
+     */
+    private static String unlabelled(String line) {
+        String text = line.trim();
+        while (text.startsWith("[ERROR]") || text.startsWith("[error]")) {
+            text = text.substring("[ERROR]".length()).trim();
+        }
+        return text;
+    }
+
+    /** The last line that matches {@code pattern} completely and says something. */
+    private static String lastMatching(List<String> lines, Pattern pattern) {
+        for (int i = lines.size() - 1; i >= 0; i--) {
+            String line = lines.get(i);
+            if (speaks(line) && pattern.matcher(line).matches()) {
+                return line.trim();
+            }
+        }
+        return null;
+    }
+
+    /** The last line that contains a match for {@code pattern} and says something. */
+    private static String lastContaining(List<String> lines, Pattern pattern) {
+        for (int i = lines.size() - 1; i >= 0; i--) {
+            String line = lines.get(i);
+            if (speaks(line) && pattern.matcher(line).find()) {
+                return line.trim();
+            }
+        }
+        return null;
+    }
+
+    /** The last line that is not blank, used when nothing reads like a failure. */
+    private static String lastNonBlank(List<String> lines) {
+        for (int i = lines.size() - 1; i >= 0; i--) {
+            String line = lines.get(i);
+            if (speaks(line)) {
+                return line.trim();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Whether a line says anything: {@code e.getMessage()} is null for a great many
+     * exceptions, and "Umbra failed: null" used as the reason would only hide the
+     * exception type the stack trace still names.
+     */
+    private static boolean speaks(String line) {
+        String trimmed = line == null ? "" : line.trim();
+        return !trimmed.isEmpty() && !trimmed.endsWith(": null") && !trimmed.equals("null");
+    }
+
+    /** "java.io.IOException: Cannot run program ..." with the type kept in front. */
+    private static String describeFailure(Throwable failure) {
+        String message = failure.getMessage();
+        if (message == null || message.trim().isEmpty()) {
+            return failure.toString();
+        }
+        return failure.getClass().getName() + ": " + message.trim();
+    }
+
+    /** Trims a reason for the header pill; the log keeps the whole sentence. */
+    private static String shorten(String text, int max) {
+        String flat = text.replace('\r', ' ').replace('\n', ' ').trim();
+        return flat.length() <= max ? flat : flat.substring(0, max - 1) + "…";
+    }
+
     // ------------------------------------------------------------------- state
 
     void log(String line) {
         outputArea.appendText(line + System.lineSeparator());
         outputArea.setScrollTop(Double.MAX_VALUE);
+    }
+
+    /** The whole console text, used by the headless check that dumps a finished run. */
+    String logText() {
+        return outputArea.getText();
     }
 
     /** Sets the header pill text and signal colour; the dot pulses once. */

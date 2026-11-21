@@ -10,6 +10,7 @@ import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.MethodNode;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -39,6 +40,30 @@ public final class MixinAnalyzerTest {
     private static final String MODIFY_VARIABLE = "Lorg/spongepowered/asm/mixin/injection/ModifyVariable;";
     private static final String MODIFY_CONSTANT = "Lorg/spongepowered/asm/mixin/injection/ModifyConstant;";
     private static final String WRAP_OPERATION = "Lcom/llamalad7/mixinextras/injector/WrapOperation;";
+    private static final String INJECTION_AT = "Lorg/spongepowered/asm/mixin/injection/At;";
+    private static final String REFMAP_RESOURCE = "examplemod-refmap.json";
+    private static final String REFMAP_JSON = lines(
+            "{",
+            "  \"mappings\": {",
+            "    \"com.example.mod.target.BlockTicker\": {",
+            "      \"tick(I)V\": \"func_1234_a\",",
+            "      \"counter\": \"field_5678_b\",",
+            "      \"overwriteThing(J)Ljava/lang/String;\": \"func_9999_z\",",
+            "      \"compute\": \"func_7777_c\",",
+            "      \"unusedName\": \"func_0000_x\"",
+            "    },",
+            "    \"com/example/mod/target/Helper\": {",
+            "      \"helper ()V\": \"func_4242_h\"",
+            "    }",
+            "  },",
+            "  \"data\": {",
+            "    \"searge\": {",
+            "      \"com.example.mod.target.BlockTicker\": \"com.example.mod.target.BlockTicker\",",
+            "      \"com/example/mod/target/Helper\": \"com/example/mod/target/Helper\"",
+            "    }",
+            "  }",
+            "}");
+
 
     private static int checks;
 
@@ -52,6 +77,12 @@ public final class MixinAnalyzerTest {
         testInjectionForms();
         testDedupeAndDeterminism();
         testMalformedValuesTolerated();
+        testRefmapMapping();
+        testRefmapRemapFlags();
+        testRefmapClassAlias();
+        testRefmapDeclaredByConfig();
+        testRefmapMalformedTolerated();
+        testRefmapDisabled();
         System.out.println("MixinAnalyzerTest: " + checks + " checks passed");
     }
 
@@ -319,6 +350,209 @@ public final class MixinAnalyzerTest {
         checkUniqueAndSorted(analysis);
     }
 
+
+    /**
+     * Forge 1.12-1.16 mixins write the target member in the pre-obfuscation
+     * namespace and rely on the refmap to reach the production name, so the
+     * production name has to survive renaming as well.
+     */
+    private static void testRefmapMapping() {
+        ClassNode mixin = newClass("mod/mixins/RefmapMixin");
+        addClassAnnotation(mixin, true, annotation(MIXIN,
+                "targets", Arrays.asList("com.example.mod.target.BlockTicker")));
+        addMethod(mixin, "injectTick", "()V", annotation(INJECT, "method", "tick(I)V"));
+        addField(mixin, field("counter", "I"), annotation(SHADOW));
+        addMethod(mixin, "overwriteThing", "(J)Ljava/lang/String;", annotation(OVERWRITE));
+        addMethod(mixin, "callCompute", "()V", annotation(INVOKER, "value", "compute"));
+        addMethod(mixin, "injectAt", "()V", annotation(INJECT, "method", "tick(I)V",
+                "at", annotation(INJECTION_AT, "target",
+                        "Lcom/example/mod/target/Helper;helper()V")));
+        addMethod(mixin, "injectUnknown", "()V", annotation(INJECT, "method", "unknownThing()V"));
+
+        ClassPool pool = poolOf(mixin);
+        resource(pool, REFMAP_RESOURCE, REFMAP_JSON);
+
+        MixinAnalysis analysis = MixinAnalyzer.analyze(pool);
+        String owner = "com/example/mod/target/BlockTicker";
+        checkContains(analysis.keepRules(), owner + "#tick(I)V", "literal @Inject reference kept");
+        checkContains(analysis.keepRules(), owner + "#func_1234_a",
+                "refmap production name kept for @Inject");
+        checkMissing(analysis.keepRules(), owner + "#func_1234_a(I)V",
+                "refmap-derived rule is descriptor-less");
+        checkContains(analysis.keepRules(), owner + "#counter", "literal @Shadow field kept");
+        checkContains(analysis.keepRules(), owner + "#field_5678_b",
+                "@Shadow field production name kept");
+        checkContains(analysis.keepRules(), owner + "#overwriteThing(J)Ljava/lang/String;",
+                "literal @Overwrite kept");
+        checkContains(analysis.keepRules(), owner + "#func_9999_z",
+                "@Overwrite production name kept");
+        checkContains(analysis.keepRules(), owner + "#compute", "literal @Invoker value kept");
+        checkContains(analysis.keepRules(), owner + "#func_7777_c",
+                "@Invoker production name kept");
+        checkContains(analysis.keepRules(), "com/example/mod/target/Helper#helper()V",
+                "literal @At target kept");
+        checkContains(analysis.keepRules(), "com/example/mod/target/Helper#func_4242_h",
+                "@At target production name kept");
+        checkMissing(analysis.keepRules(), owner + "#func_0000_x",
+                "an unreferenced refmap entry is not kept");
+        checkMissing(analysis.keepRules(), owner + "#unknownThing",
+                "a reference without a refmap entry keeps only its literal rule");
+        check(analysis.refmapFiles().equals(Collections.singletonList(REFMAP_RESOURCE)),
+                "refmap file reported: " + analysis.refmapFiles());
+        checkContains(analysis.refmapHits(), owner + "#tick->func_1234_a", "refmap hit recorded");
+        checkContains(analysis.refmapHits(), owner + "#counter->field_5678_b",
+                "refmap field hit recorded");
+        check(analysis.refmapHits().size() == 5,
+                "one hit per translated reference: " + analysis.refmapHits());
+        checkContains(analysis.notes(), "mixin refmap: 6 member mapping(s) for 2 class(es) "
+                        + "in 1 refmap file(s), 5 reference(s) kept under their production name",
+                "refmap summary note");
+        checkUniqueAndSorted(analysis);
+    }
+
+    private static void testRefmapRemapFlags() {
+        ClassNode classLevel = newClass("mod/mixins/NoRemapMixin");
+        addClassAnnotation(classLevel, true, annotation(MIXIN,
+                "targets", Arrays.asList("com.example.mod.target.BlockTicker"),
+                "remap", Boolean.FALSE));
+        addMethod(classLevel, "injectTick", "()V", annotation(INJECT, "method", "tick(I)V"));
+
+        ClassNode annotationLevel = newClass("mod/mixins/AnnotationNoRemapMixin");
+        addClassAnnotation(annotationLevel, true, annotation(MIXIN,
+                "targets", Arrays.asList("com.example.mod.target.BlockTicker")));
+        addMethod(annotationLevel, "injectTick", "()V",
+                annotation(INJECT, "method", "tick(I)V", "remap", Boolean.FALSE));
+
+        ClassPool pool = poolOf(classLevel, annotationLevel);
+        resource(pool, REFMAP_RESOURCE, REFMAP_JSON);
+
+        MixinAnalysis analysis = MixinAnalyzer.analyze(pool);
+        String owner = "com/example/mod/target/BlockTicker";
+        checkContains(analysis.keepRules(), owner + "#tick(I)V",
+                "literal rule is kept even when remapping is off");
+        checkMissing(analysis.keepRules(), owner + "#func_1234_a",
+                "@Mixin(remap=false) and annotation remap=false suppress the translation");
+        check(analysis.refmapHits().isEmpty(),
+                "no refmap hit when remapping is off: " + analysis.refmapHits());
+    }
+
+    private static void testRefmapClassAlias() {
+        ClassNode mixin = newClass("mod/mixins/AliasMixin");
+        addClassAnnotation(mixin, true, annotation(MIXIN,
+                "targets", Arrays.asList("com.example.mod.target.OldName")));
+        addMethod(mixin, "injectTick", "()V", annotation(INJECT, "method", "tick()V"));
+
+        ClassPool pool = poolOf(mixin);
+        resource(pool, "alias-refmap.json", lines(
+                "{",
+                "  \"mappings\": {",
+                "    \"com.example.mod.target.NewName\": {",
+                "      \"tick\": \"a\"",
+                "    }",
+                "  },",
+                "  \"data\": {",
+                "    \"searge\": {",
+                "      \"com.example.mod.target.OldName\": \"com.example.mod.target.NewName\"",
+                "    }",
+                "  }",
+                "}"));
+
+        MixinAnalysis analysis = MixinAnalyzer.analyze(pool);
+        checkContains(analysis.keepRules(), "com/example/mod/target/NewName#a",
+                "production member kept on the refmap-aliased owner");
+        checkContains(analysis.keepRules(), "com/example/mod/target/NewName",
+                "aliased owner class kept");
+        checkContains(analysis.bodySkipGlobs(), "com/example/mod/target/NewName",
+                "aliased owner body skipped");
+        checkContains(analysis.targetClasses(), "com/example/mod/target/NewName",
+                "aliased owner reported as a target");
+        checkContains(analysis.refmapHits(), "com/example/mod/target/NewName#tick->a",
+                "alias hit recorded");
+        checkContains(analysis.notes(),
+                "mixin target com/example/mod/target/OldName is aliased to "
+                        + "com/example/mod/target/NewName by the refmap data section",
+                "alias noted");
+    }
+
+    private static void testRefmapDeclaredByConfig() {
+        ClassNode mixin = newClass("mod/mixins/DeclaredMixin");
+        addClassAnnotation(mixin, true, annotation(MIXIN,
+                "targets", Arrays.asList("com.example.Declared")));
+        addMethod(mixin, "inject", "()V", annotation(INJECT, "method", "go()V"));
+
+        ClassPool pool = poolOf(mixin);
+        resource(pool, "declared.mixins.json", lines(
+                "{",
+                "  \"package\": \"mod.mixins\",",
+                "  \"refmap\": \"names.json\",",
+                "  \"mixins\": [\"DeclaredMixin\"]",
+                "}"));
+        resource(pool, "names.json", lines(
+                "{",
+                "  \"mappings\": {",
+                "    \"com.example.Declared\": {",
+                "      \"go\": \"func_5_a\"",
+                "    }",
+                "  }",
+                "}"));
+
+        MixinAnalysis analysis = MixinAnalyzer.analyze(pool);
+        checkContains(analysis.keepRules(), "com/example/Declared#func_5_a",
+                "a refmap whose file name does not mention refmap is read via the config");
+        checkContains(analysis.refmapFiles(), "names.json",
+                "declared refmap file reported: " + analysis.refmapFiles());
+    }
+
+    private static void testRefmapMalformedTolerated() {
+        ClassNode mixin = newClass("mod/mixins/BrokenRefmapMixin");
+        addClassAnnotation(mixin, true, annotation(MIXIN,
+                "targets", Arrays.asList("net/minecraft/Foo")));
+        addMethod(mixin, "inject", "()V", annotation(INJECT, "method", "bar()V"));
+
+        ClassPool pool = poolOf(mixin);
+        resource(pool, "broken-refmap.json", "{\"mappings\": {\"net/minecraft/Foo\": {");
+
+        MixinAnalysis analysis;
+        try {
+            analysis = MixinAnalyzer.analyze(pool);
+        } catch (RuntimeException e) {
+            throw new AssertionError("malformed refmap must not throw: " + e);
+        }
+        checks++;
+        check(anyContains(analysis.notes(), "mixin refmap broken-refmap.json could not be parsed"),
+                "malformed refmap noted: " + analysis.notes());
+        checkContains(analysis.keepRules(), "net/minecraft/Foo#bar()V",
+                "literal rule survives a broken refmap");
+        check(analysis.refmapHits().isEmpty(), "broken refmap produces no hits");
+        check(analysis.refmapFiles().isEmpty(), "broken refmap is not reported as used");
+    }
+
+    private static void testRefmapDisabled() {
+        ClassNode mixin = newClass("mod/mixins/DisabledRefmapMixin");
+        addClassAnnotation(mixin, true, annotation(MIXIN,
+                "targets", Arrays.asList("com.example.mod.target.BlockTicker")));
+        addMethod(mixin, "injectTick", "()V", annotation(INJECT, "method", "tick(I)V"));
+
+        ClassPool pool = poolOf(mixin);
+        resource(pool, REFMAP_RESOURCE, REFMAP_JSON);
+
+        MixinAnalysis off = MixinAnalyzer.analyze(pool, false);
+        checkContains(off.keepRules(), "com/example/mod/target/BlockTicker#tick(I)V",
+                "literal rule kept when the refmap is disabled");
+        checkMissing(off.keepRules(), "com/example/mod/target/BlockTicker#func_1234_a",
+                "no translated rule when the refmap is disabled");
+        checkContains(off.notes(), "mixin refmap mapping disabled by minecraft.refmap=false",
+                "disabled note recorded");
+        check(off.refmapHits().isEmpty(), "no hits when the refmap is disabled");
+        check(off.refmapFiles().isEmpty(), "no refmap files reported when disabled");
+
+        MixinAnalysis on = MixinAnalyzer.analyze(pool, true);
+        check(on.refmapHits().size() == 1, "enabled run records the hit: " + on.refmapHits());
+        MixinAnalysis repeat = MixinAnalyzer.analyze(pool, true);
+        check(repeat.refmapHits().equals(on.refmapHits()), "refmap hits are deterministic");
+        check(repeat.keepRules().equals(on.keepRules()), "refmap rules are deterministic");
+    }
+
     private static ClassNode newClass(String name) {
         ClassNode node = new ClassNode();
         node.version = Opcodes.V1_8;
@@ -421,6 +655,23 @@ public final class MixinAnalyzerTest {
         return pool;
     }
 
+    private static void resource(ClassPool pool, String name, String text) {
+        pool.putResource(name, text.getBytes(StandardCharsets.UTF_8), 0L, 0);
+    }
+
+    private static String lines(String... lines) {
+        return String.join("\n", lines);
+    }
+
+    private static boolean anyContains(List<String> values, String fragment) {
+        for (String value : values) {
+            if (value != null && value.contains(fragment)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static void check(boolean condition, String what) {
         checks++;
         if (!condition) {
@@ -452,11 +703,15 @@ public final class MixinAnalyzerTest {
         checkSorted(analysis.keepRules(), "keepRules");
         checkSorted(analysis.bodySkipGlobs(), "bodySkipGlobs");
         checkSorted(analysis.notes(), "notes");
+        checkSorted(analysis.refmapFiles(), "refmapFiles");
+        checkSorted(analysis.refmapHits(), "refmapHits");
         checkUnique(analysis.mixinClasses(), "mixinClasses");
         checkUnique(analysis.targetClasses(), "targetClasses");
         checkUnique(analysis.keepRules(), "keepRules");
         checkUnique(analysis.bodySkipGlobs(), "bodySkipGlobs");
         checkUnique(analysis.notes(), "notes");
+        checkUnique(analysis.refmapFiles(), "refmapFiles");
+        checkUnique(analysis.refmapHits(), "refmapHits");
     }
 
     private static void checkSorted(List<String> values, String what) {

@@ -2,6 +2,7 @@ package io.umbra.core.pass.impl;
 
 import io.umbra.core.api.Pass;
 import io.umbra.core.api.PassContext;
+import io.umbra.core.pass.impl.integer.IntMaskCodec;
 import io.umbra.core.pass.impl.shape.ShapeSelector;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
@@ -23,11 +24,13 @@ import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Random;
 import java.util.Set;
 
 /**
@@ -67,6 +70,28 @@ public final class IntegerEncryptionPass implements Pass {
         return context.config().integerEncryption().enabled();
     }
 
+    /**
+     * The deterministic stream every name and key of this pass is drawn from.
+     *
+     * <p>Keys used to come from the shared {@code ctx.random()} chain. That chain is
+     * consumed by every other pass in pipeline order, so the keys silently depended
+     * on how many values the passes before this one happened to draw: two runs with
+     * the same seed agreed on names and structure and drifted on the integer
+     * literals (measured: 23 of 557 entries, every class's chunk key). Deriving the
+     * stream from the seed, a private domain label and the class name makes this
+     * layer reproducible on its own, whatever the passes before it do.</p>
+     */
+    private static Random classStream(PassContext context, String className) {
+        byte[] material = io.umbra.core.util.BuildRoot.derive(context.config().seed(),
+                "umbra.integer.keys");
+        long domain = 0L;
+        for (int i = 0; i < 8; i++) {
+            domain |= (material[i] & 0xFFL) << (8 * i);
+        }
+        long nameHash = className == null ? 0L : className.hashCode();
+        return new Random(domain ^ (nameHash * 0x9E3779B97F4A7C15L) ^ context.config().seed());
+    }
+
     @Override
     public void run(PassContext context) {
         boolean includeLong = context.config().integerEncryption().includeLong();
@@ -87,11 +112,41 @@ public final class IntegerEncryptionPass implements Pass {
             }
             boolean canHostFields = (node.access
                     & (Opcodes.ACC_INTERFACE | Opcodes.ACC_ANNOTATION | Opcodes.ACC_MODULE)) == 0;
+            Random classRandom = classStream(context, node.name);
+
+            // Polymorphic mask chains (aidsfuscator's IntPolymorphStack). The codecs
+            // are built before any payload is written so the per-site chains exist
+            // in site order; a disabled codec consumes no random draws, so a build
+            // that does not opt in stays byte-identical.
+            Map<AbstractInsnNode, Integer> maskIds = new IdentityHashMap<AbstractInsnNode, Integer>();
+            int intSites = 0;
+            int longSites = 0;
+            for (MethodNode method : node.methods) {
+                for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null;
+                     insn = insn.getNext()) {
+                    if (!(insn instanceof LdcInsnNode)) {
+                        continue;
+                    }
+                    Object constant = ((LdcInsnNode) insn).cst;
+                    if (constant instanceof Integer) {
+                        maskIds.put(insn, Integer.valueOf(intSites++));
+                    } else if (includeLong && constant instanceof Long) {
+                        maskIds.put(insn, Integer.valueOf(longSites++));
+                    }
+                }
+            }
+            IntMaskCodec maskInt = IntMaskCodec.create(context, node, classRandom, intSites);
+            IntMaskCodec maskLong = IntMaskCodec.create(context, node, classRandom, longSites);
+            if (maskInt.enabled()) {
+                context.stats().add("integer.masks.classes", 1);
+            }
 
             if (selector != null) {
-                int[] counts = encryptClassShaped(context, node, includeLong, canHostFields, selector);
+                int[] counts = encryptClassShaped(context, node, includeLong, canHostFields, selector,
+                        classRandom, maskInt, maskLong, maskIds);
                 encrypted += counts[0];
                 packedSites += counts[1];
+                maskStats(context, maskInt, maskLong);
                 continue;
             }
             String chosen = shape;
@@ -99,32 +154,39 @@ public final class IntegerEncryptionPass implements Pass {
                 String[] pool = canHostFields
                         ? new String[] { "string", "array" }
                         : new String[] { "string" };
-                chosen = pool[context.random().nextInt(pool.length)];
+                chosen = pool[classRandom.nextInt(pool.length)];
             }
             if ("xor".equals(chosen) || !canHostFields) {
                 int xorCount = 0;
                 for (MethodNode method : node.methods) {
-                    xorCount += encryptMethodXor(context, method, includeLong);
+                    xorCount += encryptMethodXor(context, method, includeLong, classRandom,
+                            maskInt, maskLong, maskIds);
                 }
                 encrypted += xorCount;
                 bump(perShape, "xor", xorCount);
+                maskStats(context, maskInt, maskLong);
                 continue;
             }
             int[] counts;
             if ("array".equals(chosen)) {
-                counts = encryptClassArray(context, node, includeLong, false);
+                counts = encryptClassArray(context, node, includeLong, false, classRandom,
+                        maskInt, maskLong, maskIds);
             } else if ("indy".equals(chosen)) {
-                counts = encryptClassArray(context, node, includeLong, true);
+                counts = encryptClassArray(context, node, includeLong, true, classRandom,
+                        maskInt, maskLong, maskIds);
             } else if ("lookup2".equals(chosen)) {
-                counts = encryptClassPacked(context, node, includeLong);
+                counts = encryptClassPacked(context, node, includeLong, classRandom,
+                        maskInt, maskLong, maskIds);
                 chosen = "string";
             } else {
-                counts = encryptClassPacked(context, node, includeLong);
+                counts = encryptClassPacked(context, node, includeLong, classRandom,
+                        maskInt, maskLong, maskIds);
                 chosen = "string";
             }
             encrypted += counts[0];
             packedSites += counts[1];
             bump(perShape, chosen, counts[1]);
+            maskStats(context, maskInt, maskLong);
         }
         context.stats().add("constants.obfuscated", encrypted);
         context.stats().add("integer.shape.string", packedSites);
@@ -150,7 +212,9 @@ public final class IntegerEncryptionPass implements Pass {
         counts.put(key, Integer.valueOf(old == null ? delta : old.intValue() + delta));
     }
 
-    private int[] encryptClassPacked(PassContext context, ClassNode node, boolean includeLong) {
+    private int[] encryptClassPacked(PassContext context, ClassNode node, boolean includeLong,
+                                     Random classRandom, IntMaskCodec maskInt, IntMaskCodec maskLong,
+                                     Map<AbstractInsnNode, Integer> maskIds) {
         List<Site> intSites = new ArrayList<Site>();
         List<Site> longSites = new ArrayList<Site>();
         for (MethodNode method : node.methods) {
@@ -169,12 +233,14 @@ public final class IntegerEncryptionPass implements Pass {
         if (intSites.isEmpty() && longSites.isEmpty()) {
             return new int[] { 0, 0 };
         }
-        String base = "z$" + Integer.toHexString(context.random().nextInt() | 1);
+        String base = "z$" + Integer.toHexString(classRandom.nextInt() | 1);
         List<FieldNode> fields = new ArrayList<FieldNode>();
         List<MethodNode> accessors = new ArrayList<MethodNode>();
         int packed = 0;
-        packed += pack(context, node, base + "i", intSites, false, fields, accessors);
-        packed += pack(context, node, base + "j", longSites, true, fields, accessors);
+        packed += pack(context, node, base + "i", intSites, false, fields, accessors, classRandom,
+                maskInt, maskIds);
+        packed += pack(context, node, base + "j", longSites, true, fields, accessors, classRandom,
+                maskLong, maskIds);
         for (FieldNode field : fields) {
             node.fields.add(0, field);
         }
@@ -186,7 +252,8 @@ public final class IntegerEncryptionPass implements Pass {
     }
 
     private int pack(PassContext context, ClassNode node, String base, List<Site> sites, boolean longs,
-                     List<FieldNode> fields, List<MethodNode> accessors) {
+                     List<FieldNode> fields, List<MethodNode> accessors, Random classRandom,
+                     IntMaskCodec codec, Map<AbstractInsnNode, Integer> maskIds) {
         if (sites.isEmpty()) {
             return 0;
         }
@@ -208,29 +275,43 @@ public final class IntegerEncryptionPass implements Pass {
             int from = chunk * CHUNK_VALUES;
             int to = Math.min(values.size(), from + CHUNK_VALUES);
             chunkStart[chunk] = from;
-            long key = context.random().nextLong();
+            long key = classRandom.nextLong();
             fieldNames[chunk] = base + "s" + chunk;
             keys[chunk] = base + "k" + chunk;
             accessorNames[chunk] = base + "d" + chunk;
             StringBuilder text = new StringBuilder((to - from) * (longs ? 4 : 2));
             for (int i = from; i < to; i++) {
                 if (longs) {
-                    long masked = values.get(i).longValue() ^ key;
+                    long plain = values.get(i).longValue();
+                    long masked = (maskOn(codec) ? codec.encodeLong(plain, i) : plain) ^ key;
                     for (int shift = 48; shift >= 0; shift -= 16) {
                         text.append((char) ((masked >>> shift) & 0xFFFF));
                     }
                 } else {
-                    int masked = (int) values.get(i).longValue() ^ (int) key;
+                    int plain = (int) values.get(i).longValue();
+                    int masked = (maskOn(codec) ? codec.encode(plain, i) : plain) ^ (int) key;
                     text.append((char) ((masked >>> 16) & 0xFFFF));
                     text.append((char) (masked & 0xFFFF));
                 }
             }
+            // Neither the masked value table nor the key may live in a
+            // ConstantValue attribute: both are seeded in <clinit> instead so a
+            // constant-pool dump does not hand over the cipher and the key
+            // side by side.
             fields.add(new FieldNode(
                     Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL | Opcodes.ACC_SYNTHETIC,
-                    fieldNames[chunk], "Ljava/lang/String;", null, text.toString()));
+                    fieldNames[chunk], "Ljava/lang/String;", null, null));
             fields.add(new FieldNode(
                     Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL | Opcodes.ACC_SYNTHETIC,
-                    keys[chunk], "J", null, Long.valueOf(key)));
+                    keys[chunk], "J", null, null));
+            MethodNode chunkInit = staticInit(node);
+            InsnList chunkSeed = new InsnList();
+            chunkSeed.add(new LdcInsnNode(text.toString()));
+            chunkSeed.add(new FieldInsnNode(Opcodes.PUTSTATIC, node.name, fieldNames[chunk],
+                    "Ljava/lang/String;"));
+            chunkSeed.add(new LdcInsnNode(Long.valueOf(key)));
+            chunkSeed.add(new FieldInsnNode(Opcodes.PUTSTATIC, node.name, keys[chunk], "J"));
+            chunkInit.instructions.insert(chunkSeed);
             accessors.add(accessor(node, accessorNames[chunk], fieldNames[chunk], keys[chunk], longs));
         }
         int packed = 0;
@@ -243,6 +324,8 @@ public final class IntegerEncryptionPass implements Pass {
             io.umbra.core.util.AsmUtil.pushInt(replacement, indexInsn);
             replacement.add(new MethodInsnNode(Opcodes.INVOKESTATIC, node.name, accessorNames[chunk],
                     longs ? "(I)J" : "(I)I", false));
+            site.maskSite = global;
+            appendDecode(replacement, codec, site, longs);
             site.insn.getClass();
             MethodNode owner = ownerOf(node, site.insn);
             owner.instructions.insertBefore(site.insn, replacement);
@@ -322,7 +405,8 @@ public final class IntegerEncryptionPass implements Pass {
     }
 
     private int[] encryptClassArray(PassContext context, ClassNode node, boolean includeLong,
-                                    boolean indy) {
+                                    boolean indy, Random classRandom, IntMaskCodec maskInt,
+                                    IntMaskCodec maskLong, Map<AbstractInsnNode, Integer> maskIds) {
         List<Site> intSites = new ArrayList<Site>();
         List<Site> longSites = new ArrayList<Site>();
         for (MethodNode method : node.methods) {
@@ -339,22 +423,23 @@ public final class IntegerEncryptionPass implements Pass {
             }
         }
         int shaped = 0;
-        shaped += emitArray(context, node, intSites, false, indy);
-        shaped += emitArray(context, node, longSites, true, indy);
+        shaped += emitArray(context, node, intSites, false, indy, classRandom, maskInt, maskIds);
+        shaped += emitArray(context, node, longSites, true, indy, classRandom, maskLong, maskIds);
         return new int[] { intSites.size() + longSites.size(), shaped };
     }
 
     private int emitArray(PassContext context, ClassNode node, List<Site> sites, boolean longs,
-                          boolean indy) {
+                          boolean indy, Random classRandom, IntMaskCodec codec,
+                          Map<AbstractInsnNode, Integer> maskIds) {
         if (sites.isEmpty()) {
             return 0;
         }
-        String base = "z$a" + Integer.toHexString(context.random().nextInt() | 1);
+        String base = "z$a" + Integer.toHexString(classRandom.nextInt() | 1);
         String arrName = base + "v";
         String keyName = base + "k";
         String arrDesc = longs ? "[J" : "[I";
         String keyDesc = longs ? "J" : "I";
-        int intKey = context.random().nextInt();
+        int intKey = classRandom.nextInt();
         if (intKey == 0) {
             intKey = 0x5A17;
         }
@@ -381,10 +466,12 @@ public final class IntegerEncryptionPass implements Pass {
             init.add(new FieldInsnNode(Opcodes.GETSTATIC, node.name, arrName, arrDesc));
             io.umbra.core.util.AsmUtil.pushInt(init, index);
             if (longs) {
-                init.add(new LdcInsnNode(Long.valueOf(site.value ^ longKey)));
+                long plain = maskLong(codec, site, maskIds);
+                init.add(new LdcInsnNode(Long.valueOf(plain ^ longKey)));
                 init.add(new InsnNode(Opcodes.LASTORE));
             } else {
-                io.umbra.core.util.AsmUtil.pushInt(init, (int) site.value ^ intKey);
+                int plain = maskInt(codec, site, maskIds);
+                io.umbra.core.util.AsmUtil.pushInt(init, plain ^ intKey);
                 init.add(new InsnNode(Opcodes.IASTORE));
             }
             index++;
@@ -400,6 +487,7 @@ public final class IntegerEncryptionPass implements Pass {
                 replacement.add(new InsnNode(longs ? Opcodes.LALOAD : Opcodes.IALOAD));
                 replacement.add(new FieldInsnNode(Opcodes.GETSTATIC, node.name, keyName, keyDesc));
                 replacement.add(new InsnNode(longs ? Opcodes.LXOR : Opcodes.IXOR));
+                appendDecode(replacement, codec, site, longs);
             }
             MethodNode owner = ownerOf(node, site.insn);
             owner.instructions.insertBefore(site.insn, replacement);
@@ -422,7 +510,9 @@ public final class IntegerEncryptionPass implements Pass {
         return clinit;
     }
 
-    private int encryptMethodXor(PassContext context, MethodNode method, boolean includeLong) {
+    private int encryptMethodXor(PassContext context, MethodNode method, boolean includeLong,
+                                 Random classRandom, IntMaskCodec maskInt, IntMaskCodec maskLong,
+                                 Map<AbstractInsnNode, Integer> maskIds) {
         int count = 0;
         for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; ) {
             AbstractInsnNode next = insn.getNext();
@@ -430,27 +520,37 @@ public final class IntegerEncryptionPass implements Pass {
                 Object constant = ((LdcInsnNode) insn).cst;
                 if (constant instanceof Integer) {
                     int value = (Integer) constant;
-                    int key = context.random().nextInt();
+                    int key = classRandom.nextInt();
                     if (key == 0) {
                         key = 0x5A17;
                     }
                     InsnList replacement = new InsnList();
-                    replacement.add(new LdcInsnNode(Integer.valueOf(value ^ key)));
+                    int plain = maskOn(maskInt)
+                            ? maskInt.encode(value, siteId(maskIds, insn)) : value;
+                    replacement.add(new LdcInsnNode(Integer.valueOf(plain ^ key)));
                     replacement.add(new LdcInsnNode(Integer.valueOf(key)));
                     replacement.add(new InsnNode(Opcodes.IXOR));
+                    if (maskOn(maskInt)) {
+                        replacement.add(maskInt.emitDecode(siteId(maskIds, insn)));
+                    }
                     method.instructions.insertBefore(insn, replacement);
                     method.instructions.remove(insn);
                     count++;
                 } else if (includeLong && constant instanceof Long) {
                     long value = (Long) constant;
-                    long key = context.random().nextLong();
+                    long key = classRandom.nextLong();
                     if (key == 0L) {
                         key = 0x5A17L;
                     }
                     InsnList replacement = new InsnList();
-                    replacement.add(new LdcInsnNode(Long.valueOf(value ^ key)));
+                    long plain = maskOn(maskLong)
+                            ? maskLong.encodeLong(value, siteId(maskIds, insn)) : value;
+                    replacement.add(new LdcInsnNode(Long.valueOf(plain ^ key)));
                     replacement.add(new LdcInsnNode(Long.valueOf(key)));
                     replacement.add(new InsnNode(Opcodes.LXOR));
+                    if (maskOn(maskLong)) {
+                        replacement.add(maskLong.emitDecodeLong(siteId(maskIds, insn)));
+                    }
                     method.instructions.insertBefore(insn, replacement);
                     method.instructions.remove(insn);
                     count++;
@@ -466,7 +566,9 @@ public final class IntegerEncryptionPass implements Pass {
                     + "Ljava/lang/invoke/MethodType;I)Ljava/lang/invoke/CallSite;";
 
     private int[] encryptClassShaped(PassContext context, ClassNode node, boolean includeLong,
-                                     boolean canHostFields, ShapeSelector selector) {
+                                     boolean canHostFields, ShapeSelector selector,
+                                     Random classRandom, IntMaskCodec maskInt, IntMaskCodec maskLong,
+                                     Map<AbstractInsnNode, Integer> maskIds) {
         List<Site> all = collectSites(node, includeLong);
         if (all.isEmpty()) {
             return new int[] { 0, 0 };
@@ -501,23 +603,24 @@ public final class IntegerEncryptionPass implements Pass {
             int done;
             switch (shape) {
                 case FIELD_ARRAY_AND_INDEX:
-                    done = emitArray(context, node, ints, false, false)
-                            + emitArray(context, node, longs, true, false);
+                    done = emitArray(context, node, ints, false, false, classRandom, maskInt, maskIds)
+                            + emitArray(context, node, longs, true, false, classRandom, maskLong, maskIds);
                     break;
                 case LOOKUP_METHOD_AND_INDEX:
-                    done = emitLookupPacked(context, node, ints, longs);
+                    done = emitLookupPacked(context, node, ints, longs, classRandom, maskInt, maskLong,
+                            maskIds);
                     break;
                 case LOOKUP_METHOD_AND_INDEX_DES:
-                    done = emitLookupDes(context, node, ints, false)
-                            + emitLookupDes(context, node, longs, true);
+                    done = emitLookupDes(context, node, ints, false, classRandom, maskInt, maskIds)
+                            + emitLookupDes(context, node, longs, true, classRandom, maskLong, maskIds);
                     break;
                 case LOCAL_ARRAY_AND_INDEX:
-                    done = emitLocalArray(context, node, ints)
-                            + emitLocalArray(context, node, longs);
+                    done = emitLocalArray(context, node, ints, classRandom, maskInt, maskIds)
+                            + emitLocalArray(context, node, longs, classRandom, maskLong, maskIds);
                     break;
                 case INDY_ENTRY_AND_INDEX:
-                    done = emitIndy(context, node, ints)
-                            + emitIndy(context, node, longs);
+                    done = emitIndy(context, node, ints, classRandom, maskInt, maskIds)
+                            + emitIndy(context, node, longs, classRandom, maskLong, maskIds);
                     break;
                 default:
                     done = 0;
@@ -566,16 +669,19 @@ public final class IntegerEncryptionPass implements Pass {
     }
 
     private int emitLookupPacked(PassContext context, ClassNode node, List<Site> ints,
-                                 List<Site> longs) {
+                                 List<Site> longs, Random classRandom, IntMaskCodec maskInt,
+                                 IntMaskCodec maskLong, Map<AbstractInsnNode, Integer> maskIds) {
         if (ints.isEmpty() && longs.isEmpty()) {
             return 0;
         }
-        String base = "z$" + Integer.toHexString(context.random().nextInt() | 1);
+        String base = "z$" + Integer.toHexString(classRandom.nextInt() | 1);
         List<FieldNode> fields = new ArrayList<FieldNode>();
         List<MethodNode> accessors = new ArrayList<MethodNode>();
         int packed = 0;
-        packed += pack(context, node, base + "i", ints, false, fields, accessors);
-        packed += pack(context, node, base + "j", longs, true, fields, accessors);
+        packed += pack(context, node, base + "i", ints, false, fields, accessors, classRandom,
+                maskInt, maskIds);
+        packed += pack(context, node, base + "j", longs, true, fields, accessors, classRandom,
+                maskLong, maskIds);
         for (int i = 0; i < fields.size(); i++) {
             node.fields.add(0, fields.get(i));
         }
@@ -585,31 +691,40 @@ public final class IntegerEncryptionPass implements Pass {
         return packed;
     }
 
-    private int emitLookupDes(PassContext context, ClassNode node, List<Site> sites, boolean longs) {
+    private int emitLookupDes(PassContext context, ClassNode node, List<Site> sites, boolean longs,
+                              Random classRandom, IntMaskCodec codec,
+                              Map<AbstractInsnNode, Integer> maskIds) {
         if (sites.isEmpty()) {
             return 0;
         }
-        String base = "z$e" + Integer.toHexString(context.random().nextInt() | 1);
+        String base = "z$e" + Integer.toHexString(classRandom.nextInt() | 1);
         String fieldName = base + "p";
         String accessorName = base + "a";
-        long key = context.random().nextLong();
+        long key = classRandom.nextLong();
         StringBuilder text = new StringBuilder(sites.size() * (longs ? 4 : 2));
         for (int i = 0; i < sites.size(); i++) {
             Site site = sites.get(i);
             if (longs) {
-                long masked = site.value ^ key;
+                long plain = maskLong(codec, site, maskIds);
+                long masked = plain ^ key;
                 for (int shift = 48; shift >= 0; shift -= 16) {
                     text.append((char) ((masked >>> shift) & 0xFFFF));
                 }
             } else {
-                int masked = (int) site.value ^ (int) key;
+                int plain = maskInt(codec, site, maskIds);
+                int masked = plain ^ (int) key;
                 text.append((char) ((masked >>> 16) & 0xFFFF));
                 text.append((char) (masked & 0xFFFF));
             }
         }
         node.fields.add(0, new FieldNode(
                 Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL | Opcodes.ACC_SYNTHETIC,
-                fieldName, "Ljava/lang/String;", null, text.toString()));
+                fieldName, "Ljava/lang/String;", null, null));
+        MethodNode desInit = staticInit(node);
+        InsnList desSeed = new InsnList();
+        desSeed.add(new LdcInsnNode(text.toString()));
+        desSeed.add(new FieldInsnNode(Opcodes.PUTSTATIC, node.name, fieldName, "Ljava/lang/String;"));
+        desInit.instructions.insert(desSeed);
         node.methods.add(desAccessor(node, accessorName, fieldName, longs));
         int done = 0;
         for (int i = 0; i < sites.size(); i++) {
@@ -619,6 +734,7 @@ public final class IntegerEncryptionPass implements Pass {
             replacement.add(new LdcInsnNode(Long.valueOf(key)));
             replacement.add(new MethodInsnNode(Opcodes.INVOKESTATIC, node.name, accessorName,
                     longs ? "(IJ)J" : "(IJ)I", false));
+            appendDecode(replacement, codec, site, longs);
             MethodNode owner = ownerOf(node, site.insn);
             owner.instructions.insertBefore(site.insn, replacement);
             owner.instructions.remove(site.insn);
@@ -685,7 +801,9 @@ public final class IntegerEncryptionPass implements Pass {
         return method;
     }
 
-    private int emitLocalArray(PassContext context, ClassNode node, List<Site> sites) {
+    private int emitLocalArray(PassContext context, ClassNode node, List<Site> sites,
+                               Random classRandom, IntMaskCodec codec,
+                               Map<AbstractInsnNode, Integer> maskIds) {
         if (sites.isEmpty()) {
             return 0;
         }
@@ -706,7 +824,7 @@ public final class IntegerEncryptionPass implements Pass {
             List<Site> bucket = entry.getValue();
             boolean longs = bucket.get(0).longs;
             int slot = nextFreeLocal(method);
-            int key = context.random().nextInt();
+            int key = classRandom.nextInt();
             if (key == 0) {
                 key = 0x5A17;
             }
@@ -719,10 +837,11 @@ public final class IntegerEncryptionPass implements Pass {
                 prologue.add(new VarInsnNode(Opcodes.ALOAD, slot));
                 io.umbra.core.util.AsmUtil.pushInt(prologue, i);
                 if (longs) {
-                    prologue.add(new LdcInsnNode(Long.valueOf(site.value ^ (long) key)));
+                    prologue.add(new LdcInsnNode(Long.valueOf(
+                            maskLong(codec, site, maskIds) ^ (long) key)));
                     prologue.add(new InsnNode(Opcodes.LASTORE));
                 } else {
-                    io.umbra.core.util.AsmUtil.pushInt(prologue, (int) site.value ^ key);
+                    io.umbra.core.util.AsmUtil.pushInt(prologue, maskInt(codec, site, maskIds) ^ key);
                     prologue.add(new InsnNode(Opcodes.IASTORE));
                 }
             }
@@ -742,6 +861,7 @@ public final class IntegerEncryptionPass implements Pass {
                     io.umbra.core.util.AsmUtil.pushInt(replacement, key);
                     replacement.add(new InsnNode(Opcodes.IXOR));
                 }
+                appendDecode(replacement, codec, site, longs);
                 method.instructions.insertBefore(site.insn, replacement);
                 method.instructions.remove(site.insn);
                 done++;
@@ -750,18 +870,19 @@ public final class IntegerEncryptionPass implements Pass {
         return done;
     }
 
-    private int emitIndy(PassContext context, ClassNode node, List<Site> sites) {
+    private int emitIndy(PassContext context, ClassNode node, List<Site> sites, Random classRandom,
+                         IntMaskCodec codec, Map<AbstractInsnNode, Integer> maskIds) {
         if (sites.isEmpty()) {
             return 0;
         }
         boolean longs = sites.get(0).longs;
-        String base = "z$n" + Integer.toHexString(context.random().nextInt() | 1);
+        String base = "z$n" + Integer.toHexString(classRandom.nextInt() | 1);
         String arrName = base + "v";
         String keyName = base + "k";
         String bootName = base + "b";
         String arrDesc = longs ? "[J" : "[I";
         String keyDesc = longs ? "J" : "I";
-        int intKey = context.random().nextInt();
+        int intKey = classRandom.nextInt();
         if (intKey == 0) {
             intKey = 0x5A17;
         }
@@ -787,10 +908,11 @@ public final class IntegerEncryptionPass implements Pass {
             init.add(new FieldInsnNode(Opcodes.GETSTATIC, node.name, arrName, arrDesc));
             io.umbra.core.util.AsmUtil.pushInt(init, i);
             if (longs) {
-                init.add(new LdcInsnNode(Long.valueOf(site.value ^ longKey)));
+                init.add(new LdcInsnNode(Long.valueOf(
+                        maskLong(codec, site, maskIds) ^ longKey)));
                 init.add(new InsnNode(Opcodes.LASTORE));
             } else {
-                io.umbra.core.util.AsmUtil.pushInt(init, (int) site.value ^ intKey);
+                io.umbra.core.util.AsmUtil.pushInt(init, maskInt(codec, site, maskIds) ^ intKey);
                 init.add(new InsnNode(Opcodes.IASTORE));
             }
         }
@@ -804,7 +926,11 @@ public final class IntegerEncryptionPass implements Pass {
             InvokeDynamicInsnNode call = new InvokeDynamicInsnNode("z" + i,
                     longs ? "()J" : "()I", handle, Integer.valueOf(i));
             MethodNode owner = ownerOf(node, site.insn);
-            owner.instructions.set(site.insn, call);
+            InsnList replacement = new InsnList();
+            replacement.add(call);
+            appendDecode(replacement, codec, site, longs);
+            owner.instructions.insertBefore(site.insn, replacement);
+            owner.instructions.remove(site.insn);
             done++;
         }
         return done;
@@ -865,10 +991,65 @@ public final class IntegerEncryptionPass implements Pass {
         return used;
     }
 
+    /**
+     * Assigns the mask-chain site id of one constant and creates the chain's
+     * encoded payload value. A {@code null} codec means the layer is off, in which
+     * case the original value is returned untouched.
+     */
+    private static int maskInt(IntMaskCodec codec, Site site,
+                               Map<AbstractInsnNode, Integer> ids) {
+        if (codec == null || !codec.enabled()) {
+            return (int) site.value;
+        }
+        site.maskSite = siteId(ids, site.insn);
+        return codec.encode((int) site.value, site.maskSite);
+    }
+
+    private static long maskLong(IntMaskCodec codec, Site site,
+                                 Map<AbstractInsnNode, Integer> ids) {
+        if (codec == null || !codec.enabled()) {
+            return site.value;
+        }
+        site.maskSite = siteId(ids, site.insn);
+        return codec.encodeLong(site.value, site.maskSite);
+    }
+
+    private static int siteId(Map<AbstractInsnNode, Integer> ids, AbstractInsnNode insn) {
+        Integer id = ids.get(insn);
+        if (id == null) {
+            throw new IllegalStateException("constant site has no mask id");
+        }
+        return id.intValue();
+    }
+
+    /** Appends the runtime decode chain for one site, if the layer is on. */
+    private static void appendDecode(InsnList list, IntMaskCodec codec, Site site, boolean longs) {
+        if (codec == null || !codec.enabled()) {
+            return;
+        }
+        list.add(longs ? codec.emitDecodeLong(site.maskSite) : codec.emitDecode(site.maskSite));
+    }
+
+    private static boolean maskOn(IntMaskCodec codec) {
+        return codec != null && codec.enabled();
+    }
+
+    private static void maskStats(PassContext context, IntMaskCodec maskInt, IntMaskCodec maskLong) {
+        if (maskOn(maskInt)) {
+            maskInt.stats().report(context);
+            context.stats().text("integer.masks.shape",
+                    maskInt.statsKey() + (maskOn(maskLong) ? "," + maskLong.statsKey() : ""));
+        } else if (maskOn(maskLong)) {
+            maskLong.stats().report(context);
+            context.stats().text("integer.masks.shape", maskLong.statsKey());
+        }
+    }
+
     private static final class Site {
         private final AbstractInsnNode insn;
         private final long value;
         private final boolean longs;
+        private int maskSite;
         private ShapeSelector.Shape shape = ShapeSelector.Shape.LEGACY;
 
         private Site(AbstractInsnNode insn, long value, boolean longs) {

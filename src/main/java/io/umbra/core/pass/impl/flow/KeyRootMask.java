@@ -117,9 +117,36 @@ public final class KeyRootMask {
         if (!requested || !context.config().optionBool("antiDebug.nativeGuard", true)) {
             return false;
         }
+        if (isEclipseRunnableJar(context)) {
+            // The Rsrc loader boots the nested libraries first and the guard is routed
+            // through Rsrc-Main-Class, which never installs the key root the mask needs;
+            // a masked table would throw at class-init time. Static tier instead.
+            context.stats().text("flow.tableMode", "static");
+            if (context.stats().text("flow.tableTier.note") == null) {
+                context.stats().text("flow.tableTier.note", "eclipse-runnable-jar=static");
+                context.log().info("flow: Eclipse runnable jar keeps the static table tier "
+                        + "(the Rsrc loader cannot install the native key root)");
+            }
+            return false;
+        }
         JarLayout layout = LayoutRegistry.layout(context.classes());
         return (layout.isFlat() && !layout.moduleInfo())
                 || context.config().optionBool("layout.forceEntryProtection", false);
+    }
+
+    /** True when the manifest declares an Eclipse runnable jar ({@code Rsrc-Main-Class}). */
+    private static boolean isEclipseRunnableJar(PassContext context) {
+        try {
+            io.umbra.core.model.ClassPool.Resource manifest =
+                    context.classes().resource("META-INF/MANIFEST.MF");
+            if (manifest == null) {
+                return false;
+            }
+            return io.umbra.core.util.Jars.parseManifest(manifest.bytes())
+                    .get("Rsrc-Main-Class") != null;
+        } catch (RuntimeException unreadable) {
+            return false;
+        }
     }
 
     private static synchronized byte[] derivedRawRoot(PassContext context) {

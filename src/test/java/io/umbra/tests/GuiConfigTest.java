@@ -26,7 +26,7 @@ public final class GuiConfigTest {
     public static void main(String[] args) throws Exception {
         Path dir = Files.createTempDirectory("umbra-gui-test-");
         try {
-            check("3.4.0".equals(GuiConfig.VERSION), "GUI version is 3.4.0");
+            check("3.4.1".equals(GuiConfig.VERSION), "GUI version is 3.4.1");
 
             Path input = dir.resolve("app.jar");
             Files.write(input, new byte[0]);

@@ -23,6 +23,8 @@ import java.io.File;
  *       targets,</li>
  *   <li>{@code -Dumbra.fx.autoprotect=1} starts a protection run immediately,</li>
  *   <li>{@code -Dumbra.fx.exitWhenDone=1} exits after that run finishes,</li>
+ *   <li>{@code -Dumbra.fx.dump-log=<txt>} writes the console text when that run
+ *       finishes (the failure reason is only visible there),</li>
  *   <li>{@code -Dumbra.fx.reduceMotion=true} (or {@code -Dumbra.fx.animations=false})
  *       turns every animation duration to zero while keeping the final state.</li>
  * </ul>
@@ -30,7 +32,7 @@ import java.io.File;
 public final class FxGui extends Application {
 
     /** Console version, shown in the title bar and in the About window. */
-    static final String VERSION = "3.4.0";
+    static final String VERSION = "3.4.1";
 
     private static String jarArgument;
 
@@ -94,11 +96,26 @@ public final class FxGui extends Application {
                 System.getProperty("umbra.fx.preset"));
         shell.log("engine jar: " + new File(model.jarPath).getAbsolutePath());
         shell.log("pick a group on the left, then press Protect");
-        if (System.getProperty("umbra.fx.exitWhenDone") != null) {
+        final String dumpLog = System.getProperty("umbra.fx.dump-log");
+        final boolean exitWhenDone = System.getProperty("umbra.fx.exitWhenDone") != null;
+        if (dumpLog != null || exitWhenDone) {
             shell.setOnDone(new Runnable() {
                 @Override
                 public void run() {
-                    Platform.exit();
+                    // QA hook: a headless check cannot read the log view, so the run's
+                    // console text - failure reason included - is written to a file.
+                    if (dumpLog != null) {
+                        try {
+                            java.nio.file.Files.write(java.nio.file.Paths.get(dumpLog),
+                                    shell.logText().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                            System.out.println("log written: " + dumpLog);
+                        } catch (Exception failure) {
+                            System.out.println("log dump failed: " + failure);
+                        }
+                    }
+                    if (exitWhenDone) {
+                        Platform.exit();
+                    }
                 }
             });
         }

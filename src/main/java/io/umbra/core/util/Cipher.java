@@ -1,5 +1,7 @@
 package io.umbra.core.util;
 
+import io.umbra.core.runtime.crypto.UmbraCrypto;
+
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
@@ -110,42 +112,42 @@ public final class Cipher {
     }
 
     public static byte[] legacyKey(long key) {
-        return sha256(concat(utf8(DomainTags.tag(DomainTags.I_LEGACY_KEY)), le64(key)));
+        return sha256(concat(UmbraCrypto.domain(UmbraCrypto.K1), le64(key)));
     }
 
     public static byte[] legacyNonce(long key) {
-        return first(sha256(concat(utf8(DomainTags.tag(DomainTags.I_LEGACY_NONCE)), le64(key))),
+        return first(sha256(concat(UmbraCrypto.domain(UmbraCrypto.K2), le64(key))),
                 NONCE_BYTES);
     }
 
     public static long deriveSiteSeed(long seed, String className, int siteId) {
-        byte[] digest = sha256(concat(utf8(DomainTags.tag(DomainTags.I_SITE_SEED)), le64(seed),
+        byte[] digest = sha256(concat(UmbraCrypto.domain(UmbraCrypto.K3), le64(seed),
                 utf8(className), le32(siteId)));
         return readLongBE(digest, 0);
     }
 
     public static byte[] deriveClassKey(long seed, String className) {
-        return sha256(concat(utf8(DomainTags.tag(DomainTags.I_CLASS_KEY)), le64(seed),
+        return sha256(concat(UmbraCrypto.domain(UmbraCrypto.K4), le64(seed),
                 utf8(className)));
     }
 
     public static byte[] stringSiteKey(long siteSeed, int siteId) {
-        return sha256(concat(utf8(DomainTags.tag(DomainTags.I_SITE_KEY)), le64(siteSeed),
+        return sha256(concat(UmbraCrypto.domain(UmbraCrypto.K5), le64(siteSeed),
                 le32(siteId)));
     }
 
     public static byte[] stringSiteNonce(long siteSeed, int siteId) {
-        return first(sha256(concat(utf8(DomainTags.tag(DomainTags.I_SITE_NONCE)), le64(siteSeed),
-                le32(siteId))), NONCE_BYTES);
+        return first(sha256(concat(UmbraCrypto.domain(UmbraCrypto.K6),
+                le64(siteSeed), le32(siteId))), NONCE_BYTES);
     }
 
     public static byte[] stringClassNonce(byte[] classKey, int siteId) {
-        return first(sha256(concat(utf8(DomainTags.tag(DomainTags.I_CLASS_NONCE)), classKey,
+        return first(sha256(concat(UmbraCrypto.domain(UmbraCrypto.K7), classKey,
                 le32(siteId))), NONCE_BYTES);
     }
 
     public static byte[] aesIv(byte[] key, byte[] nonce) {
-        return first(sha256(concat(utf8(DomainTags.tag(DomainTags.I_AES_IV)), key, nonce)),
+        return first(sha256(concat(UmbraCrypto.domain(UmbraCrypto.K8), key, nonce)),
                 AES_IV_BYTES);
     }
 

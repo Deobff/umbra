@@ -26,7 +26,8 @@ import java.util.Map;
  *   <li>every JSON resource that looks like a mixin configuration;</li>
  *   <li>class-level loader/Mixin annotations and coremod interfaces;</li>
  *   <li>mixin configurations referenced from metadata;</li>
- *   <li>the {@link MixinAnalyzer} annotation analysis (merged).</li>
+ *   <li>the {@link MixinAnalyzer} annotation analysis (merged), including the
+ *       Mixin refmaps it resolves member references through.</li>
  * </ol>
  */
 public final class MinecraftAdapter {
@@ -59,7 +60,7 @@ public final class MinecraftAdapter {
             scan.warn("minecraft: class annotation scan failed: %s", e.getMessage());
         }
         resolvePending(pool, scan);
-        mergeMixinAnalysis(pool, scan);
+        mergeMixinAnalysis(pool, config, scan);
         if (!scan.detected()) {
             safeLog.debug("minecraft: no mod container metadata detected");
             return MinecraftProfile.NONE;
@@ -218,10 +219,11 @@ public final class MinecraftAdapter {
         }
     }
 
-    private static void mergeMixinAnalysis(ClassPool pool, MinecraftScan scan) {
+    private static void mergeMixinAnalysis(ClassPool pool, UmbraConfig config, MinecraftScan scan) {
         MixinAnalysis analysis;
         try {
-            analysis = MixinAnalyzer.analyze(pool);
+            boolean useRefmap = config == null || config.optionBool("minecraft.refmap", true);
+            analysis = MixinAnalyzer.analyze(pool, useRefmap);
         } catch (RuntimeException e) {
             scan.warn("minecraft: mixin annotation analysis failed: %s", e.getMessage());
             return;
@@ -247,6 +249,14 @@ public final class MinecraftAdapter {
         }
         for (String note : analysis.notes()) {
             scan.note(note);
+        }
+        for (String refmap : analysis.refmapFiles()) {
+            scan.preserveResource(refmap);
+            scan.evidence("mixin-refmap:" + refmap, "mixin refmap " + refmap);
+        }
+        if (!analysis.refmapHits().isEmpty()) {
+            scan.debug("minecraft: %d mixin reference(s) kept under their refmap production name",
+                    Integer.valueOf(analysis.refmapHits().size()));
         }
     }
 }

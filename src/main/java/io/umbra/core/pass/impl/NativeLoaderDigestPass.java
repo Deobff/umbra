@@ -77,7 +77,7 @@ public final class NativeLoaderDigestPass implements Pass {
 
             @Override
             public void process(Path output, PassContext run) throws Exception {
-                Map<String, byte[]> entries = read(output);
+                Map<String, byte[]> entries = read(output, !run.config().preserveTimestamps());
 
                 String publishedBridge = run.stats().text("classEncryption.bridgeEntry");
                 if (publishedBridge == null || publishedBridge.isEmpty()) {
@@ -217,9 +217,10 @@ public final class NativeLoaderDigestPass implements Pass {
         return found;
     }
 
-    private static Map<String, byte[]> read(Path archive) throws IOException {
+    private static Map<String, byte[]> read(Path archive, boolean fixed) throws IOException {
         Map<String, byte[]> entries = new LinkedHashMap<String, byte[]>();
         zipComment = null;
+        zipTimes = new LinkedHashMap<String, Long>();
         java.util.zip.ZipFile file = new java.util.zip.ZipFile(archive.toFile());
         try {
             zipComment = file.getComment();
@@ -238,6 +239,7 @@ public final class NativeLoaderDigestPass implements Pass {
                 }
                 in.close();
                 entries.put(entry.getName(), out.toByteArray());
+                zipTimes.put(entry.getName(), Long.valueOf(fixed ? FIXED_TIME : entry.getTime()));
             }
         } finally {
             file.close();
@@ -247,8 +249,14 @@ public final class NativeLoaderDigestPass implements Pass {
 
     private static String zipComment;
 
+    /** Entry timestamp per name, so the rewrite keeps them (fixed with --fixed-time). */
+    private static Map<String, Long> zipTimes = new LinkedHashMap<String, Long>();
+
+    /** 1980-01-01, the timestamp every deterministic Umbra writer uses. */
+    private static final long FIXED_TIME = 315532800000L;
+
     private static void write(Path archive, Map<String, byte[]> entries) throws IOException {
-        Path sibling = archive.resolveSibling(archive.getFileName() + ".digest-tmp");
+        Path sibling = io.umbra.core.util.SafeArchive.temporary(archive);
         List<String> order = new ArrayList<String>(entries.keySet());
         String manifest = "META-INF/MANIFEST.MF";
         if (order.remove(manifest)) {
@@ -260,6 +268,10 @@ public final class NativeLoaderDigestPass implements Pass {
             }
             for (String entryName : order) {
                 ZipEntry entry = new ZipEntry(entryName);
+                Long time = zipTimes.get(entryName);
+                // Keep the timestamp the writer produced: without this every rewrite
+                // stamped "now" on all entries and --fixed-time was a lie.
+                entry.setTime(time == null ? FIXED_TIME : time.longValue());
                 zip.putNextEntry(entry);
                 zip.write(entries.get(entryName));
                 zip.closeEntry();
@@ -276,6 +288,6 @@ public final class NativeLoaderDigestPass implements Pass {
                 check.close();
             }
         }
-        Files.move(sibling, archive, StandardCopyOption.REPLACE_EXISTING);
+        io.umbra.core.util.SafeArchive.publish(sibling, archive);
     }
 }

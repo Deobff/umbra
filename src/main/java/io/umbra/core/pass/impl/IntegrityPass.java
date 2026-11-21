@@ -372,8 +372,7 @@ public final class IntegrityPass implements Pass {
 
     static void rewrite(Path jar, Map<String, byte[]> entries, Map<String, Integer> methods)
             throws IOException {
-        Path parent = jar.toAbsolutePath().getParent();
-        Path temp = parent.resolve(jar.getFileName().toString() + ".umbra-tmp");
+        Path temp = io.umbra.core.util.SafeArchive.temporary(jar);
         try {
             try (ZipOutputStream out = new ZipOutputStream(Files.newOutputStream(temp))) {
                 for (Map.Entry<String, byte[]> entry : entries.entrySet()) {
@@ -394,14 +393,9 @@ public final class IntegrityPass implements Pass {
                     out.closeEntry();
                 }
             }
-            try {
-                Files.move(temp, jar, StandardCopyOption.REPLACE_EXISTING,
-                        StandardCopyOption.ATOMIC_MOVE);
-            } catch (java.nio.file.AtomicMoveNotSupportedException notAtomic) {
-                Files.move(temp, jar, StandardCopyOption.REPLACE_EXISTING);
-            }
+            io.umbra.core.util.SafeArchive.publish(temp, jar);
         } finally {
-            Files.deleteIfExists(temp);
+            io.umbra.core.util.SafeArchive.deleteQuietly(temp);
         }
     }
 

@@ -15,6 +15,7 @@ import io.umbra.core.retrace.StackTraceRetracer;
 import io.umbra.core.engine.EngineResult;
 import io.umbra.core.engine.UmbraEngine;
 import io.umbra.core.engine.UmbraVerifier;
+import io.umbra.core.util.FailureReport;
 import io.umbra.core.util.Log;
 
 import java.nio.file.Files;
@@ -29,7 +30,7 @@ import java.util.Map;
 /** Command-line entry point. */
 public final class Main {
 
-    private static final String VERSION = "3.4.0";
+    private static final String VERSION = "3.4.1";
 
     private Main() {
     }
@@ -38,12 +39,18 @@ public final class Main {
 
         if (args.length == 0 || "gui".equals(args[0]) || "--gui".equals(args[0])) {
             if (!launchConsole()) {
+                // launchConsole printed what is missing; the reason line keeps a
+                // double-clicked start from dying in silence.
+                System.out.println("[ERROR] The desktop console could not be started "
+                        + "(see the notes above). Run the engine directly with "
+                        + "java -jar umbra.jar -i <input.jar> -o <output.jar> instead.");
                 System.exit(1);
             }
             return;
         }
+        Args parsed = null;
         try {
-            Args parsed = Args.parse(args);
+            parsed = Args.parse(args);
             if (parsed.help) {
                 usage();
                 return;
@@ -147,6 +154,8 @@ public final class Main {
                     }
                 }
             }, parsed.verbose);
+            FailureReport.attachLog(log);
+            FailureReport.fact("version", VERSION);
 
             if (parsed.config == null && (parsed.license != null || parsed.requireLicense)) {
                 if (parsed.license == null) {
@@ -181,15 +190,12 @@ public final class Main {
                 System.out.println("Umbra finished: " + result.classes() + " classes, "
                         + result.resources() + " resources in " + result.millis() + " ms");
                 if (parsed.verify) {
+                    FailureReport.phase("verify");
                     List<String> errors = UmbraVerifier.verify(config.output(), config.libraries());
                     if (errors.isEmpty()) {
                         System.out.println("Verification: OK");
                     } else {
-                        System.err.println("Verification failed for " + errors.size() + " class(es):");
-                        for (String error : errors) {
-                            System.err.println("  " + error);
-                        }
-                        System.exit(2);
+                        failVerification(errors, parsed, args);
                     }
                 }
             }
@@ -205,33 +211,172 @@ public final class Main {
                             + reportFailure.getMessage());
                 }
             }
-        } catch (ConfigException e) {
-            System.err.println("Configuration error: " + e.getMessage());
-            usage();
-            System.exit(1);
-        } catch (LicenseException e) {
-            System.err.println("License error: " + e.getMessage());
-            System.exit(3);
-        } catch (java.util.concurrent.CancellationException e) {
-            System.err.println("Umbra cancelled");
-            System.exit(130);
-        } catch (java.util.zip.ZipException e) {
-            System.err.println("Input is not a readable JAR: " + e.getMessage());
-            System.exit(1);
-        } catch (java.nio.file.NoSuchFileException e) {
-            System.err.println("File not found: " + e.getFile());
-            System.exit(1);
-        } catch (java.io.FileNotFoundException e) {
-            System.err.println("File not found: " + e.getMessage());
-            System.exit(1);
-        } catch (java.io.IOException e) {
-            System.err.println("Umbra failed: " + e.getMessage());
-            System.exit(1);
-        } catch (Exception e) {
-            System.err.println("Umbra failed: " + e.getMessage());
-            e.printStackTrace();
-            System.exit(1);
+        } catch (Throwable failure) {
+            handleFailure(failure, parsed, args);
         }
+    }
+
+    /**
+     * Turns any failure of the run into one reason the user can act on.
+     *
+     * <p>Before this existed a failed run printed a single line on stderr (and an
+     * {@link Error} was not caught at all), so the desktop console - which only
+     * shows the child's stdout - reported "finished with exit 1" with no reason,
+     * and nothing was left behind to look at afterwards. This prints a reason on
+     * BOTH streams (stdout for the console and the plugins, stderr for scripts),
+     * names the phase/pass that failed, prints an actionable hint and writes a
+     * failure report next to the output with the full stack, the effective
+     * options, the environment and the tail of the run log.</p>
+     */
+    private static void handleFailure(Throwable failure, Args parsed, String[] argv) {
+        int code = 1;
+        boolean showUsage = false;
+        String summary;
+        if (failure instanceof ConfigException) {
+            summary = "Configuration error: " + describe(failure);
+            showUsage = true;
+            FailureReport.phase("configuration");
+        } else if (failure instanceof LicenseException) {
+            summary = "License error: " + describe(failure);
+            code = 3;
+        } else if (failure instanceof java.util.concurrent.CancellationException) {
+            summary = "Umbra cancelled";
+            code = 130;
+        } else if (failure instanceof java.util.zip.ZipException) {
+            summary = "Input is not a readable JAR: " + describe(failure);
+        } else if (failure instanceof java.nio.file.NoSuchFileException) {
+            summary = "File not found: " + ((java.nio.file.NoSuchFileException) failure).getFile();
+        } else if (failure instanceof java.io.FileNotFoundException) {
+            summary = "File not found: " + describe(failure);
+        } else if (failure instanceof OutOfMemoryError) {
+            summary = "Umbra ran out of memory";
+        } else if (failure instanceof StackOverflowError) {
+            summary = "Umbra ran out of stack";
+        } else if (failure instanceof java.io.IOException) {
+            summary = "Umbra failed: " + describe(failure);
+        } else if (failure instanceof Error) {
+            summary = "Umbra crashed: " + describe(failure);
+        } else {
+            summary = "Umbra failed: " + describe(failure);
+        }
+        try {
+            FailureReport.fact("version", VERSION);
+            FailureReport.fact("command", "java " + System.getProperty("sun.java.command", commandLine(argv)));
+            if (parsed != null) {
+                recordTargets(parsed);
+            }
+            FailureReport.render(System.err, summary, failure);
+            java.nio.file.Path report = writeFailureReport(parsed, summary, failure, code, null);
+            StringBuilder reason = new StringBuilder("[ERROR] ").append(summary)
+                    .append(" (").append(FailureReport.contextLine()).append(')');
+            if (report != null) {
+                reason.append(" -- full report: ").append(report.toAbsolutePath());
+            } else {
+                reason.append(" -- ").append(FailureReport.hint(failure));
+            }
+            // stdout too: the desktop console reads only the child's stdout, so the
+            // reason has to be on that stream as well as on stderr.
+            System.out.println(reason.toString());
+            System.out.flush();
+        } catch (Throwable reporterFailure) {
+            System.err.println("[ERROR] " + summary + " (the failure report itself could not be written: "
+                    + reporterFailure + ")");
+        }
+        if (showUsage) {
+            usage();
+        }
+        System.exit(code);
+    }
+
+    /** Prints the verification failures with a reason and a report, then exits 2. */
+    private static void failVerification(List<String> errors, Args parsed, String[] argv) {
+        System.err.println("Verification failed for " + errors.size() + " class(es):");
+        for (String error : errors) {
+            System.err.println("  " + error);
+        }
+        String summary = "Verification failed for " + errors.size() + " class(es)";
+        try {
+            FailureReport.phase("verify");
+            FailureReport.fact("version", VERSION);
+            FailureReport.fact("command", "java " + System.getProperty("sun.java.command", commandLine(argv)));
+            if (parsed != null) {
+                recordTargets(parsed);
+            }
+            java.nio.file.Path report = writeFailureReport(parsed, summary, null, 2, errors);
+            String first = errors.isEmpty() ? "" : errors.get(0);
+            StringBuilder reason = new StringBuilder("[ERROR] ").append(summary);
+            if (!first.isEmpty()) {
+                reason.append(": ").append(first);
+            }
+            if (report != null) {
+                reason.append(" -- full report: ").append(report.toAbsolutePath());
+            }
+            System.out.println(reason.toString());
+            System.out.flush();
+        } catch (Throwable reporterFailure) {
+            System.err.println("[ERROR] " + summary + " (" + reporterFailure + ")");
+        }
+        System.exit(2);
+    }
+
+    private static java.nio.file.Path writeFailureReport(Args parsed, String summary, Throwable failure,
+                                                         int code, List<String> extra) {
+        if (parsed != null && parsed.noFailureLog) {
+            return null;
+        }
+        java.nio.file.Path target = parsed != null && parsed.failureLog != null
+                ? Paths.get(parsed.failureLog) : null;
+        return FailureReport.write(target, null, summary, failure, code, VERSION,
+                commandLine(null), extra);
+    }
+
+    private static void recordTargets(Args parsed) {
+        if (parsed.input != null) {
+            FailureReport.fact("input", parsed.input);
+        }
+        if (parsed.output != null) {
+            FailureReport.fact("output", parsed.output);
+        }
+        if (parsed.config != null) {
+            FailureReport.fact("config", parsed.config);
+        }
+        if (parsed.preset != null) {
+            FailureReport.fact("preset", parsed.preset);
+        }
+        if (parsed.seed != null) {
+            FailureReport.fact("seed", parsed.seed.toString());
+        }
+    }
+
+    /** The command line as the user typed it, or the one recorded at the start. */
+    private static String commandLine(String[] argv) {
+        String recorded = FailureReport.fact("command");
+        if (recorded != null && !recorded.isEmpty()) {
+            return recorded;
+        }
+        if (argv == null) {
+            return "?";
+        }
+        StringBuilder out = new StringBuilder();
+        for (String part : argv) {
+            if (out.length() > 0) {
+                out.append(' ');
+            }
+            if (part != null && part.indexOf(' ') >= 0) {
+                out.append('"').append(part).append('"');
+            } else {
+                out.append(part);
+            }
+        }
+        return out.toString();
+    }
+
+    private static String describe(Throwable failure) {
+        String message = failure.getMessage();
+        if (message == null || message.trim().isEmpty()) {
+            return failure.getClass().getName();
+        }
+        return message;
     }
 
     private static void validateCliLicense(String licenseFile, String keyFile, boolean require, Log log) {
@@ -334,6 +479,19 @@ public final class Main {
         }
         if (args.seed != null) {
             b.seed(args.seed);
+        } else {
+            // Every build draws its own seed unless the caller pins one. Two
+            // archives built from the same seed carry the same key root, so a
+            // single recovery would cover both; a fresh seed per build keeps the
+            // default deployment unique. The value is printed and recorded so any
+            // archive can still be rebuilt bit for bit with --seed <value>.
+            long buildSeed = new java.security.SecureRandom().nextLong();
+            b.seed(buildSeed);
+            FailureReport.fact("seed", Long.toString(buildSeed));
+            if (log != null) {
+                log.info("build seed %d (pass --seed %d to reproduce this archive)",
+                        Long.valueOf(buildSeed), Long.valueOf(buildSeed));
+            }
         }
         Map<String, String> typedSets = new LinkedHashMap<String, String>();
         for (String assignment : args.sets) {
@@ -679,6 +837,8 @@ public final class Main {
         System.out.println("  --inspect-json <file>  write the inspection report as JSON and exit");
         System.out.println("  --dump-preset <name>   print the effective option values of a preset and exit");
         System.out.println("  --compat-report <json> write layout + run statistics JSON after the run");
+        System.out.println("  --failure-log <file>   write the failure report here (default: next to -o)");
+        System.out.println("  --no-failure-log       do not write a failure report file");
         System.out.println("  --diff-mapping <old> <new>  print a mapping difference and exit");
         System.out.println("  --trace-watermark <jar>     print embedded watermark(s) and exit");
         System.out.println("  --retrace <linemap> <trace> translate an obfuscated stack trace and exit");
@@ -687,7 +847,7 @@ public final class Main {
         System.out.println("  --license-server <url> online license server for revocation/feature checks");
         System.out.println("  --require-license      exit with code 3 when the license is missing/invalid");
         System.out.println("  --require-feature <f>  require a license feature (repeatable): audit, policy, ...");
-        System.out.println("  --seed <value>         deterministic seed");
+        System.out.println("  --seed <value>         reproduce a build (default: a fresh seed per run)");
         System.out.println("  --set, -D key=value    advanced option (repeatable); see docs/OPTIONS.md");
         System.out.println("  --dry-run              analyze only, do not write output");
         System.out.println("  --verify               load output classes to force JVM verification");
@@ -770,6 +930,8 @@ public final class Main {
         Long seed;
 
         String dumpPreset;
+        String failureLog;
+        boolean noFailureLog;
         boolean dryRun;
         boolean verify;
         boolean allowInPlace;
@@ -895,6 +1057,10 @@ public final class Main {
                     a.inspectJson = value(argv, ++i, arg);
                 } else if ("--dump-preset".equals(arg)) {
                     a.dumpPreset = value(argv, ++i, arg);
+                } else if ("--failure-log".equals(arg)) {
+                    a.failureLog = value(argv, ++i, arg);
+                } else if ("--no-failure-log".equals(arg)) {
+                    a.noFailureLog = true;
 
                 } else if ("--compat-report".equals(arg)) {
                     a.compatReport = value(argv, ++i, arg);

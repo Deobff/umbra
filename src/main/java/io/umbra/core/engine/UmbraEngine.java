@@ -19,6 +19,15 @@ import io.umbra.core.model.Hierarchy;
 import io.umbra.core.minecraft.MinecraftAdapter;
 import io.umbra.core.minecraft.MinecraftProfile;
 import io.umbra.core.pass.impl.AntiLlmPass;
+import io.umbra.core.pass.impl.BodyOptimizePass;
+import io.umbra.core.pass.impl.BranchShapePass;
+import io.umbra.core.pass.impl.ClassInitOrderPass;
+import io.umbra.core.pass.impl.DefinalizePass;
+import io.umbra.core.pass.impl.FlowIntsPass;
+import io.umbra.core.pass.impl.NumberHashPass;
+import io.umbra.core.pass.impl.OpaquePass;
+import io.umbra.core.pass.impl.polystring.PolyStringPass;
+import io.umbra.core.pass.impl.SaltPass;
 import io.umbra.core.pass.impl.NativeLoaderDigestPass;
 import io.umbra.core.pass.impl.AuthGatePass;
 import io.umbra.core.pass.impl.ClassEncryptionPass;
@@ -56,6 +65,7 @@ import io.umbra.core.rules.RuleSet;
 import io.umbra.core.runtime.DefaultRuntimeSupport;
 import io.umbra.core.util.AsmUtil;
 import io.umbra.core.util.DomainTags;
+import io.umbra.core.util.FailureReport;
 import io.umbra.core.util.Jars;
 import io.umbra.core.util.Log;
 import org.objectweb.asm.tree.ClassNode;
@@ -86,8 +96,30 @@ public final class UmbraEngine {
 
     public EngineResult run(UmbraConfig config, ProgressListener progress) throws Exception {
         long start = System.currentTimeMillis();
-        ProgressListener listener = progress == null ? ProgressListener.NONE : progress;
+        final ProgressListener delegate = progress == null ? ProgressListener.NONE : progress;
+        ProgressListener listener = new ProgressListener() {
+            @Override
+            public void onProgress(int percent, String message) {
+                FailureReport.progress(percent, message);
+                delegate.onProgress(percent, message);
+            }
 
+            @Override
+            public boolean isCancelled() {
+                return delegate.isCancelled();
+            }
+        };
+        FailureReport.reset();
+        FailureReport.fact("input", String.valueOf(config.input()));
+        FailureReport.fact("output", String.valueOf(config.output()));
+        FailureReport.fact("seed", Long.toString(config.seed()));
+        FailureReport.fact("preset", String.valueOf(config.preset()));
+        // The previous output must survive a failed run: it is the last artifact the
+        // user has, and deleting it on a transient failure loses their build.
+        boolean outputExistedBefore = config.output() != null && Files.exists(config.output());
+
+        FailureReport.phase("loading input");
+        warnIfHeapIsTight(config);
         listener.onProgress(2, "Loading input " + config.input());
         ClassPool pool = new ClassPool();
         JarLayout layout = Jars.read(config.input(), pool, log, config.options());
@@ -95,6 +127,12 @@ public final class UmbraEngine {
                 pool.classes().size(), pool.resources().size(), config.input(),
                 layout == null ? "flat" : layout.describe());
 
+        FailureReport.phase("building hierarchy");
+        FailureReport.fact("classes.loaded", Integer.toString(pool.classes().size()));
+        FailureReport.fact("resources.loaded", Integer.toString(pool.resources().size()));
+        if (layout != null) {
+            FailureReport.fact("layout", layout.describe());
+        }
         listener.onProgress(8, "Building hierarchy");
 
         RuntimeNames.configure(config, pool);
@@ -110,6 +148,7 @@ public final class UmbraEngine {
             loadLibrary(library, hierarchy);
         }
 
+        FailureReport.phase("inspecting mod container");
         listener.onProgress(9, "Inspecting mod container");
         MinecraftProfile minecraft = config.optionBool("minecraft.enabled", true)
                 ? MinecraftAdapter.detect(pool, config, log) : MinecraftProfile.NONE;
@@ -223,6 +262,44 @@ public final class UmbraEngine {
             rules.addKeepRule("org.eclipse.jdt.internal.jarinjarloader.**");
             rules.addBodySkipGlob("org.eclipse.jdt.internal.jarinjarloader.**");
             log.info("layout: Eclipse loader kept verbatim (names and bodies)");
+            if (config.optionBool("integrity.enabled", false)) {
+                // The integrity seal verifies the root archive from a launcher that owns
+                // the manifest entry point. Here the entry point is the frozen Rsrc loader,
+                // which starts the nested libraries before any keyed guard can run, so the
+                // injected check fails at boot with "Integrity key root is unavailable".
+                config = config.toBuilder()
+                        .option("integrity.enabled", "false")
+                        .build();
+                stats.add("integrity.skipped.layout", 1);
+                stats.text("layout.guard.integrity", "skipped:eclipse-runnable-jar");
+                log.warn("layout: the integrity seal is a root-JAR launcher construct and cannot "
+                        + "host the Eclipse Rsrc loader; integrity is OFF for this archive while "
+                        + "renaming, flow, string and native transforms still run");
+            }
+            if (config.optionBool("classEncryption.enabled", false)
+                    && !config.optionBool("layout.forceEntryProtection", false)) {
+                // The JarRsrcLoader boots the nested libraries before a single root class
+                // runs, so it can never decrypt an encrypted archive. Detect it here, next
+                // to the loader keep rules, instead of letting the encryption pass refuse
+                // the whole run at 85 percent; every other transform still applies.
+                config = config.toBuilder()
+                        .option("classEncryption.enabled", "false")
+                        // The native-root binding and the string key tier live in the class
+                        // layer that just went away; accept the documented fallback tier
+                        // explicitly instead of letting string encryption refuse the run.
+                        .option("classEncryption.nativeKey.fallback", "true")
+                        .option("layout.classEncryptionSkipped", "true")
+                        .option("layout.classEncryptionSkipReason", "eclipse-runnable-jar")
+                        .build();
+                stats.add("classEncryption.skipped.layout", 1);
+                stats.text("classEncryption.skipReason", "eclipse-runnable-jar");
+                log.warn("layout: an Eclipse runnable jar starts through its JarRsrcLoader, which "
+                        + "loads the nested libraries before any root class can run; class "
+                        + "encryption is OFF and the string key tier falls back to the documented "
+                        + "seed tier for this archive while renaming, flow, string encryption and "
+                        + "the native guard still run (set layout.forceEntryProtection=true to "
+                        + "attempt sealing anyway)");
+            }
         }
         for (String rule : minecraft.softKeepRules()) {
             rules.addKeepRule(rule);
@@ -238,6 +315,7 @@ public final class UmbraEngine {
         PassContext context = new PassContext(config, pool, hierarchy, rules, runtime,
                 mappings, stats, log, random, listener);
 
+        FailureReport.phase("preparing transforms");
         List<Pass> passes = passes();
         Collections.sort(passes, new Comparator<Pass>() {
             @Override
@@ -258,14 +336,20 @@ public final class UmbraEngine {
                 continue;
             }
             int percent = 10 + (int) (80.0 * (index - 1) / Math.max(1, passes.size()));
+            FailureReport.phase("transforms");
+            FailureReport.pass(pass.name());
             listener.onProgress(percent, "Running " + pass.name());
             long passStart = System.currentTimeMillis();
             log.info("Pass %s started", pass.name());
             try {
                 pass.run(context);
             } catch (RuntimeException | Error failure) {
-
-                discardOutput(config);
+                // Name the pass before the failure leaves the engine: "Umbra failed:
+                // null" with no stage is what made the console report useless.
+                log.error("Pass %s (%s) failed after %d ms: %s", pass.name(),
+                        pass.getClass().getSimpleName(), System.currentTimeMillis() - passStart,
+                        FailureReport.causeLine(failure));
+                discardNewOutput(config, outputExistedBefore);
                 throw failure;
             }
             long elapsed = System.currentTimeMillis() - passStart;
@@ -284,6 +368,8 @@ public final class UmbraEngine {
             log.info("version-safety: upgraded %d class(es) to a class file version that supports their constants",
                     versionBumped);
         }
+        FailureReport.phase("writing output");
+        FailureReport.pass(null);
         listener.onProgress(92, "Writing " + config.output());
         LayoutReport layoutReport = Jars.write(config.output(), pool, hierarchy,
                 config.preserveTimestamps(), log, config.options(),
@@ -303,14 +389,20 @@ public final class UmbraEngine {
             listener.onProgress(93 + (int) (5.0 * postIndex / Math.max(1, context.postProcessors().size())),
                     "Post-processing " + processor.name());
             long postStart = System.currentTimeMillis();
+            FailureReport.phase("post-processing");
+            FailureReport.fact("postProcessor", processor.name());
             log.info("Post-processor %s started", processor.name());
             try {
                 processor.process(config.output(), context);
             } catch (RuntimeException | Error failure) {
-                discardOutput(config);
+                log.error("Post-processor %s failed: %s", processor.name(),
+                        FailureReport.causeLine(failure));
+                discardNewOutput(config, outputExistedBefore);
                 throw failure;
             } catch (java.io.IOException failure) {
-                discardOutput(config);
+                log.error("Post-processor %s failed: %s", processor.name(),
+                        FailureReport.causeLine(failure));
+                discardNewOutput(config, outputExistedBefore);
                 throw failure;
             }
             long postElapsed = System.currentTimeMillis() - postStart;
@@ -362,12 +454,48 @@ public final class UmbraEngine {
         return result;
     }
 
-    private static void discardOutput(UmbraConfig config) {
+    /**
+     * Warns when the input is large next to the heap. An archive this size can
+     * exhaust a default heap, and then the same command fails on one machine and
+     * succeeds on another - the classic "it only fails sometimes" report.
+     */
+    private void warnIfHeapIsTight(UmbraConfig config) {
+        try {
+            Path input = config.input();
+            if (input == null || !Files.isRegularFile(input)) {
+                return;
+            }
+            long size = Files.size(input);
+            long max = Runtime.getRuntime().maxMemory();
+            if (size <= 0L || max <= 0L || size <= max / 8L) {
+                return;
+            }
+            long suggested = Math.max(max / (1024L * 1024L) * 4L, size / (1024L * 1024L) * 8L);
+            log.warn("input is %d MB and the JVM heap is %d MB; protecting an archive this size "
+                            + "can end in an OutOfMemoryError. Re-run with -Xmx%dm or larger",
+                    Long.valueOf(size / (1024L * 1024L)), Long.valueOf(max / (1024L * 1024L)),
+                    Long.valueOf(suggested));
+        } catch (Throwable ignored) {
+
+        }
+    }
+
+    /**
+     * Removes a half-written output after a failure, but never a jar that was
+     * already there before this run started: a transient failure must not delete
+     * the last artifact the user has.
+     */
+    private static void discardNewOutput(UmbraConfig config, boolean existedBefore) {
+        if (existedBefore) {
+            return;
+        }
         try {
             Path output = config.output();
-            if (output != null && java.nio.file.Files.deleteIfExists(output)) {
-
+            if (output != null) {
+                java.nio.file.Files.deleteIfExists(output);
             }
+            // The writers clean their own temporary sibling up in a finally block;
+            // only a killed JVM can leave one behind, so nothing else to do here.
         } catch (Throwable ignored) {
 
         }
@@ -379,6 +507,12 @@ public final class UmbraEngine {
         passes.add(new KeyRootPublishPass());
         passes.add(new ReflectionAnalysisPass());
         passes.add(new MemberTrimPass());
+        // Ported layers: the reference implementation's object definalizer, the reference implementation's class
+        // initialisation order and salt system. They only run when their own
+        // option is set, so a default build keeps its historical byte stream.
+        passes.add(new DefinalizePass());
+        passes.add(new ClassInitOrderPass());
+        passes.add(new SaltPass());
         passes.add(new FieldInitializationPass());
         passes.add(new DebugInfoPass());
         passes.add(new MemberShufflePass());
@@ -390,17 +524,28 @@ public final class UmbraEngine {
         passes.add(new VirtualizationPass());
         passes.add(new ResourcePathObfuscationPass());
         passes.add(new ReferenceObfuscationPass());
+        // Per-class polymorphic decoders run one step before the classic string
+        // engine: they consume the sites they select and leave the rest untouched.
+        passes.add(new PolyStringPass());
         passes.add(new StringEncryptionPass());
+        passes.add(new NumberHashPass());
         passes.add(new IntegerEncryptionPass());
         passes.add(new FlowObfuscationPass());
         passes.add(new ControlFlowFlatteningPass());
         passes.add(new ExceptionObfuscationPass());
         passes.add(new JunkMemberPass());
+        passes.add(new BodyOptimizePass());
         passes.add(new WatermarkPass());
         passes.add(new AntiDebugPass());
         passes.add(new AuthGatePass());
         passes.add(new ReflectionGatePass());
         passes.add(new MbaPass());
+        // Seed-chain opaque predicates and branch-shape rewrites sit between MBA and
+        // the flattening layer; flow ints run after flow itself so they see the
+        // final block structure.
+        passes.add(new OpaquePass());
+        passes.add(new BranchShapePass());
+        passes.add(new FlowIntsPass());
         passes.add(new NocturnePass());
         passes.add(new DecompilerNoisePass());
         passes.add(new NativeGuardPass());

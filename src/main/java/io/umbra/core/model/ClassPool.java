@@ -26,6 +26,8 @@ public final class ClassPool {
     private final Map<String, Resource> resources = new LinkedHashMap<String, Resource>();
     private final Set<String> frozen = new LinkedHashSet<String>();
     private final Map<String, byte[]> rawOutput = new LinkedHashMap<String, byte[]>();
+    private final Map<String, byte[]> opaqueEntries = new LinkedHashMap<String, byte[]>();
+    private final Map<String, Long> opaqueTimes = new LinkedHashMap<String, Long>();
 
     private String mainClass;
 
@@ -111,6 +113,33 @@ public final class ClassPool {
         if (wasGenerated) {
             generated.add(newName);
         }
+    }
+
+    /**
+     * Registers an entry that only looks like a class file but whose path does not
+     * name the class inside it: payload data such as code generator templates.
+     * Opaque entries are written back byte-identically at their original path and
+     * never renamed, rewritten, verified or encrypted.
+     */
+    public void putOpaque(String entryName, byte[] bytes, long time) {
+        if (entryName == null || bytes == null) {
+            return;
+        }
+        opaqueEntries.put(entryName, bytes);
+        opaqueTimes.put(entryName, Long.valueOf(time));
+    }
+
+    public boolean isOpaque(String entryName) {
+        return opaqueEntries.containsKey(entryName);
+    }
+
+    public Map<String, byte[]> opaqueEntries() {
+        return Collections.unmodifiableMap(opaqueEntries);
+    }
+
+    public long opaqueTime(String entryName) {
+        Long time = opaqueTimes.get(entryName);
+        return time == null ? 0L : time.longValue();
     }
 
     public void removeClass(String name) {

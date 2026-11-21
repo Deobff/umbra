@@ -55,13 +55,14 @@ import java.util.concurrent.ConcurrentHashMap;
  * into a report), bit 2 enables the opt-in plaintext memoization cache. With
  * bit 2 clear (the 3.2 default) the class does not even allocate the map.</p>
  *
- * <p>Payload format v3 adds a build-time artifact salt, substituted through
- * {@code @@SALT@@}. It is mixed into the class-key, per-site seed, key and
- * nonce derivations below, so the historical fixed domain strings are no
+ * <p>Payload format v3 mixes a build-time artifact salt into the class-key and
+ * per-site seed derivations below, so the historical fixed domain words are no
  * longer a universal key schedule: the same input protected by two builds with
- * different seeds produces unrelated key material. Each protected archive is
- * self-contained (it carries its own decryptor bytecode), so old 3.x archives
- * keep working unchanged; no cross-version reader is needed.</p>
+ * different seeds produces unrelated key material. The salt is a build-time
+ * input only - the runtime receives it folded into the per-class key and the
+ * per-site seed, so this class no longer stores it. Up to 3.4.0 it sat here as
+ * a {@code @@SALT@@} string constant, which meant the salt that keys the whole
+ * string layer was one readable constant-pool entry away from the payload.</p>
  *
  * <p>Runtime template: no nested/anonymous classes and no references to other
  * Umbra classes (the {@link UmbraCrypto} reference is remapped by
@@ -81,8 +82,6 @@ public final class UmbraStringCipher {
 
     private static final String FLAGS_SPEC = "@@FLAGS@@";
 
-    private static final String SALT_SPEC = "@@SALT@@";
-
     private static final int FLAGS = parseFlags(FLAGS_SPEC);
     private static final boolean WIPE = (FLAGS & 1) != 0;
     private static final boolean HIDE_TRACE = (FLAGS & 2) != 0;
@@ -90,8 +89,6 @@ public final class UmbraStringCipher {
 
     private static final ConcurrentHashMap<String, String> CACHE =
             CACHE_ENABLED ? new ConcurrentHashMap<String, String>() : null;
-
-    private static final long SALT = parseLong(SALT_SPEC);
 
     private static int lastEngine = -1;
 
@@ -150,53 +147,21 @@ public final class UmbraStringCipher {
                 classKeyBase64 != null && classKeyBase64.length() > 0, false, -1);
     }
 
-    private static final String LIT_CLASS_KEY = "io.umbra.string.v3.class.key";
-    private static final String LIT_SITE_SEED = "io.umbra.string.v3.site.seed";
-    private static final String LIT_SITE_KEY = "io.umbra.string.v3.site.key";
-    private static final String LIT_SITE_NONCE = "io.umbra.string.v3.site.nonce";
-    private static final String LIT_CLASS_NONCE = "io.umbra.string.v3.class.nonce";
-    private static final String LIT_ARTIFACT_SALT = "io.umbra.string.v3.artifact.salt";
-    private static final String LIT_USER_SALT = "io.umbra.string.v3.user.salt";
-    private static final String LIT_RC4_KEY = "io.umbra.string.rc4.key.v1";
-    private static final String LIT_SPECK_KEY = "io.umbra.string.speck.key.v1";
-
-    private static String TAG_CLASS_KEY = LIT_CLASS_KEY;
-    private static String TAG_SITE_SEED = LIT_SITE_SEED;
-    private static String TAG_SITE_KEY = LIT_SITE_KEY;
-    private static String TAG_SITE_NONCE = LIT_SITE_NONCE;
-    private static String TAG_CLASS_NONCE = LIT_CLASS_NONCE;
-    private static String TAG_ARTIFACT_SALT = LIT_ARTIFACT_SALT;
-    private static String TAG_USER_SALT = LIT_USER_SALT;
-    private static String TAG_RC4_KEY = LIT_RC4_KEY;
-    private static String TAG_SPECK_KEY = LIT_SPECK_KEY;
-
-    public static void applyDomainTags(java.util.Map<String, String> tags) {
-        TAG_CLASS_KEY = pick(tags, LIT_CLASS_KEY);
-        TAG_SITE_SEED = pick(tags, LIT_SITE_SEED);
-        TAG_SITE_KEY = pick(tags, LIT_SITE_KEY);
-        TAG_SITE_NONCE = pick(tags, LIT_SITE_NONCE);
-        TAG_CLASS_NONCE = pick(tags, LIT_CLASS_NONCE);
-        TAG_ARTIFACT_SALT = pick(tags, LIT_ARTIFACT_SALT);
-        TAG_USER_SALT = pick(tags, LIT_USER_SALT);
-        TAG_RC4_KEY = pick(tags, LIT_RC4_KEY);
-        TAG_SPECK_KEY = pick(tags, LIT_SPECK_KEY);
-    }
-
-    private static String pick(java.util.Map<String, String> tags, String literal) {
-        String value = tags.get(literal);
-        return value == null ? literal : value;
-    }
+    // Domain separators are 4-byte words owned by UmbraCrypto (D_*); they used to
+    // be self-describing ASCII labels that the build rewrote into random hex and
+    // that still ended up readable in this class's constant pool. See
+    // UmbraCrypto.D_* for the numbering contract.
 
     public static byte[] classKeyV2(long salt, long buildSeed, String className) {
         return UmbraCrypto.sha256(UmbraCrypto.concat(
-                UmbraCrypto.utf8(TAG_CLASS_KEY),
+                UmbraCrypto.domain(UmbraCrypto.K9),
                 UmbraCrypto.le64(salt), UmbraCrypto.le64(buildSeed),
                 UmbraCrypto.utf8(className)));
     }
 
     public static long siteSeedV2(long salt, long buildSeed, String className, int siteId) {
         byte[] digest = UmbraCrypto.sha256(UmbraCrypto.concat(
-                UmbraCrypto.utf8(TAG_SITE_SEED),
+                UmbraCrypto.domain(UmbraCrypto.K10),
                 UmbraCrypto.le64(salt), UmbraCrypto.le64(buildSeed),
                 UmbraCrypto.utf8(className), UmbraCrypto.le32(siteId)));
         return readLongLE(digest, 0);
@@ -204,48 +169,50 @@ public final class UmbraStringCipher {
 
     public static byte[] siteKeyV2(long salt, long siteSeed, int siteId) {
         return UmbraCrypto.sha256(UmbraCrypto.concat(
-                UmbraCrypto.utf8(TAG_SITE_KEY),
+                UmbraCrypto.domain(UmbraCrypto.K11),
                 UmbraCrypto.le64(salt), UmbraCrypto.le64(siteSeed), UmbraCrypto.le32(siteId)));
     }
 
     public static byte[] siteNonceV2(long salt, long siteSeed, int siteId) {
         return UmbraCrypto.first(UmbraCrypto.sha256(UmbraCrypto.concat(
-                UmbraCrypto.utf8(TAG_SITE_NONCE),
+                UmbraCrypto.domain(UmbraCrypto.K12),
                 UmbraCrypto.le64(salt), UmbraCrypto.le64(siteSeed), UmbraCrypto.le32(siteId))),
                 12);
     }
 
     public static byte[] classNonceV2(long salt, byte[] classKey, int siteId) {
         return UmbraCrypto.first(UmbraCrypto.sha256(UmbraCrypto.concat(
-                UmbraCrypto.utf8(TAG_CLASS_NONCE),
+                UmbraCrypto.domain(UmbraCrypto.K13),
                 UmbraCrypto.le64(salt), classKey, UmbraCrypto.le32(siteId))), 12);
     }
 
-    public static byte[] siteKeyV4(byte[] root, long salt, long siteSeed, int siteId,
-                                   byte[] payloadSalt) {
-        return UmbraCrypto.sha256(rooted(root, TAG_SITE_KEY, UmbraCrypto.le64(salt),
+    // The artifact salt is no longer a parameter here. It reaches this layer
+    // through the values that already carry it: siteSeed comes from siteSeedV2()
+    // (which mixes the salt) and classKey from classKeyV4() (same). Keeping it as
+    // a third copy meant the injected decryptor had to store the salt in its own
+    // constant pool, where it was readable - a build-time-only parameter now.
+    public static byte[] siteKeyV4(byte[] root, long siteSeed, int siteId, byte[] payloadSalt) {
+        return UmbraCrypto.sha256(rooted(root, UmbraCrypto.K11,
                 UmbraCrypto.le64(siteSeed), UmbraCrypto.le32(siteId), payloadSalt));
     }
 
-    public static byte[] siteNonceV4(byte[] root, long salt, long siteSeed, int siteId,
-                                     byte[] payloadSalt) {
-        return UmbraCrypto.first(UmbraCrypto.sha256(rooted(root, TAG_SITE_NONCE,
-                UmbraCrypto.le64(salt), UmbraCrypto.le64(siteSeed), UmbraCrypto.le32(siteId),
-                payloadSalt)), 12);
+    public static byte[] siteNonceV4(byte[] root, long siteSeed, int siteId, byte[] payloadSalt) {
+        return UmbraCrypto.first(UmbraCrypto.sha256(rooted(root, UmbraCrypto.K12,
+                UmbraCrypto.le64(siteSeed), UmbraCrypto.le32(siteId), payloadSalt)), 12);
     }
 
-    public static byte[] classNonceV4(byte[] root, long salt, byte[] classKey, int siteId,
+    public static byte[] classNonceV4(byte[] root, byte[] classKey, int siteId,
                                       byte[] payloadSalt) {
-        return UmbraCrypto.first(UmbraCrypto.sha256(rooted(root, TAG_CLASS_NONCE,
-                UmbraCrypto.le64(salt), classKey, UmbraCrypto.le32(siteId), payloadSalt)), 12);
+        return UmbraCrypto.first(UmbraCrypto.sha256(rooted(root, UmbraCrypto.K13,
+                classKey, UmbraCrypto.le32(siteId), payloadSalt)), 12);
     }
 
     public static long payloadStreamSeed(long siteSeed, byte[] payloadSalt) {
         return siteSeed ^ readLongLE(payloadSalt, 0);
     }
 
-    private static byte[] rooted(byte[] root, String tag, byte[]... parts) {
-        byte[] tagBytes = UmbraCrypto.utf8(tag);
+    private static byte[] rooted(byte[] root, int domain, byte[]... parts) {
+        byte[] tagBytes = UmbraCrypto.domain(domain);
         if (root == null) {
             byte[][] all = new byte[parts.length + 1][];
             all[0] = tagBytes;
@@ -328,13 +295,13 @@ public final class UmbraStringCipher {
     }
 
     public static byte[] classKeyV4(byte[] root, long salt, long buildSeed, String className) {
-        return UmbraCrypto.sha256(rooted(root, TAG_CLASS_KEY,
+        return UmbraCrypto.sha256(rooted(root, UmbraCrypto.K9,
                 UmbraCrypto.le64(salt), UmbraCrypto.le64(buildSeed), UmbraCrypto.utf8(className)));
     }
 
     public static long deriveArtifactSalt(long buildSeed) {
         byte[] digest = UmbraCrypto.sha256(UmbraCrypto.concat(
-                UmbraCrypto.utf8(TAG_ARTIFACT_SALT),
+                UmbraCrypto.domain(UmbraCrypto.K14),
                 UmbraCrypto.le64(buildSeed)));
         long salt = readLongLE(digest, 0);
         return salt == 0L ? 0x5A17C0DEL : salt;
@@ -342,7 +309,7 @@ public final class UmbraStringCipher {
 
     public static long hashSaltText(String text) {
         byte[] digest = UmbraCrypto.sha256(UmbraCrypto.concat(
-                UmbraCrypto.utf8(TAG_USER_SALT), UmbraCrypto.utf8(text)));
+                UmbraCrypto.domain(UmbraCrypto.K15), UmbraCrypto.utf8(text)));
         long salt = readLongLE(digest, 0);
         return salt == 0L ? 0x5A17C0DEL : salt;
     }
@@ -405,10 +372,10 @@ public final class UmbraStringCipher {
                 if (perClass) {
                     classKey = UmbraCrypto.base64Decode(classKeyBase64);
                     key = classKey;
-                    nonce = classNonceV4(root, SALT, classKey, siteId, payloadSalt);
+                    nonce = classNonceV4(root, classKey, siteId, payloadSalt);
                 } else {
-                    key = siteKeyV4(root, SALT, siteSeed, siteId, payloadSalt);
-                    nonce = siteNonceV4(root, SALT, siteSeed, siteId, payloadSalt);
+                    key = siteKeyV4(root, siteSeed, siteId, payloadSalt);
+                    nonce = siteNonceV4(root, siteSeed, siteId, payloadSalt);
                     temporaryKey = true;
                 }
 
@@ -521,10 +488,10 @@ public final class UmbraStringCipher {
                 return UmbraCrypto.aesCtr(key, UmbraCrypto.aesIv(key, nonce), data);
             case RC4:
                 return rc4(UmbraCrypto.sha256(UmbraCrypto.concat(
-                        UmbraCrypto.utf8(TAG_RC4_KEY), key, nonce)), data);
+                        UmbraCrypto.domain(UmbraCrypto.K16), key, nonce)), data);
             case SPECK:
                 return speckCtr(UmbraCrypto.first(UmbraCrypto.sha256(UmbraCrypto.concat(
-                        UmbraCrypto.utf8(TAG_SPECK_KEY), key, nonce)), 16), nonce, data);
+                        UmbraCrypto.domain(UmbraCrypto.K17), key, nonce)), 16), nonce, data);
             default:
                 return UmbraCrypto.chacha20(key, nonce, 1, data);
         }
@@ -632,17 +599,6 @@ public final class UmbraStringCipher {
             return Integer.parseInt(value.trim());
         } catch (NumberFormatException ignored) {
             return 0;
-        }
-    }
-
-    private static long parseLong(String value) {
-        if (value == null) {
-            return 0L;
-        }
-        try {
-            return Long.parseLong(value.trim());
-        } catch (NumberFormatException ignored) {
-            return 0L;
         }
     }
 

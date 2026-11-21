@@ -111,38 +111,22 @@ public final class UmbraIndyBootstrap {
         return Class.forName(owner.replace('/', '.'), true, caller.lookupClass().getClassLoader());
     }
 
-    private static final String LIT_LEGACY_KEY = "io.umbra.cipher.legacy.key.v2";
-    private static final String LIT_LEGACY_NONCE = "io.umbra.cipher.legacy.nonce.v2";
-    private static final String LIT_SITE_KEY = "io.umbra.string.site.key.v1";
-    private static final String LIT_SITE_NONCE = "io.umbra.string.site.nonce.v1";
-    private static final String LIT_CLASS_NONCE = "io.umbra.string.class.nonce.v1";
-    private static final String LIT_AES_IV = "io.umbra.aes.iv.v1";
-
-    private static String TAG_LEGACY_KEY = LIT_LEGACY_KEY;
-    private static String TAG_LEGACY_NONCE = LIT_LEGACY_NONCE;
-    private static String TAG_SITE_KEY = LIT_SITE_KEY;
-    private static String TAG_SITE_NONCE = LIT_SITE_NONCE;
-    private static String TAG_CLASS_NONCE = LIT_CLASS_NONCE;
-    private static String TAG_AES_IV = LIT_AES_IV;
-
-    public static void applyDomainTags(java.util.Map<String, String> tags) {
-        TAG_LEGACY_KEY = pick(tags, LIT_LEGACY_KEY);
-        TAG_LEGACY_NONCE = pick(tags, LIT_LEGACY_NONCE);
-        TAG_SITE_KEY = pick(tags, LIT_SITE_KEY);
-        TAG_SITE_NONCE = pick(tags, LIT_SITE_NONCE);
-        TAG_CLASS_NONCE = pick(tags, LIT_CLASS_NONCE);
-        TAG_AES_IV = pick(tags, LIT_AES_IV);
-    }
-
-    private static String pick(java.util.Map<String, String> tags, String literal) {
-        String value = tags.get(literal);
-        return value == null ? literal : value;
-    }
+    // Domain words. This template is injected without the crypto helper, so it
+    // cannot reference UmbraCrypto; the numbers must stay equal to
+    // UmbraCrypto.K1, K2, K5, K6,
+    // K7 and K8 (CryptoTest round-trips both pairs through
+    // Cipher so the copies cannot drift).
+    private static final int K1 = 1;
+    private static final int K2 = 2;
+    private static final int K5 = 5;
+    private static final int K6 = 6;
+    private static final int K7 = 7;
+    private static final int K8 = 8;
 
     private static String decrypt(String payload, long key) {
         byte[] data = Base64.getDecoder().decode(payload);
-        byte[] derivedKey = sha256(concat(utf8(TAG_LEGACY_KEY), le64(key)));
-        byte[] nonce = first(sha256(concat(utf8(TAG_LEGACY_NONCE), le64(key))), 12);
+        byte[] derivedKey = sha256(concat(le32(K1), le64(key)));
+        byte[] nonce = first(sha256(concat(le32(K2), le64(key))), 12);
         byte[] plain = chacha20(derivedKey, nonce, 1, data);
         try {
             return new String(plain, StandardCharsets.UTF_8);
@@ -207,19 +191,19 @@ public final class UmbraIndyBootstrap {
         if (classKey != null) {
             key = classKey;
         } else {
-            key = sha256(concat(utf8(TAG_SITE_KEY), le64(siteSeed), le32(siteId)));
+            key = sha256(concat(le32(K5), le64(siteSeed), le32(siteId)));
             temporary = true;
         }
         try {
             byte[] nonce;
             if (classKey != null) {
-                nonce = first(sha256(concat(utf8(TAG_CLASS_NONCE), key, le32(siteId))), 12);
+                nonce = first(sha256(concat(le32(K7), key, le32(siteId))), 12);
             } else {
-                nonce = first(sha256(concat(utf8(TAG_SITE_NONCE), le64(siteSeed),
+                nonce = first(sha256(concat(le32(K6), le64(siteSeed),
                         le32(siteId))), 12);
             }
             if (ALG == 2) {
-                byte[] iv = first(sha256(concat(utf8(TAG_AES_IV), key, nonce)), 16);
+                byte[] iv = first(sha256(concat(le32(K8), key, nonce)), 16);
                 return aesCtr(key, iv, ciphertext);
             }
             return chacha20(key, nonce, 1, ciphertext);
@@ -343,10 +327,6 @@ public final class UmbraIndyBootstrap {
             offset += parts[i].length;
         }
         return out;
-    }
-
-    private static byte[] utf8(String value) {
-        return value.getBytes(StandardCharsets.UTF_8);
     }
 
     private static byte[] le32(int value) {

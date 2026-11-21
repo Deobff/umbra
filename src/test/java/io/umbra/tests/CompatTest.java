@@ -515,8 +515,12 @@ public final class CompatTest {
 
         Path out = root.resolve("duplicates-out.jar");
         LayoutReport report = write(pool, out, null, null, null, null);
-        check(report.counts().get("layout.duplicates").longValue() >= 1,
-                "duplicates: layout.duplicates counted (" + report.counts().get("layout.duplicates") + ")");
+        // dup2/Foo.class declares the internal name dup/Foo, so a flat layout can never
+        // load it from there: it is payload data, kept byte-identical instead of being
+        // counted as a duplicate class (a real same-path duplicate still is).
+        check(report.counts().get("layout.preserved.entries").longValue() >= 1,
+                "duplicates: non-loadable duplicate kept as payload ("
+                        + report.counts().get("layout.preserved.entries") + " preserved entries)");
         Map<String, byte[]> entries = readEntries(out);
         int fooEntries = 0;
         for (String name : entries.keySet()) {
@@ -524,7 +528,9 @@ public final class CompatTest {
                 fooEntries++;
             }
         }
-        check(fooEntries == 1, "duplicates: exactly one output entry for the duplicated class");
+        check(fooEntries == 1, "duplicates: exactly one loadable output entry for the duplicated class");
+        check(Arrays.equals(second, entries.get("dup2/Foo.class")),
+                "duplicates: the payload copy is preserved byte-identically");
         check(report.counts().get("layout.preserved.entries") != null,
                 "duplicates: preserved-entry stat present");
         check(UmbraVerifier.verify(out).isEmpty(), "duplicates: verifier clean");
@@ -650,6 +656,15 @@ public final class CompatTest {
         check(Arrays.equals(Files.readAllBytes(first), Files.readAllBytes(second)),
                 "determinism: byte-identical output for identical input+mapping");
         check(UmbraVerifier.verify(first).isEmpty(), "determinism: verifier clean");
+    }
+
+    /**
+     * A class newer than the tool's own target but loadable by the running JVM must
+     * be verified, not silently skipped: {@code Jars.parseClassFile} masks the major
+     * version for ASM and restores it afterwards, so the verifier can link it.
+     */
+    private static boolean ver6bChecked(UmbraVerifier.Report report) {
+        return report.skippedByVersion() == 0 && report.classesVerified() >= 1;
     }
 
     private static void testArchiveEdgeRegressions() throws Exception {
@@ -782,7 +797,10 @@ public final class CompatTest {
         write(pool6, out6, null, null, null, null);
         UmbraVerifier.Report ver6 = UmbraVerifier.verifyDetailed(out6, null);
         check("edge: newer class version is not an error", ver6.ok());
-        check("edge: newer class version counted as skipped", ver6.skippedByVersion() >= 1);
+        // The verifier links any class file the running JVM accepts, so a V17 input
+        // (newer than the tool target, older than the runtime) is verified rather
+        // than skipped.
+        check("edge: class newer than the tool target is verified", ver6bChecked(ver6));
 
         Path atomicTarget = root.resolve("edge-atomic-out.jar");
         ClassPool atomicPool = new ClassPool();

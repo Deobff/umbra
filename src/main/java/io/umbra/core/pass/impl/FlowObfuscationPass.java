@@ -118,7 +118,13 @@ public final class FlowObfuscationPass implements Pass {
         KeyRootMask tableMask = KeyRootMask.create(context, true);
         String tableMode = tableMask == null ? "static" : "native";
         String level = context.config().flow().level().toLowerCase(java.util.Locale.ROOT);
-        boolean normal = "normal".equals(level) || "aggressive".equals(level);
+        // "light" used to fall through every real transform: it produced one
+        // entry guard and a handful of junk instructions per method and nothing
+        // else, so the default preset shipped with almost no flow protection.
+        // Light now runs the real pipeline with a smaller anchor budget instead
+        // of skipping it.
+        boolean normal = "light".equals(level) || "normal".equals(level)
+                || "aggressive".equals(level);
         boolean aggressive = "aggressive".equals(level)
                 || context.config().optionBool("flow.aggressive", false);
         boolean transpose = context.config().optionBool("flow.transpose", aggressive);

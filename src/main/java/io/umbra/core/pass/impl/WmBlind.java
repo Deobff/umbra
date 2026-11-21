@@ -14,7 +14,6 @@ import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
-import java.security.SecureRandom;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -43,14 +42,13 @@ public final class WmBlind {
         byte[] src = text.getBytes(StandardCharsets.UTF_8);
         byte[] key = new byte[32];
         byte[] nonce = new byte[8];
-        if (reproducible) {
-            random.nextBytes(key);
-            random.nextBytes(nonce);
-        } else {
-            SecureRandom secure = new SecureRandom();
-            secure.nextBytes(key);
-            secure.nextBytes(nonce);
-        }
+        // Both paths now draw from the caller's seed-derived Random. The
+        // "fresh randomness per build" behaviour came from an unseeded
+        // SecureRandom, which also broke reproducibility for a pinned seed; a
+        // build only looks different because the CLI draws a new seed unless
+        // --seed pins one.
+        random.nextBytes(key);
+        random.nextBytes(nonce);
         BigInteger iKey = new BigInteger(1, key);
         BigInteger iNonce = new BigInteger(1, nonce);
         byte[] encodedKey = iKey.modPow(exp, mod).toByteArray();

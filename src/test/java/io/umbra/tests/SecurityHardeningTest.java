@@ -11,6 +11,7 @@ import io.umbra.core.util.Log;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.LineNumberNode;
 import org.objectweb.asm.tree.MethodNode;
@@ -57,6 +58,8 @@ import java.util.zip.ZipOutputStream;
 public final class SecurityHardeningTest {
 
     private static int checks;
+    /** Fragments the master seed was reassembled from (1 = still one readable constant). */
+    private static int seedFragments;
     private static Path work;
 
     private SecurityHardeningTest() {
@@ -107,6 +110,8 @@ public final class SecurityHardeningTest {
         Path encrypted = encrypt(dir, input, "shape-enc.jar", null);
         ArchiveView view = ArchiveView.read(encrypted);
 
+        check(seedFragments >= 2, "the master seed is split across loader constants, not one"
+                + " readable LDC (found " + seedFragments + ")");
         check(view.version == 7, "archive index is version 7");
         check(view.binding == 0, "default master binding is sample-bound");
         check(view.level >= 2, "default integrity level is at least 2");
@@ -182,20 +187,27 @@ public final class SecurityHardeningTest {
         ArchiveView a = ArchiveView.read(first);
         ArchiveView b = ArchiveView.read(second);
         check(a.comment != null && b.comment != null, "sample binding writes a ZIP comment");
-        check(!a.comment.equals(b.comment),
-                "two builds of the same input use different random ZIP comments");
-        check(!Arrays.equals(a.master, b.master), "two builds of the same input use different "
-                + "master keys");
+        // ARCHITECTURE.md: a run is reproducible for a given seed. The comment used
+        // to come from an unseeded SecureRandom, so the sample-bound master - and
+        // with it every payload byte - differed between two identical builds. This
+        // block used to *assert* that difference; it now asserts the contract.
+        // That the comment really takes part in the key is proved separately by
+        // testCommentTamperIsFatal and testEntryCountBinding.
+        check(a.comment.equals(b.comment),
+                "two builds with the same seed derive the same ZIP comment");
+        check(Arrays.equals(a.master, b.master),
+                "two builds with the same seed derive the same sample-bound master key");
         check(a.indexEntry.equals(b.indexEntry),
-                "entry names stay deterministic for a seed (only the key changes)");
+                "entry names stay deterministic for a seed");
         byte[] indexA = readZip(first).get(a.indexEntry);
         byte[] indexB = readZip(second).get(b.indexEntry);
-        check(!Arrays.equals(indexA, indexB),
-                "sealed index differs across builds even with deterministic entry naming");
+        check(Arrays.equals(indexA, indexB),
+                "the sealed index is byte-identical for the same seed");
         String classA = firstClassPayload(a);
         String classB = firstClassPayload(b);
-        check(!Arrays.equals(readZip(first).get(classA), readZip(second).get(classB)),
-                "class payload ciphertext differs across builds (master + nonce binding)");
+        check(Arrays.equals(readZip(first).get(classA), readZip(second).get(classB)),
+                "class payload ciphertext is byte-identical for the same seed");
+        check(a.binding == 0, "the archive still advertises sample binding");
 
         Child clean = runJar(java8(), first, null);
         check(clean.exit == 0 && clean.output.contains("MASTER-OK"),
@@ -483,33 +495,30 @@ public final class SecurityHardeningTest {
             if (loaderBytes == null) {
                 throw new IOException("loader entry missing");
             }
-            view.siteSeed = findSiteSeed(loaderBytes);
             byte[] commentBytes = view.comment == null || view.comment.isEmpty()
                     ? null : UmbraCrypto.base64Decode(view.comment);
-            view.master = commentBytes == null
-                    ? UmbraCrypto.masterFromSeed(view.siteSeed)
-                    : UmbraCrypto.masterFromSample(view.siteSeed, commentBytes, view.entries);
-
-            for (Map.Entry<String, byte[]> entry : entries.entrySet()) {
-                String name = entry.getKey();
-                if (name.endsWith(".class") || name.startsWith("META-INF/")) {
-                    continue;
-                }
-                try {
-                    byte[] plain = UmbraCrypto.unseal(entry.getValue(), view.master,
-                            UmbraCrypto.ALG_CHACHA20);
-                    if (plain.length >= 4 && ((plain[0] & 0xFF) == 0x55) && ((plain[1] & 0xFF) == 0x4D)
-                            && ((plain[2] & 0xFF) == 0x42) && ((plain[3] & 0xFF) == 0x32)) {
-                        view.indexEntry = name;
-                        view.indexPlain = plain;
-                        break;
-                    }
-                } catch (Throwable notIndex) {
-
+            // The seed is split across constants, and every permutation of a split
+            // base64 text decodes to the same length, so shape alone cannot tell
+            // which candidate the loader concatenates. Try them all and keep the one
+            // that actually opens the sealed index.
+            List<SeedCandidate> candidates = siteSeedCandidates(loaderBytes);
+            for (SeedCandidate candidate : candidates) {
+                byte[] master = commentBytes == null
+                        ? UmbraCrypto.masterFromSeed(candidate.bytes)
+                        : UmbraCrypto.masterFromSample(candidate.bytes, commentBytes, view.entries);
+                Map.Entry<String, byte[]> opened = openIndex(entries, master);
+                if (opened != null) {
+                    view.siteSeed = candidate.bytes;
+                    view.master = master;
+                    view.indexEntry = opened.getKey();
+                    view.indexPlain = opened.getValue();
+                    seedFragments = candidate.fragments;
+                    break;
                 }
             }
             if (view.indexPlain == null) {
-                throw new IOException("sealed v3 index not found");
+                throw new IOException("sealed v3 index not found after trying "
+                        + candidates.size() + " candidate seed(s)");
             }
             parse(view, entries);
             return view;
@@ -578,9 +587,176 @@ public final class SecurityHardeningTest {
         }
     }
 
-    private static byte[] findSiteSeed(byte[] loaderBytes) throws IOException {
+    /**
+     * Reassembles the archive master seed from the injected loader.
+     *
+     * <p>The build no longer stores the seed as one readable constant: the base64
+     * text is split across the three {@code SITE_SEED_0/1/2} fields and
+     * {@code UmbraClassLoader.siteSeedConstant} concatenates them at run time, so a
+     * single-constant reader finds nothing. That is the point of the split, and
+     * this helper follows the same rule instead of assuming the old shape. It tries
+     * every ordered triple of string constants (field {@code ConstantValue}s first,
+     * then method {@code LDC}s) and returns the one that decodes to a key.</p>
+     */
+    /** One candidate reassembly of the master seed and how many constants it used. */
+    private static final class SeedCandidate {
+        final byte[] bytes;
+        final int fragments;
+
+        SeedCandidate(byte[] bytes, int fragments) {
+            this.bytes = bytes;
+            this.fragments = fragments;
+        }
+    }
+
+    /**
+     * Every way the loader could be rebuilding the master seed from its constants.
+     *
+     * <p>The build splits the base64 seed across the {@code SITE_SEED_0/1/2} fields
+     * and concatenates them at run time, so no single constant holds a key. The
+     * split makes shape ambiguous - any permutation of the pieces decodes to a
+     * 32-byte value - so the caller has to validate candidates against the archive
+     * itself instead of trusting the first one that decodes.</p>
+     */
+    private static List<SeedCandidate> siteSeedCandidates(byte[] loaderBytes) throws IOException {
         ClassNode node = new ClassNode();
         new ClassReader(loaderBytes).accept(node, 0);
+
+        // Fast path: the build writes the split seed into the SITE_SEED_* constant
+        // fields, so those ConstantValues are the fragments. There are only a handful
+        // of them, which keeps the ordering search trivial. Enumerating triples over
+        // every string constant in the loader instead is what made this suite take
+        // minutes: the class carries hundreds of unrelated constants.
+        List<String> fieldFragments = base64Fragments(fieldValues(node), MAX_FRAGMENTS);
+        List<SeedCandidate> candidates = new ArrayList<SeedCandidate>();
+        List<String> seen = new ArrayList<String>();
+        collectCandidates(candidates, seen, fieldFragments);
+        if (!candidates.isEmpty()) {
+            return candidates;
+        }
+
+        // Slow path: some layouts inline the fragments into a builder method rather
+        // than constant fields. Bound the fragment count so this stays linear.
+        List<String> methodFragments = base64Fragments(ldcStrings(node), MAX_FRAGMENTS);
+        collectCandidates(candidates, seen, methodFragments);
+        if (candidates.isEmpty()) {
+            throw new IOException("embedded siteSeed fragments not found in the loader ("
+                    + fieldFragments.size() + " field / " + methodFragments.size()
+                    + " method constant(s) looked like base64 fragments)");
+        }
+        return candidates;
+    }
+
+    /** Upper bound on fragments considered, so the ordering search cannot explode. */
+    private static final int MAX_FRAGMENTS = 12;
+
+    private static List<String> fieldValues(ClassNode node) {
+        List<String> values = new ArrayList<String>();
+        for (FieldNode field : node.fields) {
+            if (field.value instanceof String) {
+                values.add((String) field.value);
+            }
+        }
+        return values;
+    }
+
+    private static List<String> base64Fragments(List<String> constants, int max) {
+        List<String> fragments = new ArrayList<String>();
+        for (String constant : constants) {
+            if (constant == null) {
+                continue;
+            }
+            String text = constant.trim();
+            if (isBase64Fragment(text) && !fragments.contains(text)) {
+                fragments.add(text);
+                if (fragments.size() >= max) {
+                    break;
+                }
+            }
+        }
+        return fragments;
+    }
+
+    /**
+     * A seed fragment: short, and made only of base64 characters. The whole seed is
+     * 44 base64 characters, so a fragment is shorter than that or it is the seed.
+     */
+    private static boolean isBase64Fragment(String text) {
+        if (text == null || text.length() < 8 || text.length() > 44) {
+            return false;
+        }
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            boolean base64 = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+                    || (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=';
+            if (!base64) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Every ordered concatenation of the fragments, longest first. */
+    private static void collectCandidates(List<SeedCandidate> candidates, List<String> seen,
+                                          List<String> fragments) {
+        int count = fragments.size();
+        for (int i = 0; i < count; i++) {
+            for (int j = 0; j < count; j++) {
+                for (int k = 0; k < count; k++) {
+                    if (i == j || j == k || i == k) {
+                        continue;
+                    }
+                    addCandidate(candidates, seen, fragments.get(i) + fragments.get(j)
+                            + fragments.get(k), 3);
+                }
+            }
+        }
+        for (int i = 0; i < count; i++) {
+            for (int j = 0; j < count; j++) {
+                if (i == j) {
+                    continue;
+                }
+                addCandidate(candidates, seen, fragments.get(i) + fragments.get(j), 2);
+            }
+        }
+        for (int i = 0; i < count; i++) {
+            addCandidate(candidates, seen, fragments.get(i), 1);
+        }
+    }
+
+    private static void addCandidate(List<SeedCandidate> candidates, List<String> seen,
+                                     String text, int fragments) {
+        byte[] seed = decodesToKey(text);
+        if (seed == null || seen.contains(text)) {
+            return;
+        }
+        seen.add(text);
+        candidates.add(new SeedCandidate(seed, fragments));
+    }
+
+    /** The sealed index entry this master opens, or null when the key is wrong. */
+    private static Map.Entry<String, byte[]> openIndex(Map<String, byte[]> entries, byte[] master) {
+        for (Map.Entry<String, byte[]> entry : entries.entrySet()) {
+            String name = entry.getKey();
+            if (name.endsWith(".class") || name.startsWith("META-INF/")) {
+                continue;
+            }
+            try {
+                byte[] plain = UmbraCrypto.unseal(entry.getValue(), master,
+                        UmbraCrypto.ALG_CHACHA20);
+                if (plain.length >= 4 && ((plain[0] & 0xFF) == 0x55) && ((plain[1] & 0xFF) == 0x4D)
+                        && ((plain[2] & 0xFF) == 0x42) && ((plain[3] & 0xFF) == 0x32)) {
+                    return new java.util.AbstractMap.SimpleEntry<String, byte[]>(name, plain);
+                }
+            } catch (Throwable notIndex) {
+
+            }
+        }
+        return null;
+    }
+
+    private static List<String> ldcStrings(ClassNode node) {
+        List<String> values = new ArrayList<String>();
         for (MethodNode method : node.methods) {
             if (method.instructions == null) {
                 continue;
@@ -591,20 +767,24 @@ public final class SecurityHardeningTest {
                     continue;
                 }
                 Object constant = ((LdcInsnNode) insn).cst;
-                if (!(constant instanceof String)) {
-                    continue;
-                }
-                try {
-                    byte[] decoded = UmbraCrypto.base64Decode((String) constant);
-                    if (decoded.length == UmbraCrypto.KEY_BYTES) {
-                        return decoded;
-                    }
-                } catch (Throwable notBase64) {
-
+                if (constant instanceof String) {
+                    values.add((String) constant);
                 }
             }
         }
-        throw new IOException("embedded siteSeed constant not found in the loader");
+        return values;
+    }
+
+    private static byte[] decodesToKey(String text) {
+        if (text == null || text.isEmpty() || text.indexOf('@') >= 0) {
+            return null;
+        }
+        try {
+            byte[] decoded = UmbraCrypto.base64Decode(text);
+            return decoded.length == UmbraCrypto.KEY_BYTES ? decoded : null;
+        } catch (Throwable notBase64) {
+            return null;
+        }
     }
 
     private static byte[] decryptPayload(byte[] master, String label, byte[] sealed) {
